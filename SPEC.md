@@ -60,9 +60,72 @@ Tab **Prices** (sku | label | group | size | price | cheese_price | active):
 - `drinks` | Drinks | simple | | 25 | | FALSE
 (`group=box` → SOD/EOD + cheese split; `group=simple` → SOD/EOD only, single price.)
 
-Tab **DailyLog** (date | closed | staff | gcash | total | cash | custom_amount | notes | entry_id | updated_at) — one row per date, upsert by date.
+Tab **DailyLog** (date | closed | staff | gcash | total | cash | custom_amount | notes | entry_id | updated_at | **custom_gcash**) — one row per date, upsert by date. `gcash` is now **computed** (see below), not typed. `custom_gcash` = how much of `custom_amount` was paid by GCash.
 
-Tab **DailyCounts** (date | sku | sod | eod | sold | cheese_qty | regular_qty | amount | entry_id) — N rows per date (one per active sku), rewritten on day upsert. `amount = cheese_qty*cheese_price + regular_qty*price` (or `sold*price` for simple), computed **server-side** at save time (price snapshot — later price edits never corrupt history).
+Tab **DailyCounts** (date | sku | sod | eod | sold | cheese_qty | regular_qty | amount | entry_id | **gcash_qty** | **gcash_cheese_qty** | **gcash_amount**) — N rows per date, rewritten on day upsert, computed **server-side** (price snapshot).
+
+**Four payment/variant buckets per sku** (mirrors the owner's own Sales Calculator: Cheese / GCash / GCash Cheese / Regular). They are mutually exclusive and must sum to `sold`:
+
+| column | meaning | entered? |
+| --- | --- | --- |
+| `cheese_qty` | cheese, paid **cash** | yes |
+| `gcash_qty` | regular, paid **GCash** | yes |
+| `gcash_cheese_qty` | cheese, paid **GCash** | yes |
+| `regular_qty` | regular, paid cash | **derived** = sold − the three above |
+
+```
+amount       = (regular_qty + gcash_qty) * price + (cheese_qty + gcash_cheese_qty) * cheese_price
+gcash_amount = gcash_qty * price + gcash_cheese_qty * cheese_price
+```
+
+Day roll-up: `total = Σ amount + custom_amount`, `gcash = Σ gcash_amount + custom_gcash`, `cash = total − gcash`. So **Cash = Total − GCash still holds**, but GCash is now derived from what was actually entered instead of read off the GCash app. The receipt shows the computed GCash so it can still be reconciled against GCash history.
+
+`group=simple` skus have no cheese: `cheese_qty` and `gcash_cheese_qty` must be 0; only `gcash_qty` splits payment.
+
+Tab **SupplyItems** (item | active | sort) — the picklist for daily peso-per-item supplies. Seeded from the owner's old DailyWeekly Supplies columns: Veggies, Egg, Ginger, Water, Flour, Tissue, Toothpick, Fork, Bag #3, Bag #6, Bag #16, Cheese, Rags, Fare.
+
+Tab **DailySupplies** (date | item | amount | entry_id | updated_at) — pesos spent per item per day; only non-zero items get a row. Rewritten per date on day upsert. **Feeds the cutoff note's `Supplies` line** together with bulk `Expenses` rows of category `Supplies`.
+
+Tab **StockItems** (product | unit | active | sort) — seeded from the owner's Supplies Calculator: Takoyaki Flour (kg), Takoyaki Sauce (gal), Japanese Mayo (kg), Bonito (g), Aonori (g), Togarashi (g).
+
+Tab **StockUsage** (date | product | qty | entry_id | updated_at) — quantity consumed per product per day; only non-zero rows. **Never money** — it never touches the note or any total; it exists to show consumption and flag reordering.
+
+### Stock on hand — deliveries, counts and the reorder warning
+
+A delivery has two faces: money paid, and quantity received. **Money stays in exactly one place — the `Expenses` row — and the quantity rides along on it.** So `Expenses` gains two appended columns:
+
+Tab **Expenses** (… | **stock_product** | **stock_qty**) — optional. A delivery is an ordinary expense row (category `Supplies`, or `Octopus` for octopus so it lands on its own note line) that additionally names what arrived. `amount` is counted once as it always was; `stock_qty` feeds only the stock ledger. Leaving both blank is normal — most expenses aren't tracked stock.
+
+Tab **StockItems** (product | unit | active | sort | **opening_qty** | **opening_date** | **reorder_at**) — `opening_qty`/`opening_date` are the one-time starting baseline; `reorder_at` is the low-stock threshold (0 or blank = no warning).
+
+Tab **StockCounts** (date | product | counted_qty | entry_id | updated_at) — a physical stocktake, which **becomes the new baseline**. This is what stops estimation drift accumulating forever: spoilage, breakage and miscounts are absorbed the next time something is counted, instead of skewing on-hand indefinitely.
+
+On hand is **computed, never stored** (same principle as backlog balances):
+
+```
+baseline   = latest StockCounts row for the product (by date, then updated_at)
+             else { date: opening_date, qty: opening_qty }
+delivered  = Σ Expenses.stock_qty   for the product, date > baseline.date
+used       = Σ StockUsage.qty       for the product, date > baseline.date
+on_hand    = baseline.qty + delivered − used
+low        = reorder_at > 0 && on_hand <= reorder_at
+```
+
+Deliveries and usage are counted **strictly after** the baseline date, so a stocktake is understood as an end-of-day figure that already reflects that day's activity. The UI must say so where a count is entered.
+
+`bootstrap` returns each stock item with `on_hand`, `low`, `baseline_qty`, `baseline_date`, `delivered_since` and `used_since` so the phone can show the figure and explain it without recomputing history it doesn't have.
+
+New action **`saveStockCount`** payload `{date, product, qty, entryId}` → upsert by `entry_id` into StockCounts. Returns `{entry_id, on_hand}`.
+
+`saveExpense` payload gains optional `stockProduct` and `stockQty`; validation: a `stockQty` requires a `stockProduct` that exists in StockItems, and `stockQty` ≥ 0.
+
+UI: the expense form shows an optional "What arrived?" (product + quantity) when the category is one that can carry stock; **More** gets a "Stock on hand" card listing each item with its unit, a low badge, and a "Correct the count" action; the Sales screen shows a single quiet line when anything is at or below its reorder point — never a modal, never blocking the day's entry.
+
+> **Double-counting hazard:** a purchase belongs in exactly one place — small daily buys in DailySupplies, bulk/major purchases in `Expenses` (category `Supplies`). The UI must say so, because both land on the same `Supplies` note line.
+
+### Schema migration (his sheet is already live with data)
+
+`setupSheet()` must be a safe migration, not just a creator: for every tab in SCHEMA it **appends missing header columns to the right** and never reorders, renames or deletes an existing column, and it creates any missing tab. Consequently **all tab readers must map columns by header NAME, not by fixed index** — a sheet created before this change has 9 DailyCounts columns, one created after has 12, and both must read correctly.
 
 Tab **Expenses** (date | category | item | amount | backlog_ref | notes | entry_id | updated_at) — append/upsert by entry_id. Categories: `Supplies`, `Octopus`, `Electric`, `Mama`, `Backlog`, `Other`.
 
@@ -83,12 +146,14 @@ A response key that drifts to camelCase fails **silently**: the PWA reads `undef
 
 Actions (all validate token first):
 - `ping` → `{version}`
-- `bootstrap` → `{settings, prices, backlogs:[{...,paid,balance}], days:[last 45 DailyLog rows], counts:[DailyCounts for those days], expenses:[last 90 days], lastCutoff}`
-- `saveDay` payload `{date, closed, staff, gcash, customAmount, notes, counts:[{sku, sod, eod, cheeseQty}], entryId}` → server computes sold/regular/amounts from Prices, total = Σamounts + customAmount, cash = total − gcash; upserts DailyLog by date, rewrites that date's DailyCounts. Returns computed `{total, cash, lines:[{sku, sold, cheese_qty, regular_qty, amount}]}`. Closed day: counts empty, total 0. Validation: sold ≥ 0 (EOD ≤ SOD), cheeseQty ≤ sold, gcash ≤ total — reject with clear error message otherwise.
+- `bootstrap` → `{settings, prices, supplyItems, stockItems, backlogs:[{...,paid,balance}], days:[last 45 DailyLog rows], counts:[DailyCounts for those days], dailySupplies:[for those days], stockUsage:[for those days], expenses:[last 90 days], lastCutoff}`
+- `saveDay` payload `{date, closed, staff, customAmount, customGcash, notes, counts:[{sku, sod, eod, cheeseQty, gcashQty, gcashCheeseQty}], supplies:[{item, amount}], stock:[{product, qty}], entryId}` → server computes sold, the derived `regular_qty`, per-sku `amount` and `gcash_amount` from Prices, then `total`/`gcash`/`cash` per the roll-up above; upserts DailyLog by date and rewrites that date's DailyCounts, DailySupplies and StockUsage. Returns computed `{total, cash, gcash, supplies_total, lines:[{sku, sold, cheese_qty, gcash_qty, gcash_cheese_qty, regular_qty, amount, gcash_amount}]}`. Closed day: counts/supplies/stock empty, total 0 (supplies and stock are still cleared for that date).
+  Validation, each with a plain-English message: `sod`/`eod`/all quantities ≥ 0; `eod ≤ sod`; `cheeseQty + gcashQty + gcashCheeseQty ≤ sold`; `cheeseQty`/`gcashCheeseQty` = 0 for `group=simple`; `customGcash ≤ customAmount`; supply/stock amounts ≥ 0 and items must exist in SupplyItems/StockItems.
+  **Note:** `gcash` is no longer accepted from the client — it is computed. Ignore it if an old queued payload still carries it, so a phone that queued work before the update cannot write a bogus GCash figure.
 - `saveExpense` payload `{date, category, item, amount, backlogRef, notes, entryId}` → upsert by entry_id. Returns `{entry_id, updated}`.
 - `deleteExpense` payload `{entryId}` → remove row. Returns `{deleted}`.
 - `range` payload `{start, end}` → `{days, counts, expenses}` for the period (same row shapes as `bootstrap`).
-- `cutoff` payload `{start, end, dryRun}` → computes all note figures from DailyLog + Expenses in period; builds note_text in the exact format; if !dryRun upserts into Cutoffs by (start, end). Returns `{figures:{start, end, total, cash, gcash, mama, split, per_partner, supplies, octopus, other, electric}, note_text}`.
+- `cutoff` payload `{start, end, dryRun}` → computes all note figures from DailyLog + Expenses + **DailySupplies** in period; builds note_text in the exact format; if !dryRun upserts into Cutoffs by (start, end). Returns `{figures:{start, end, total, cash, gcash, mama, split, per_partner, supplies, octopus, other, electric}, note_text}`. **`supplies` = Σ Expenses(category=Supplies) + Σ DailySupplies** in the period; the note format and the accounting identity are unchanged (Split still absorbs the difference as the residual).
 
 Row shapes returned by `bootstrap`/`range` mirror the sheet headers exactly: prices `{sku, label, group, size, price, cheese_price, active}`; days `{date, closed, staff, gcash, total, cash, custom_amount, notes, entry_id, updated_at}`; counts `{date, sku, sod, eod, sold, cheese_qty, regular_qty, amount, entry_id}`; expenses `{date, category, item, amount, backlog_ref, notes, entry_id, updated_at}`; backlogs `{name, description, total_amount, start_date, active, paid, balance}`; lastCutoff `{start, end, total, cash, gcash, mama, split, per_partner, supplies, octopus, other, electric, note_text, generated_at}`.
 
@@ -103,7 +168,11 @@ Files in `pwa/`: `index.html` (single-file app: all CSS/JS inline), `sw.js`, `ma
 Self-updating: on `controllerchange` from a new service worker the app reloads itself so a published update lands on the FIRST open, not the second — but it holds the reload while the day is half-entered (`benta.dirty`) or a request is in flight, applying it after the save or on next open. It must never block on a non-empty queue (queued work is persisted and replays after reload; blocking there would strand demo-mode or offline phones on an old build forever).
 
 Screens (bottom tab bar, thumb-reach). Internal ids stay `benta`/`gastos`/`ibapa` (renaming them would break saved data); the visible labels are English:
-1. **Sales** (daily entry, default; panel id `benta`): date header (default today, tappable to backfill); "Closed today" toggle; staff chips; per active box sku a count row: start-of-day stepper, end-of-day stepper, computed "Sold" and cheese qty stepper; custom order amount + note; GCash amount. Live **receipt strip** (signature element): as counts change, line items and TOTAL/Cash/GCash render like a printed receipt; Save button = "Save day". Editing an already-saved day loads its data.
+1. **Sales** (daily entry, default; panel id `benta`): date header (default today, tappable to backfill); "Closed today" toggle; staff chips; then per active box sku a count row: start-of-day stepper, end-of-day stepper, computed "Sold", and **three bucket steppers — Cheese, GCash, GCash Cheese** — with the remainder shown as plain-cash regular. Each row spells out its own arithmetic ("6 regular × ₱50 + 2 cheese × ₱60 + 2 GCash × ₱50 = ₱620") so a stepper never looks like it did nothing. Then custom order amount **+ how much of it was GCash** + note. **No typed GCash total** — it is computed and shown on the receipt for reconciling against GCash history.
+   Below that, two collapsible cards saved with the same "Save day" action:
+   - **Supplies bought today** — the SupplyItems picklist, peso amount each, with a running total. Hint: bulk purchases go under Expenses instead, so nothing is counted twice.
+   - **Stock used today** — StockItems with a quantity each and its unit. Explicitly labelled as not money.
+   Live **receipt strip** (signature element): line items, then TOTAL / Cash / GCash; Save button = "Save day". Editing an already-saved day loads all of it back, including supplies and stock.
 2. **Expenses** (panel id `gastos`): list grouped by date for current cutoff; add form: category chips (Supplies / Octopus / Electric / Mama / Backlog / Other — these are stored values, never translated), item, amount, backlog picker when category=Backlog (shows balances), date defaults today. Tap to delete own entries.
 3. **Cutoff**: period picker (defaults to current cutoff; prev/next arrows); live preview computed from local data: Total/Cash/GCash + expense category sums + Split (per partner); pre-fills Mama & Electric from settings as suggested expenses if none logged (one-tap "add ₱500"); **Generate cutoff note** → calls API `cutoff`, shows exact note text with **Copy** and **Share** (Web Share API) buttons.
 4. **More** (panel id `ibapa`): backlogs with computed balances and a "Total remaining" line; sync status + pending queue count + "Sync now"; API setup (URL + token fields, "Test connection"); staff list comes from settings; version; link to open the Google Sheet.
