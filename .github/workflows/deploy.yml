@@ -1,0 +1,105 @@
+name: Deploy
+
+# Publishes the phone app to GitHub Pages on every push to main, and (if the
+# clasp secret is configured) pushes the Apps Script and republishes the SAME
+# web app deployment so the API URL and token never change.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Guard: never publish an app whose maths is broken.
+  # ---------------------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run backend + contract suites
+        working-directory: tests
+        run: node run-all.js
+
+  # ---------------------------------------------------------------------------
+  # The phone app -> GitHub Pages. Only pwa/ is published; the sheet script,
+  # tests and docs stay out of the public site.
+  # ---------------------------------------------------------------------------
+  deploy-app:
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: pwa
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  # ---------------------------------------------------------------------------
+  # The sheet script -> Apps Script. Skipped automatically until CLASPRC_JSON
+  # and SCRIPT_ID secrets exist, so the app still deploys without them.
+  # ---------------------------------------------------------------------------
+  deploy-script:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check for credentials
+        id: check
+        run: |
+          if [ -n "${{ secrets.CLASPRC_JSON }}" ] && [ -n "${{ secrets.SCRIPT_ID }}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Apps Script auto-deploy is off. Add CLASPRC_JSON and SCRIPT_ID secrets to enable it (see SETUP.md)."
+          fi
+
+      - if: steps.check.outputs.ready == 'true'
+        run: npm install -g @google/clasp@2.4.2
+
+      - name: Authenticate clasp
+        if: steps.check.outputs.ready == 'true'
+        run: echo '${{ secrets.CLASPRC_JSON }}' > ~/.clasprc.json
+
+      - name: Push code to the Apps Script project
+        if: steps.check.outputs.ready == 'true'
+        working-directory: apps-script
+        run: |
+          cat > .clasp.json <<EOF
+          { "scriptId": "${{ secrets.SCRIPT_ID }}", "rootDir": "." }
+          EOF
+          clasp push --force
+
+      # Redeploying the EXISTING deployment id keeps the /exec URL stable, so
+      # no phone has to be touched. Without DEPLOYMENT_ID the code is pushed
+      # but stays unpublished — deliberate, so a missing id can never mint a
+      # new URL and silently strand the phones on the old API.
+      - name: Republish the same deployment
+        if: steps.check.outputs.ready == 'true'
+        working-directory: apps-script
+        run: |
+          if [ -n "${{ secrets.DEPLOYMENT_ID }}" ]; then
+            clasp deploy --deploymentId "${{ secrets.DEPLOYMENT_ID }}" --description "auto ${GITHUB_SHA::7}"
+          else
+            echo "::warning::Code pushed but NOT published — add the DEPLOYMENT_ID secret so the live URL updates."
+          fi

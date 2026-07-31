@@ -181,6 +181,8 @@ select.input{ appearance:auto; }
 .sold-badge{ font-size:16px; }
 .sold-badge b{ font-family:var(--display); font-size:22px; font-weight:800; color:var(--ok); font-variant-numeric:tabular-nums; }
 .sold-badge.neg b{ color:var(--alert); }
+.sku-split{ margin-top:10px; padding-top:10px; border-top:1px dashed var(--line);
+  font-size:14px; color:var(--muted); font-variant-numeric:tabular-nums; }
 .cheese-cell{ display:flex; align-items:center; gap:8px; }
 .cheese-cell > span{ font-weight:600; font-size:14px; color:var(--muted); }
 .cheese-cell .stepper{ width:172px; grid-template-columns:48px 1fr 48px; }
@@ -362,7 +364,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '2.0.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -406,16 +408,32 @@ function freshConfig(){ return { apiUrl:'', token:'', sheetUrl:'' }; }
    whole state: merge whatever survives over a COMPLETE default, coerce
    every field to the type the app expects, and drop what is malformed.
    The app must always boot into a usable screen.
+
+   KEY CASING AT THE API SEAM. What we SEND is camelCase (cheeseQty,
+   customAmount, entryId, backlogRef — the documented request shape); what we
+   STORE and what the server SENDS BACK is snake_case (cheese_price,
+   cheese_qty, custom_amount, entry_id, backlog_ref, total_amount, …).
+   Every normalizer below reads the snake_case key first and falls back to the
+   camelCase spelling, so a phone on new code talking to an older still-
+   deployed Apps Script cannot silently read a price or a balance as 0.
    ------------------------------------------------------------ */
+// Prefer the snake_case key; fall back to the legacy camelCase one when the
+// snake_case value is absent or blank. A real 0 or false still wins.
+function pick(o, snake, camel){
+  const v = o[snake];
+  return (v === undefined || v === null || v === '') ? o[camel] : v;
+}
+
 function normPrice(p){
   if (!isObj(p) || !txt(p.sku)) return null;
+  const cheese = pick(p, 'cheese_price', 'cheesePrice');
   return {
     sku: txt(p.sku),
     label: txt(p.label) || txt(p.sku),
     group: p.group === 'box' ? 'box' : 'simple',
     size: (p.size == null || typeof p.size === 'object') ? '' : p.size,
     price: num(p.price),
-    cheese_price: (p.cheese_price === '' || p.cheese_price == null) ? '' : num(p.cheese_price),
+    cheese_price: (cheese === '' || cheese == null) ? '' : num(cheese),
     active: truthy(p.active)
   };
 }
@@ -423,7 +441,8 @@ function normBacklog(b){
   if (!isObj(b) || !txt(b.name)) return null;
   const o = {
     name: txt(b.name), description: txt(b.description),
-    total_amount: num(b.total_amount), start_date: txt(b.start_date),
+    total_amount: num(pick(b, 'total_amount', 'totalAmount')),
+    start_date: txt(pick(b, 'start_date', 'startDate')),
     active: truthy(b.active)
   };
   // Only carry a server-supplied balance when there really is one —
@@ -439,8 +458,9 @@ function normDay(r, key){
   return {
     date, closed: truthy(r.closed), staff: txt(r.staff),
     gcash: num(r.gcash), total: num(r.total), cash: num(r.cash),
-    custom_amount: num(r.custom_amount), notes: txt(r.notes),
-    entry_id: txt(r.entry_id), updated_at: txt(r.updated_at)
+    custom_amount: num(pick(r, 'custom_amount', 'customAmount')), notes: txt(r.notes),
+    entry_id: txt(pick(r, 'entry_id', 'entryId')),
+    updated_at: txt(pick(r, 'updated_at', 'updatedAt'))
   };
 }
 function normCount(c, key){
@@ -449,8 +469,9 @@ function normCount(c, key){
   if (!date) return null;
   return {
     date, sku: txt(c.sku), sod: num(c.sod), eod: num(c.eod), sold: num(c.sold),
-    cheese_qty: num(c.cheese_qty), regular_qty: num(c.regular_qty),
-    amount: num(c.amount), entry_id: txt(c.entry_id)
+    cheese_qty: num(pick(c, 'cheese_qty', 'cheeseQty')),
+    regular_qty: num(pick(c, 'regular_qty', 'regularQty')),
+    amount: num(c.amount), entry_id: txt(pick(c, 'entry_id', 'entryId'))
   };
 }
 // The six stored expense categories. Anything else (a typo in the sheet, a
@@ -461,12 +482,13 @@ function normCategory(v){ const c = txt(v).trim(); return EXPENSE_CATS.indexOf(c
 
 function normExpense(e, key){
   if (!isObj(e)) return null;
-  const id = txt(e.entry_id) || txt(e.entryId) || txt(key);
+  const id = txt(pick(e, 'entry_id', 'entryId')) || txt(key);
   if (!id || !isDateStr(e.date)) return null;
   return {
     date: txt(e.date), category: normCategory(e.category), item: txt(e.item),
-    amount: num(e.amount), backlog_ref: txt(e.backlog_ref), notes: txt(e.notes),
-    entry_id: id, updated_at: txt(e.updated_at)
+    amount: num(e.amount), backlog_ref: txt(pick(e, 'backlog_ref', 'backlogRef')),
+    notes: txt(e.notes),
+    entry_id: id, updated_at: txt(pick(e, 'updated_at', 'updatedAt'))
   };
 }
 
@@ -628,6 +650,9 @@ function staffList(){ return txt(asObj(state.settings).staff || 'Mama').split(',
    cutoff figures. Prices come from the local mirror; the server
    recomputes authoritatively at save time.
    ============================================================ */
+// `p` is a REQUEST-shaped payload — the same camelCase object we POST as
+// saveDay (counts[].cheeseQty, customAmount). Prices read off state.prices are
+// the stored snake_case shape (cheese_price). Both spellings appear on purpose.
 function computeDay(p){
   const lines = [];
   let sum = 0;
@@ -898,6 +923,9 @@ async function drainQueue(){
   if (activeTab === 'ibapa') renderIbapa();
 }
 
+// The saveDay RESPONSE is snake_case (same shape we store); older deployments
+// sent camelCase, so read both — otherwise the server's authoritative cheese
+// split would land as 0 on top of a perfectly good local row.
 function applyServerDay(p, data){
   const day = asObj(state.days)[p.date];
   if (!day) return;
@@ -905,8 +933,14 @@ function applyServerDay(p, data){
   if (Array.isArray(data.lines)){
     const rows = asArr(asObj(state.counts)[p.date]);
     for (const l of data.lines){
+      if (!isObj(l)) continue;
       const r = rows.find(x => x.sku === l.sku);
-      if (r){ r.sold = num(l.sold); r.cheese_qty = num(l.cheeseQty); r.regular_qty = num(l.regularQty); r.amount = num(l.amount); }
+      if (r){
+        r.sold = num(l.sold);
+        r.cheese_qty = num(pick(l, 'cheese_qty', 'cheeseQty'));
+        r.regular_qty = num(pick(l, 'regular_qty', 'regularQty'));
+        r.amount = num(l.amount);
+      }
     }
   }
   persistState();
@@ -1093,6 +1127,22 @@ function bentaSkuList(){
 }
 
 // A sku is sheet data: it can contain quotes, angle brackets, anything.
+// Plain-English breakdown of one sku row: how the boxes that sold split between
+// the regular and the cheese price, and what that row is worth. Cheese is taken
+// OUT of sold (same container, dearer filling), so raising it adds only the
+// difference between the two prices — this line makes that visible.
+function skuSplitText(pr, row){
+  const sold = Math.max(0, num(row.sod) - num(row.eod));
+  if (!sold) return 'Enter the start and end counts to see the total.';
+  const cheese = Math.min(Math.max(0, num(row.cheese)), sold);
+  const regular = sold - cheese;
+  const amount = regular * num(pr.price) + cheese * num(pr.cheese_price);
+  const parts = [];
+  if (regular) parts.push(regular + ' regular × ' + peso(pr.price));
+  if (cheese) parts.push(cheese + ' cheese × ' + peso(pr.cheese_price));
+  return parts.join('  +  ') + '  =  ' + peso(amount);
+}
+
 // Every place it lands in markup — attributes and ids alike — must be
 // escaped, or the tag breaks apart and the steppers stop working.
 function stepperHTML(sku, field, value, label, small){
@@ -1168,6 +1218,10 @@ function renderBenta(){
             ? '<div class="cheese-cell"><span id="cheeselbl-' + sk + '">Cheese</span>' + stepperHTML(pr.sku, 'cheese', num(row.cheese), 'Cheese sold, ' + pr.label) + '</div>'
             : '') +
         '</div>' +
+        // Cheese is a SUBSET of what sold, not an extra sale: raising it moves a
+        // box from the regular price to the cheese price. Spelling the split out
+        // per row stops that reading as "the cheese button doesn't add anything".
+        (isBox ? '<div class="sku-split" id="split-' + sk + '">' + skuSplitText(pr, row) + '</div>' : '') +
         '<p class="err" id="err-sku-' + sk + '" hidden></p>' +
       '</div>';
     }
@@ -1264,6 +1318,11 @@ function validateBentaLive(){
     else { el.hidden = true; }
     const badge = $('soldbadge-' + r.sku);
     if (badge) badge.classList.toggle('neg', num(r.sod) - num(r.eod) < 0);
+    const split = $('split-' + r.sku);
+    if (split){
+      const pr = asArr(state.prices).find(p => p.sku === r.sku);
+      if (pr) split.textContent = skuSplitText(pr, r);
+    }
   }
   const g = $('err-gcash');
   if (g){
@@ -1300,7 +1359,10 @@ function saveBenta(){
     renderBenta();
     toast('Saved ' + fmtShort(savedDate) + '.');
   });
-  drainQueue();
+  drainQueue().then(() => {
+    // The day is safely away — a held-back update can go in now.
+    if (typeof applyUpdateIfSafe === 'function') applyUpdateIfSafe();
+  });
 }
 
 function prefersReduced(){ return window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
@@ -1547,8 +1609,11 @@ async function generateNote(){
         renderCutoff(); // restores the Generate button
         return;
       }
+      // Request keys stay camelCase (dryRun); the reply is snake_case
+      // (note_text) — older deployments answered noteText, so accept both.
       const data = await api('cutoff', { start:per.start, end:per.end, dryRun:false });
-      lastNote = { key:periodKey(per), text:(data && data.noteText) || buildNote(computeCutoff(per), per), demo:false };
+      const served = isObj(data) ? txt(pick(data, 'note_text', 'noteText')) : '';
+      lastNote = { key:periodKey(per), text: served || buildNote(computeCutoff(per), per), demo:false };
       renderCutoff();
       return;
     }catch(err){
@@ -1794,6 +1859,8 @@ function onAppResume(){
   if (di) di.max = t;
   renderPanel(activeTab);
   drainQueue();
+  // Reopening the app is the safest moment to swap in a downloaded update.
+  if (typeof applyUpdateIfSafe === 'function') applyUpdateIfSafe();
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') onAppResume(); });
 window.addEventListener('pageshow', () => { onAppResume(); });
@@ -1822,9 +1889,48 @@ showTab('benta');
   await doBootstrap();
 })();
 
+/* ============================================================
+   Self-updating. The service worker caches the app so it runs offline, which
+   means a freshly uploaded version would otherwise only appear on the SECOND
+   open: the first open quietly downloads it, the second renders it. Nobody
+   should have to know that. So when a new version takes over we reload for
+   them — but only at a moment where nothing can be lost.
+   ============================================================ */
+let updateWaiting = false;
+let reloadingForUpdate = false;
+
+// sw.js uses clientsClaim, so on a FIRST install controllerchange also fires
+// when the brand-new worker claims this uncontrolled page — reloading for that
+// would be a pointless flash. So skip exactly that one initial claim, and treat
+// every later controllerchange as a real new version. (If a worker was already
+// driving the page at load — the normal case once installed — there is no
+// initial claim to skip and the very next change is an update.)
+let sawInitialClaim = !!(navigator.serviceWorker && navigator.serviceWorker.controller);
+
+// Never reload while the day is half-entered or work is still unsent; hold the
+// update until it is safe (after a save, or the next time the app is opened).
+function applyUpdateIfSafe(){
+  if (!updateWaiting || reloadingForUpdate) return;
+  if (typeof benta === 'object' && benta && benta.dirty) return;      // half-typed day
+  if (typeof syncing !== 'undefined' && syncing) return;              // request in flight
+  // NOT blocked by a non-empty queue: queued mutations live in localStorage and
+  // replay after the reload. Blocking on them would strand the app on an old
+  // version forever in demo mode, or whenever the server is unreachable.
+  reloadingForUpdate = true;   // one reload per page load — never a loop
+  updateWaiting = false;
+  location.reload();
+}
+
 if ('serviceWorker' in navigator){
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('./sw.js').catch(() => { /* file:// or unsupported — app still works */ });
+  });
+  // Fires once a newly installed worker claims this page (sw.js does
+  // skipWaiting + clientsClaim), i.e. the new files are cached and ready.
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!sawInitialClaim){ sawInitialClaim = true; return; }  // first install, not an update
+    updateWaiting = true;
+    applyUpdateIfSafe();
   });
 }
 </script>
