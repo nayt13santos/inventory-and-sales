@@ -1,0 +1,1832 @@
+<!doctype html>
+<html lang="en-PH">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Octogo Tracker</title>
+<meta name="description" content="Daily sales and expenses tracker for Octogo Takoyaki.">
+<meta name="theme-color" content="#C25E0A">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Octogo">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;600;700;800&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   Octogo Tracker — styles
+   Palette: rice-paper / soy ink / takoyaki-sauce / deep sear /
+   nori / GCash blue / alert. Type: Baloo 2 display + system body.
+   ============================================================ */
+:root{
+  --bg:#FBF8F2;
+  --ink:#2B1D12;
+  --accent:#C25E0A;
+  --deep:#8F3D0C;
+  --ok:#3E5C3A;
+  --gcash:#1B6DE0;
+  --alert:#B3402E;
+  --paper:#FFFFFF;
+  --line:#E8DFD0;
+  --soft:#F3ECDF;
+  --muted:#7A6A58;
+  --radius:16px;
+  --display:'Baloo 2', ui-rounded, 'Hiragino Maru Gothic ProN', system-ui, sans-serif;
+  --body:system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+}
+*{ box-sizing:border-box; margin:0; padding:0; }
+html{ -webkit-text-size-adjust:100%; }
+body{
+  background:var(--bg); color:var(--ink);
+  font-family:var(--body); font-size:17px; line-height:1.45;
+  min-height:100vh;
+  padding-bottom:calc(84px + env(safe-area-inset-bottom));
+}
+:focus-visible{ outline:3px solid var(--ink); outline-offset:2px; border-radius:6px; }
+button{ font:inherit; color:inherit; }
+[hidden]{ display:none !important; }
+
+/* Header */
+.app-header{
+  position:sticky; top:0; z-index:20;
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  padding:calc(10px + env(safe-area-inset-top)) 16px 10px;
+  background:var(--bg); border-bottom:1px solid var(--line);
+}
+.brand-lockup{ display:flex; align-items:center; gap:10px; min-width:0; }
+.brand-mark{ width:40px; height:34px; object-fit:contain; flex:none; }
+.brand{ font-family:var(--display); font-weight:800; font-size:22px; color:var(--deep); line-height:1.1; }
+.brand small{ display:block; font-family:var(--body); font-weight:600; font-size:12px; color:var(--muted); letter-spacing:.04em; }
+.pill{
+  font-family:var(--display); font-weight:700; font-size:14px;
+  padding:7px 14px; border-radius:999px; white-space:nowrap;
+}
+.pill.ok{ background:var(--ok); color:#fff; }
+.pill.pending{ background:var(--accent); color:#fff; }
+.pill.off, .pill.demo{ background:var(--soft); color:var(--muted); }
+
+/* Demo banner */
+.banner{
+  background:#F6E7CF; color:var(--deep);
+  padding:10px 16px; font-size:15px; text-align:center;
+  border-bottom:1px solid var(--line);
+}
+.banner button{
+  background:none; border:none; text-decoration:underline; font-weight:700;
+  color:var(--deep); cursor:pointer; min-height:48px; padding:0 6px;
+}
+
+/* Layout */
+main{ max-width:560px; margin:0 auto; padding:16px 16px 8px; }
+.card{
+  background:var(--paper); border:1px solid var(--line);
+  border-radius:var(--radius); padding:16px; margin-bottom:14px;
+}
+.section-title{ font-family:var(--display); font-weight:700; font-size:18px; margin:20px 0 10px; }
+.hint{ color:var(--muted); font-size:14px; }
+.err{ color:var(--alert); font-weight:600; font-size:15px; margin-top:8px; }
+.ok-note{ color:var(--ok); font-weight:600; font-size:15px; }
+
+/* Buttons & chips (48px+ touch targets everywhere) */
+.btn{
+  display:flex; align-items:center; justify-content:center; gap:8px;
+  min-height:52px; padding:8px 18px; border-radius:14px;
+  border:1.5px solid var(--line); background:var(--paper); color:var(--ink);
+  font-family:var(--display); font-weight:700; font-size:18px; cursor:pointer;
+}
+.btn:active{ background:var(--soft); }
+.btn.primary{ background:var(--accent); border-color:var(--accent); color:#fff; }
+.btn.primary:active{ background:var(--deep); border-color:var(--deep); }
+.btn.primary:disabled{ opacity:.55; }
+.btn.block{ width:100%; }
+.btn.small{ min-height:48px; font-size:16px; padding:6px 14px; }
+.icon-btn{
+  width:48px; height:48px; flex:none; display:flex; align-items:center; justify-content:center;
+  border:none; background:none; border-radius:12px; cursor:pointer; color:var(--muted);
+}
+.icon-btn:active{ background:var(--soft); }
+.chips{ display:flex; flex-wrap:wrap; gap:8px; }
+.chip{
+  min-height:48px; padding:10px 18px; border-radius:999px;
+  border:1.5px solid var(--line); background:var(--paper);
+  font-family:var(--display); font-weight:600; font-size:16px; cursor:pointer;
+}
+.chip[aria-pressed="true"]{ background:var(--accent); border-color:var(--accent); color:#fff; }
+
+/* Fields */
+.field{ margin-bottom:14px; }
+.field:last-child{ margin-bottom:0; }
+.field > label{ display:block; font-weight:600; font-size:15px; margin-bottom:6px; }
+.input{
+  width:100%; min-height:52px; padding:10px 14px; font-size:18px;
+  border:1.5px solid var(--line); border-radius:12px;
+  background:var(--paper); color:var(--ink); font-family:var(--body);
+  font-variant-numeric:tabular-nums;
+}
+.input.money{ font-family:var(--display); font-weight:700; font-size:20px; }
+.input.gcash-in{ color:var(--gcash); }
+select.input{ appearance:auto; }
+
+/* Date card (tap anywhere to open the native picker) */
+.date-card{ position:relative; display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.date-card:focus-within{ outline:3px solid var(--ink); outline-offset:2px; }
+.date-kicker{ font-family:var(--display); font-weight:700; font-size:14px; color:var(--accent); text-transform:uppercase; letter-spacing:.08em; }
+.date-kicker.backfill{ color:var(--gcash); }
+.date-big{ font-family:var(--display); font-weight:800; font-size:24px; line-height:1.15; }
+.date-hint{ font-size:13px; color:var(--muted); margin-top:2px; }
+.date-cover{ position:absolute; inset:0; width:100%; height:100%; opacity:0; border:0; font-size:18px; }
+.cal-ico{ flex:none; color:var(--accent); }
+
+/* Closed-day switch */
+.switch-row{ display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:56px; }
+.switch-row .sw-label{ font-family:var(--display); font-weight:700; font-size:18px; }
+.switch-row .sw-sub{ font-size:14px; color:var(--muted); }
+.switch{ position:relative; width:68px; height:40px; flex:none; }
+.switch input{ position:absolute; inset:0; width:100%; height:100%; opacity:0; margin:0; cursor:pointer; }
+.switch .track{ position:absolute; inset:0; background:var(--line); border-radius:999px; transition:background .15s; pointer-events:none; }
+.switch .knob{
+  position:absolute; top:5px; left:5px; width:30px; height:30px; border-radius:50%;
+  background:#fff; box-shadow:0 1px 3px rgba(43,29,18,.35); transition:transform .15s; pointer-events:none;
+}
+.switch input:checked + .track{ background:var(--deep); }
+.switch input:checked ~ .knob{ transform:translateX(28px); }
+.switch input:focus-visible + .track{ outline:3px solid var(--ink); outline-offset:2px; }
+@media (prefers-reduced-motion: reduce){ .switch .track, .switch .knob{ transition:none; } }
+
+/* Steppers — giant +/− buttons */
+.stepper{ display:grid; grid-template-columns:52px 1fr 52px; gap:6px; align-items:center; }
+.step-btn{
+  width:52px; height:52px; border-radius:14px; cursor:pointer;
+  border:1.5px solid var(--line); background:var(--bg);
+  font-family:var(--display); font-size:28px; font-weight:700; color:var(--deep); line-height:1;
+}
+.step-btn:active{ background:var(--deep); border-color:var(--deep); color:#fff; }
+.step-val{
+  width:100%; height:52px; min-width:0; text-align:center;
+  font-family:var(--display); font-size:22px; font-weight:700;
+  border:1.5px solid var(--line); border-radius:12px; background:var(--paper);
+  color:var(--ink); font-variant-numeric:tabular-nums;
+}
+
+/* Sales count cards */
+.sku-head{ display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin-bottom:12px; }
+.sku-head strong{ font-family:var(--display); font-weight:800; font-size:20px; }
+.sku-price{ font-size:14px; color:var(--muted); font-variant-numeric:tabular-nums; }
+.count-grid{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.count-cell > label{ display:block; font-weight:600; font-size:14px; color:var(--muted); margin-bottom:6px; }
+.sold-row{ display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-top:12px; }
+.sold-badge{ font-size:16px; }
+.sold-badge b{ font-family:var(--display); font-size:22px; font-weight:800; color:var(--ok); font-variant-numeric:tabular-nums; }
+.sold-badge.neg b{ color:var(--alert); }
+.cheese-cell{ display:flex; align-items:center; gap:8px; }
+.cheese-cell > span{ font-weight:600; font-size:14px; color:var(--muted); }
+.cheese-cell .stepper{ width:172px; grid-template-columns:48px 1fr 48px; }
+.cheese-cell .step-btn{ width:48px; height:48px; }
+.cheese-cell .step-val{ height:48px; font-size:18px; }
+.saved-hint{ color:var(--ok); font-weight:600; font-size:15px; margin:-6px 0 14px; }
+
+/* Receipt strip — the signature element */
+.receipt-wrap{ margin:20px 0 8px; filter:drop-shadow(0 4px 8px rgba(43,29,18,.14)); }
+.receipt{ background:var(--paper); padding:18px 18px 10px; border-radius:8px 8px 0 0; font-variant-numeric:tabular-nums; }
+.r-brand{ text-align:center; font-family:var(--display); font-weight:800; font-size:15px; letter-spacing:.14em; color:var(--deep); text-transform:uppercase; }
+.r-date{ text-align:center; font-size:13px; color:var(--muted); margin:2px 0 10px; }
+.r-line{ display:flex; justify-content:space-between; gap:12px; padding:3px 0; font-size:16px; }
+.r-line .r-amt{ white-space:nowrap; }
+.r-sep{ border-top:2px dashed var(--line); margin:10px 0; }
+.r-total{ display:flex; justify-content:space-between; align-items:baseline; font-family:var(--display); font-weight:800; }
+.r-total .lbl{ font-size:17px; letter-spacing:.1em; }
+.r-total .amt{ font-size:42px; line-height:1.1; }
+.r-sub{ display:flex; justify-content:space-between; font-size:16px; padding:2px 0; }
+.r-sub.gcash .r-amt{ color:var(--gcash); font-weight:700; }
+.r-empty{ text-align:center; color:var(--muted); font-size:15px; padding:8px 0 12px; }
+.r-closed{ text-align:center; font-family:var(--display); font-weight:800; font-size:22px; color:var(--alert); padding:10px 0 14px; letter-spacing:.06em; }
+.r-tear{
+  height:11px;
+  background:
+    linear-gradient(45deg, var(--paper) 8px, transparent 0),
+    linear-gradient(-45deg, var(--paper) 8px, transparent 0);
+  background-size:16px 16px; background-repeat:repeat-x;
+}
+@keyframes tearoff{
+  0%{ transform:none; opacity:1; }
+  30%{ transform:translateY(4px) rotate(.6deg); }
+  100%{ transform:translateY(34px) rotate(2.5deg); opacity:0; }
+}
+.receipt-wrap.tearing{ animation:tearoff .45s ease-in forwards; }
+@media (prefers-reduced-motion: reduce){ .receipt-wrap.tearing{ animation:none; } }
+
+/* Expenses list */
+.gx-group{ margin-bottom:16px; }
+.gx-group-head{ display:flex; justify-content:space-between; align-items:baseline; padding:0 4px 6px; }
+.gx-group-head .d{ font-family:var(--display); font-weight:700; font-size:16px; }
+.gx-group-head .t{ font-family:var(--display); font-weight:700; color:var(--deep); font-variant-numeric:tabular-nums; }
+.gx-item{
+  display:flex; align-items:center; gap:10px;
+  background:var(--paper); border:1px solid var(--line); border-radius:14px;
+  padding:10px 6px 10px 14px; margin-bottom:8px;
+}
+.gx-cat{
+  flex:none; font-family:var(--display); font-weight:700; font-size:12px;
+  background:var(--soft); color:var(--deep); border-radius:8px; padding:4px 8px;
+  text-transform:uppercase; letter-spacing:.04em;
+}
+.gx-main{ flex:1; min-width:0; }
+.gx-name{ font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.gx-ref{ font-size:13px; color:var(--muted); }
+.gx-amt{ font-family:var(--display); font-weight:800; font-size:18px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+
+/* Cutoff */
+.period-nav{ display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.period-nav .p-label{ font-family:var(--display); font-weight:800; font-size:20px; text-align:center; flex:1; }
+.period-nav .p-sub{ display:block; font-family:var(--body); font-weight:600; font-size:13px; color:var(--muted); }
+.nav-btn{
+  width:52px; height:52px; flex:none; border-radius:14px; cursor:pointer;
+  border:1.5px solid var(--line); background:var(--bg);
+  font-family:var(--display); font-size:24px; font-weight:700; color:var(--deep);
+}
+.nav-btn:active{ background:var(--soft); }
+.co-row{ display:flex; justify-content:space-between; gap:12px; padding:5px 0; font-size:17px; font-variant-numeric:tabular-nums; }
+.co-row .v{ font-weight:700; white-space:nowrap; }
+.co-row.big{ font-family:var(--display); font-weight:800; align-items:baseline; }
+.co-row.big .v{ font-size:34px; }
+.co-row.gcash .v{ color:var(--gcash); }
+.co-row.split .v{ color:var(--ok); }
+.co-row.split.neg .v{ color:var(--alert); }
+.co-sub{ text-align:right; font-size:14px; color:var(--muted); margin-top:-4px; }
+.note-pre{
+  white-space:pre-wrap; word-break:break-word;
+  font-family:ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size:15px; line-height:1.6;
+  background:var(--paper); border:1.5px dashed var(--line); border-radius:12px; padding:14px; margin-bottom:12px;
+}
+.btn-row{ display:flex; gap:10px; }
+.btn-row .btn{ flex:1; }
+
+/* More tab */
+.kv{ display:flex; justify-content:space-between; gap:12px; padding:6px 0; }
+.kv .k{ color:var(--muted); }
+.kv .v{ font-weight:600; text-align:right; word-break:break-word; }
+.bl-total{ display:flex; justify-content:space-between; align-items:baseline; gap:10px;
+  padding-bottom:10px; margin-bottom:4px; border-bottom:2px solid var(--ink); }
+.bl-total span{ font-weight:700; }
+.bl-total strong{ font-family:var(--display); font-size:24px; font-variant-numeric:tabular-nums; }
+.bl-item{ padding:10px 0; border-bottom:1px solid var(--line); }
+.bl-item:last-child{ border-bottom:none; }
+.bl-top{ display:flex; justify-content:space-between; gap:10px; align-items:baseline; }
+.bl-name{ font-weight:700; }
+.bl-bal{ font-family:var(--display); font-weight:800; color:var(--deep); font-variant-numeric:tabular-nums; }
+.bl-meter{ height:8px; border-radius:99px; background:var(--soft); margin-top:8px; overflow:hidden; }
+.bl-meter i{ display:block; height:100%; background:var(--ok); border-radius:99px; }
+.bl-sub{ font-size:13px; color:var(--muted); margin-top:4px; }
+
+/* Tab bar */
+.tabbar{
+  position:fixed; left:0; right:0; bottom:0; z-index:30;
+  display:grid; grid-template-columns:repeat(4,1fr);
+  background:var(--paper); border-top:1px solid var(--line);
+  padding-bottom:env(safe-area-inset-bottom);
+}
+.tab{
+  min-height:64px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px;
+  background:none; border:none; cursor:pointer;
+  color:var(--muted); font-family:var(--display); font-weight:700; font-size:13px;
+}
+.tab[aria-selected="true"]{ color:var(--accent); }
+.tab svg{ width:24px; height:24px; }
+
+/* Toast */
+#toast{
+  position:fixed; left:50%; transform:translateX(-50%);
+  bottom:calc(92px + env(safe-area-inset-bottom));
+  background:var(--ink); color:var(--bg);
+  padding:12px 22px; border-radius:999px;
+  font-family:var(--display); font-weight:700; font-size:16px;
+  opacity:0; pointer-events:none; transition:opacity .2s; z-index:40;
+  max-width:90vw; text-align:center;
+}
+#toast.show{ opacity:1; }
+@media (prefers-reduced-motion: reduce){ #toast{ transition:none; } }
+</style>
+</head>
+<body>
+
+<header class="app-header">
+  <div class="brand-lockup">
+    <img class="brand-mark" src="logo.png" alt="" width="40" height="34" decoding="async">
+    <div class="brand">Octogo <small id="brandBranch">Takoyaki tracker</small></div>
+  </div>
+  <span id="statusPill" class="pill demo" role="status" aria-live="polite">…</span>
+</header>
+
+<div id="demoBanner" class="banner" hidden>
+  Demo mode — your data stays on this phone until the API is set up.
+  <button type="button" data-act="goto-ibapa">Set up →</button>
+</div>
+
+<main>
+  <section id="panel-benta" role="tabpanel" aria-labelledby="tab-benta"></section>
+  <section id="panel-gastos" role="tabpanel" aria-labelledby="tab-gastos" hidden></section>
+  <section id="panel-cutoff" role="tabpanel" aria-labelledby="tab-cutoff" hidden></section>
+  <section id="panel-ibapa" role="tabpanel" aria-labelledby="tab-ibapa" hidden></section>
+</main>
+
+<nav class="tabbar" role="tablist" aria-label="Main tabs">
+  <button class="tab" id="tab-benta" role="tab" aria-selected="true" aria-controls="panel-benta" data-tab="benta">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 2h12v20l-2-1.5L14 22l-2-1.5L10 22l-2-1.5L6 22Z"/><path d="M9 7h6M9 11h6M9 15h4"/></svg>
+    Sales
+  </button>
+  <button class="tab" id="tab-gastos" role="tab" aria-selected="false" aria-controls="panel-gastos" data-tab="gastos">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="20" height="13" rx="3"/><path d="M2 10h20"/><circle cx="17" cy="14.5" r="1.6"/></svg>
+    Expenses
+  </button>
+  <button class="tab" id="tab-cutoff" role="tab" aria-selected="false" aria-controls="panel-cutoff" data-tab="cutoff">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="7" r="2.6"/><circle cx="6" cy="17" r="2.6"/><path d="M8.2 8.8 20 20M8.2 15.2 20 4"/></svg>
+    Cutoff
+  </button>
+  <button class="tab" id="tab-ibapa" role="tab" aria-selected="false" aria-controls="panel-ibapa" data-tab="ibapa">
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="2.2"/><circle cx="12" cy="12" r="2.2"/><circle cx="19" cy="12" r="2.2"/></svg>
+    More
+  </button>
+</nav>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<noscript><p style="padding:20px;text-align:center;">Turn on JavaScript to use this app.</p></noscript>
+
+<script>
+'use strict';
+/* ============================================================
+   Constants, storage, and shared state
+   localStorage keys: state_v1 (bootstrap mirror), queue_v1
+   (mutation queue), config_v1 (API url/token/sheet link).
+   ============================================================ */
+const APP_VERSION = '1.0.0';
+
+const store = {
+  read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
+  set(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){ /* storage full — keep running in memory */ } }
+};
+
+// Parse a stored key. Anything unreadable (missing, truncated, not JSON)
+// comes back as null so the caller falls back to defaults.
+function readStored(k){
+  const raw = store.read(k);
+  if (raw == null || raw === '') return null;
+  try{ return JSON.parse(raw); }catch(e){ return null; }
+}
+function isObj(v){ return !!v && typeof v === 'object' && !Array.isArray(v); }
+function asArr(v){ return Array.isArray(v) ? v : []; }
+function asObj(v){ return isObj(v) ? v : {}; }
+function txt(v){ return (v == null || typeof v === 'object') ? '' : String(v); }
+
+function freshState(){
+  return {
+    settings:{ branch:'Tañong', mama_per_cutoff:500, electric_per_cutoff:500, partners:'Nayt, Partner', staff:'Mama' },
+    prices:[
+      { sku:'box4',   label:'Box 4',  group:'box',    size:4,  price:50,  cheese_price:60,  active:true },
+      { sku:'box6',   label:'Box 6',  group:'box',    size:6,  price:65,  cheese_price:80,  active:true },
+      { sku:'box10',  label:'Box 10', group:'box',    size:10, price:105, cheese_price:125, active:true },
+      { sku:'drinks', label:'Drinks', group:'simple', size:'', price:25,  cheese_price:'',  active:false }
+    ],
+    backlogs:[],
+    days:{},      // date -> DailyLog row
+    counts:{},    // date -> [DailyCounts rows]
+    expenses:{}   // entry_id -> Expenses row
+  };
+}
+
+function freshConfig(){ return { apiUrl:'', token:'', sheetUrl:'' }; }
+
+/* ------------------------------------------------------------
+   Loading saved data safely.
+   A stored blob may be partial (a version upgrade that changed the
+   shape, a truncated write) or plain corrupt. Never trust it as the
+   whole state: merge whatever survives over a COMPLETE default, coerce
+   every field to the type the app expects, and drop what is malformed.
+   The app must always boot into a usable screen.
+   ------------------------------------------------------------ */
+function normPrice(p){
+  if (!isObj(p) || !txt(p.sku)) return null;
+  return {
+    sku: txt(p.sku),
+    label: txt(p.label) || txt(p.sku),
+    group: p.group === 'box' ? 'box' : 'simple',
+    size: (p.size == null || typeof p.size === 'object') ? '' : p.size,
+    price: num(p.price),
+    cheese_price: (p.cheese_price === '' || p.cheese_price == null) ? '' : num(p.cheese_price),
+    active: truthy(p.active)
+  };
+}
+function normBacklog(b){
+  if (!isObj(b) || !txt(b.name)) return null;
+  const o = {
+    name: txt(b.name), description: txt(b.description),
+    total_amount: num(b.total_amount), start_date: txt(b.start_date),
+    active: truthy(b.active)
+  };
+  // Only carry a server-supplied balance when there really is one —
+  // backlogBalance() falls back to computing it from expenses otherwise.
+  if (b.balance != null && b.balance !== '' && typeof b.balance !== 'object') o.balance = num(b.balance);
+  if (b.paid != null && b.paid !== '' && typeof b.paid !== 'object') o.paid = num(b.paid);
+  return o;
+}
+function normDay(r, key){
+  if (!isObj(r)) return null;
+  const date = isDateStr(r.date) ? txt(r.date) : (isDateStr(key) ? txt(key) : '');
+  if (!date) return null;
+  return {
+    date, closed: truthy(r.closed), staff: txt(r.staff),
+    gcash: num(r.gcash), total: num(r.total), cash: num(r.cash),
+    custom_amount: num(r.custom_amount), notes: txt(r.notes),
+    entry_id: txt(r.entry_id), updated_at: txt(r.updated_at)
+  };
+}
+function normCount(c, key){
+  if (!isObj(c) || !txt(c.sku)) return null;
+  const date = isDateStr(c.date) ? txt(c.date) : (isDateStr(key) ? txt(key) : '');
+  if (!date) return null;
+  return {
+    date, sku: txt(c.sku), sod: num(c.sod), eod: num(c.eod), sold: num(c.sold),
+    cheese_qty: num(c.cheese_qty), regular_qty: num(c.regular_qty),
+    amount: num(c.amount), entry_id: txt(c.entry_id)
+  };
+}
+// The six stored expense categories. Anything else (a typo in the sheet, a
+// prototype name like "toString") folds into Other — same as the server —
+// so no amount can ever fall outside the cutoff maths.
+const EXPENSE_CATS = ['Supplies','Octopus','Electric','Mama','Backlog','Other'];
+function normCategory(v){ const c = txt(v).trim(); return EXPENSE_CATS.indexOf(c) >= 0 ? c : 'Other'; }
+
+function normExpense(e, key){
+  if (!isObj(e)) return null;
+  const id = txt(e.entry_id) || txt(e.entryId) || txt(key);
+  if (!id || !isDateStr(e.date)) return null;
+  return {
+    date: txt(e.date), category: normCategory(e.category), item: txt(e.item),
+    amount: num(e.amount), backlog_ref: txt(e.backlog_ref), notes: txt(e.notes),
+    entry_id: id, updated_at: txt(e.updated_at)
+  };
+}
+
+// date/id -> row maps. Accepts the map shape the app writes today and a
+// plain array (an older/newer shape), so an upgrade can't blank the app.
+function toRowMap(v, norm, keyOf){
+  const out = {};
+  if (Array.isArray(v)){
+    for (const r of v){ const n = norm(r, ''); if (n) out[keyOf(n)] = n; }
+  } else if (isObj(v)){
+    for (const k in v){ const n = norm(v[k], k); if (n) out[keyOf(n)] = n; }
+  }
+  return out;
+}
+function toCountsMap(v){
+  const out = {};
+  const add = (row, key) => { const n = normCount(row, key); if (n) (out[n.date] = out[n.date] || []).push(n); };
+  if (Array.isArray(v)){ for (const r of v) add(r, ''); }
+  else if (isObj(v)){
+    for (const k in v){
+      const list = v[k];
+      if (Array.isArray(list)) for (const r of list) add(r, k);
+      else if (isObj(list)) add(list, k);
+    }
+  }
+  return out;
+}
+
+// Settings are flat key/value pairs from the sheet. Anything object- or
+// array-valued would render as "[object Object]" (or silently break
+// staffList()), so it is dropped and the default kept. Used for BOTH the
+// stored copy and the bootstrap reply so the two paths always agree.
+function mergeSettings(target, raw){
+  if (!isObj(raw)) return target;
+  for (const k in raw){
+    if (!Object.prototype.hasOwnProperty.call(raw, k) || k === '__proto__') continue;
+    const v = raw[k];
+    if (v != null && typeof v !== 'object') target[k] = v;
+  }
+  return target;
+}
+
+function sanitizeState(raw){
+  const s = freshState();
+  if (!isObj(raw)) return s;                       // null / string / array / corrupt -> defaults
+  mergeSettings(s.settings, raw.settings);
+  const prices = asArr(raw.prices).map(normPrice).filter(Boolean);
+  if (prices.length) s.prices = prices;            // no usable prices -> keep the seed list
+  s.backlogs = asArr(raw.backlogs).map(normBacklog).filter(Boolean);
+  s.days     = toRowMap(raw.days, normDay, r => r.date);
+  s.counts   = toCountsMap(raw.counts);
+  s.expenses = toRowMap(raw.expenses, normExpense, r => r.entry_id);
+  return s;
+}
+
+function sanitizeConfig(raw){
+  const c = freshConfig();
+  if (!isObj(raw)) return c;
+  c.apiUrl  = txt(raw.apiUrl).trim();
+  c.token   = txt(raw.token).trim();
+  c.sheetUrl = txt(raw.sheetUrl).trim();
+  return c;
+}
+
+// Queued mutations are the user's unsaved work — keep every well-formed
+// entry, in order, payload untouched. Only drop entries the sync engine
+// could not send at all (unknown action, missing payload or key).
+const QUEUE_KEY_FOR = { saveDay:'date', saveExpense:'entryId', deleteExpense:'entryId' };
+function sanitizeQueue(raw){
+  const out = [];
+  for (const item of asArr(raw)){
+    if (!isObj(item)) continue;
+    const need = QUEUE_KEY_FOR[item.action];
+    if (!need) continue;
+    if (!isObj(item.payload) || !item.payload[need]) continue;
+    out.push({ action: item.action, payload: item.payload, tries: num(item.tries) });
+  }
+  return out;
+}
+
+// Last line of defence: whatever happens later (a junk bootstrap reply,
+// a hand-edited localStorage), every container the renderers walk exists.
+function ensureShape(){
+  if (!isObj(state)) state = freshState();
+  if (!isObj(state.settings)) state.settings = freshState().settings;
+  if (!Array.isArray(state.prices) || !state.prices.length) state.prices = freshState().prices;
+  if (!Array.isArray(state.backlogs)) state.backlogs = [];
+  if (!isObj(state.days)) state.days = {};
+  if (!isObj(state.counts)) state.counts = {};
+  if (!isObj(state.expenses)) state.expenses = {};
+  if (!Array.isArray(queue)) queue = [];
+  if (!isObj(config)) config = freshConfig();
+}
+
+let state  = sanitizeState(readStored('state_v1'));
+let queue  = sanitizeQueue(readStored('queue_v1'));
+let config = sanitizeConfig(readStored('config_v1'));
+
+function persistState(){ store.set('state_v1', state); }
+function persistQueue(){ store.set('queue_v1', queue); }
+function persistConfig(){ store.set('config_v1', config); }
+
+/* ============================================================
+   Utilities — dates (Asia/Manila), money, ids, escaping
+   ============================================================ */
+// Note text only — the generated cutoff note must always read in English.
+const EN_MONTHS  = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+// On-screen dates: English names (en-PH), Philippine time.
+const DISP_WEEKDAY = new Intl.DateTimeFormat('en-PH', { timeZone:'Asia/Manila', weekday:'long' });
+const DISP_MONTH   = new Intl.DateTimeFormat('en-PH', { timeZone:'Asia/Manila', month:'long' });
+
+function todayStr(){ return new Intl.DateTimeFormat('en-CA', { timeZone:'Asia/Manila' }).format(new Date()); }
+function isDateStr(s){ return /^\d{4}-\d{2}-\d{2}$/.test(String(s == null ? '' : s)); }
+function d2parts(s){ const [y,m,d] = String(s == null ? '' : s).split('-').map(Number); return { y, m, d }; }
+function partsToStr(y,m,d){ return y + '-' + String(m).padStart(2,'0') + '-' + String(d).padStart(2,'0'); }
+function lastDayOf(y,m){ return new Date(y, m, 0).getDate(); }
+// Noon UTC is 8pm in Manila on the same calendar day, so the weekday and
+// month names always belong to the date the user actually picked.
+function dateAt(s){ const p = d2parts(s); return new Date(Date.UTC(p.y, p.m-1, p.d, 12, 0, 0)); }
+function weekdayName(s){ return isDateStr(s) ? DISP_WEEKDAY.format(dateAt(s)) : ''; }
+function monthName(s){ return isDateStr(s) ? DISP_MONTH.format(dateAt(s)) : ''; }
+function fmtLong(s){
+  if (!isDateStr(s)) return String(s == null ? '' : s);
+  const p = d2parts(s); return weekdayName(s) + ', ' + monthName(s) + ' ' + p.d + ', ' + p.y;
+}
+function fmtShort(s){
+  if (!isDateStr(s)) return String(s == null ? '' : s);
+  const p = d2parts(s); return monthName(s) + ' ' + p.d + ' (' + weekdayName(s) + ')';
+}
+
+function num(v){
+  if (typeof v === 'number') return isFinite(v) ? v : 0;
+  const n = parseFloat(String(v == null ? '' : v).replace(/[^0-9.\-]/g,''));
+  return isFinite(n) ? n : 0;
+}
+function fmt(n){
+  n = Math.round(num(n) * 100) / 100;
+  const whole = Number.isInteger(n);
+  return n.toLocaleString('en-PH', { minimumFractionDigits: whole ? 0 : 2, maximumFractionDigits: 2 });
+}
+// Sign goes BEFORE the peso sign: -₱1,520, never ₱-1,520.
+function peso(n){
+  const v = Math.round(num(n) * 100) / 100;
+  return (v < 0 ? '-₱' : '₱') + fmt(Math.abs(v));
+}
+function noteVal(n){ n = num(n); return n === 0 ? '' : fmt(n); }
+function uuid(){
+  return (crypto && crypto.randomUUID) ? crypto.randomUUID()
+    : 'id-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,10);
+}
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function truthy(v){ return v === true || v === 1 || v === 'TRUE' || v === 'true' || v === '1'; }
+function activePrices(){ return asArr(state.prices).filter(p => isObj(p) && truthy(p.active)); }
+function staffList(){ return txt(asObj(state.settings).staff || 'Mama').split(',').map(s => s.trim()).filter(Boolean); }
+
+/* ============================================================
+   Domain math — day computation (mirrors the server rules) and
+   cutoff figures. Prices come from the local mirror; the server
+   recomputes authoritatively at save time.
+   ============================================================ */
+function computeDay(p){
+  const lines = [];
+  let sum = 0;
+  if (!p.closed){
+    for (const c of asArr(p.counts)){
+      const pr = asArr(state.prices).find(x => isObj(x) && x.sku === c.sku);
+      if (!pr) continue;
+      const sod = Math.max(0, num(c.sod));
+      const eod = Math.max(0, num(c.eod));
+      const sold = Math.max(0, sod - eod);
+      let cheese = 0, regular = sold, amount = 0;
+      if (pr.group === 'box'){
+        cheese = Math.min(Math.max(0, num(c.cheeseQty)), sold);
+        regular = sold - cheese;
+        amount = cheese * num(pr.cheese_price) + regular * num(pr.price);
+      } else {
+        amount = sold * num(pr.price);
+      }
+      lines.push({ sku:c.sku, label:pr.label, sod, eod, sold, cheese_qty:cheese, regular_qty:regular, amount, price:num(pr.price), cheese_price:num(pr.cheese_price), group:pr.group });
+      sum += amount;
+    }
+  }
+  const total = p.closed ? 0 : sum + Math.max(0, num(p.customAmount));
+  const gcash = p.closed ? 0 : Math.max(0, num(p.gcash));
+  return { lines, total, gcash, cash: total - gcash };
+}
+
+function currentPeriod(ds){
+  const p = d2parts(ds);
+  return p.d <= 15
+    ? { start: partsToStr(p.y, p.m, 1),  end: partsToStr(p.y, p.m, 15) }
+    : { start: partsToStr(p.y, p.m, 16), end: partsToStr(p.y, p.m, lastDayOf(p.y, p.m)) };
+}
+function shiftPeriod(per, dir){
+  const s = d2parts(per.start);
+  if (dir > 0){
+    if (s.d === 1) return { start: partsToStr(s.y, s.m, 16), end: partsToStr(s.y, s.m, lastDayOf(s.y, s.m)) };
+    const y = s.m === 12 ? s.y + 1 : s.y, m = s.m === 12 ? 1 : s.m + 1;
+    return { start: partsToStr(y, m, 1), end: partsToStr(y, m, 15) };
+  } else {
+    if (s.d === 16) return { start: partsToStr(s.y, s.m, 1), end: partsToStr(s.y, s.m, 15) };
+    const y = s.m === 1 ? s.y - 1 : s.y, m = s.m === 1 ? 12 : s.m - 1;
+    return { start: partsToStr(y, m, 16), end: partsToStr(y, m, lastDayOf(y, m)) };
+  }
+}
+function inPeriod(dateStr, per){ return dateStr >= per.start && dateStr <= per.end; }
+
+function computeCutoff(per){
+  let total = 0, cash = 0, gcash = 0, daysWithSales = 0;
+  const days = asObj(state.days);
+  for (const d in days){
+    if (!inPeriod(d, per)) continue;
+    const row = asObj(days[d]);
+    total += num(row.total); cash += num(row.cash); gcash += num(row.gcash);
+    if (num(row.total) > 0) daysWithSales++;
+  }
+  // Prototype-free accumulator + whitelisted category, so a category like
+  // "toString" can never take a wrong branch and drop money from the note.
+  const b = Object.create(null);
+  for (const cat of EXPENSE_CATS) b[cat] = 0;
+  const exps = asObj(state.expenses);
+  for (const id in exps){
+    const e = asObj(exps[id]);
+    if (!inPeriod(e.date, per)) continue;
+    b[normCategory(e.category)] += num(e.amount);
+  }
+  const other = b.Backlog + b.Other;
+  const split = total - b.Mama - b.Supplies - b.Octopus - other - b.Electric;
+  return {
+    total, cash, gcash, daysWithSales,
+    mama:b.Mama, supplies:b.Supplies, octopus:b.Octopus, electric:b.Electric,
+    other, split, perPartner: split / 2
+  };
+}
+
+function buildNote(f, per){
+  const s = d2parts(per.start), e = d2parts(per.end);
+  const branch = asObj(state.settings).branch || 'Octogo';
+  return [
+    branch + ': ' + EN_MONTHS[s.m-1] + ' ' + s.d + ' - ' + e.d + ' Breakdown',
+    '',
+    // Total/Cash/GCash always print a number (0 when empty); only the six
+    // expense categories below blank out at zero. This matches the server's
+    // buildNoteText exactly, so the preview and the archived note never differ.
+    'Total - ' + fmt(f.total),
+    '',
+    'Cash - ' + fmt(f.cash),
+    'GCash - ' + fmt(f.gcash),
+    '',
+    'Mama - ' + noteVal(f.mama),
+    'Split - ' + (num(f.split) !== 0 ? fmt(f.split) + '(' + fmt(f.perPartner) + ' each)' : ''),
+    'Supplies - ' + noteVal(f.supplies),
+    'Octopus - ' + noteVal(f.octopus),
+    'Other payments - ' + noteVal(f.other),
+    'Electric bill - ' + noteVal(f.electric)
+  ].join('\n');
+}
+
+/* ============================================================
+   Local mutation appliers — optimistic state mirror updates.
+   Also replayed over fresh bootstrap data (reapplyQueue).
+   ============================================================ */
+// A generated note is stale once local data in its period changes —
+// drop it so the UI never shows figures that no longer add up.
+function invalidateNoteFor(date){
+  if (!lastNote || !date) return;
+  const parts = String(lastNote.key).split('_'); // key = start_end
+  if (date >= parts[0] && date <= parts[1]) lastNote = null;
+}
+
+function applyLocalDay(p){
+  ensureShape();
+  invalidateNoteFor(p.date);
+  const c = computeDay(p);
+  state.days[p.date] = {
+    date:p.date, closed:!!p.closed, staff:p.staff || '',
+    gcash:c.gcash, total:c.total, cash:c.cash,
+    custom_amount:p.closed ? 0 : Math.max(0, num(p.customAmount)),
+    notes:p.notes || '', entry_id:p.entryId, updated_at:new Date().toISOString()
+  };
+  state.counts[p.date] = c.lines.map(l => ({
+    date:p.date, sku:l.sku, sod:l.sod, eod:l.eod, sold:l.sold,
+    cheese_qty:l.cheese_qty, regular_qty:l.regular_qty, amount:l.amount, entry_id:p.entryId
+  }));
+}
+function applyLocalExpense(p){
+  ensureShape();
+  invalidateNoteFor(p.date);
+  state.expenses[p.entryId] = {
+    date:p.date, category:p.category, item:p.item || '', amount:num(p.amount),
+    backlog_ref:p.backlogRef || '', notes:p.notes || '',
+    entry_id:p.entryId, updated_at:new Date().toISOString()
+  };
+}
+function applyLocalDeleteExpense(p){
+  ensureShape();
+  const e = state.expenses[p.entryId];
+  if (e) invalidateNoteFor(e.date);
+  delete state.expenses[p.entryId];
+}
+
+function reapplyQueue(){
+  for (const item of asArr(queue)){
+    if (item.action === 'saveDay') applyLocalDay(item.payload);
+    else if (item.action === 'saveExpense') applyLocalExpense(item.payload);
+    else if (item.action === 'deleteExpense') applyLocalDeleteExpense(item.payload);
+  }
+}
+
+/* ============================================================
+   Mutation queue + sync engine.
+   Ordered drain, per-item retry on network failure (queue head
+   blocks so order is preserved); server-rejected items are
+   dropped with the error surfaced. Coalesces repeat saves.
+   Triggers: app start, `online`, visibilitychange, after save.
+   ============================================================ */
+function enqueue(action, payload){
+  if (action === 'saveDay'){
+    const i = queue.findIndex(q => q.action === 'saveDay' && q.payload.date === payload.date);
+    if (i >= 0){ queue[i] = { action, payload, tries:0 }; persistQueue(); updateStatus(); return; }
+  }
+  if (action === 'saveExpense'){
+    const i = queue.findIndex(q => q.action === 'saveExpense' && q.payload.entryId === payload.entryId);
+    if (i >= 0){ queue[i] = { action, payload, tries:0 }; persistQueue(); updateStatus(); return; }
+  }
+  if (action === 'deleteExpense'){
+    // Splice in place (never reassign `queue`) so references held by an
+    // in-flight drainQueue stay coherent.
+    for (let i = queue.length - 1; i >= 0; i--){
+      const q = queue[i];
+      if (q.action === 'saveExpense' && q.payload.entryId === payload.entryId) queue.splice(i, 1);
+    }
+  }
+  queue.push({ action, payload, tries:0 });
+  persistQueue(); updateStatus();
+}
+
+class ApiError extends Error{ constructor(msg){ super(msg); this.server = true; } }
+
+// Setup problem (wrong /exec URL, auth interstitial, HTML error page) —
+// distinct from being offline, so the UI can say "check the setup".
+function badResponseError(msg){
+  const err = new Error(msg);
+  err.badResponse = true;
+  return err;
+}
+
+// An error whose message is already plain English and safe to show.
+function plainError(msg){
+  const err = new Error(msg);
+  err.friendly = true;
+  return err;
+}
+
+// Everything the user reads about a failure goes through here. Raw browser
+// strings ("Failed to fetch", "NetworkError", "Unexpected token <") never
+// reach the screen — a network/parse failure becomes plain English with a
+// next step. Messages we wrote ourselves (server rejection, setup problem)
+// pass through unchanged.
+function friendlyError(err, nextStep){
+  if (err && (err.server || err.badResponse || err.friendly) && err.message) return err.message;
+  return 'Cannot reach the server. ' + (nextStep || 'It will try again.');
+}
+
+async function api(action, payload){
+  if (!config.apiUrl) throw plainError('No API URL is set yet.');
+  // POST + JSON string body, NO custom headers -> text/plain default,
+  // so Apps Script never sees a CORS preflight. Follow redirects.
+  const res = await fetch(config.apiUrl, {
+    method:'POST',
+    redirect:'follow',
+    body: JSON.stringify({ token: config.token, action, payload: payload || {} })
+  });
+  const text = await res.text();
+  let data;
+  try{ data = JSON.parse(text); }
+  catch(e){ throw badResponseError('The server did not send app data. Check the API URL.'); }
+  if (!res.ok) throw badResponseError('Server error ' + res.status + '. Check the API URL and the deployment.');
+  if (!data || data.ok !== true) throw new ApiError((data && data.error) || 'The server reported an error.');
+  return data.data;
+}
+
+let syncing = false;
+let lastSyncError = '';
+
+async function drainQueue(){
+  updateStatus();
+  if (syncing || !config.apiUrl || !navigator.onLine || queue.length === 0) return;
+  syncing = true; updateStatus();
+  while (queue.length){
+    const item = queue[0];
+    try{
+      const data = await api(item.action, item.payload);
+      if (item.action === 'saveDay' && data) applyServerDay(item.payload, data);
+      // Remove the item actually sent BY IDENTITY — enqueue may have
+      // replaced/removed it mid-flight; if so, leave the replacement in
+      // place so the next loop iteration sends it (entryId/date upserts
+      // make a duplicate send harmless).
+      const i = queue.indexOf(item);
+      if (i !== -1) queue.splice(i, 1);
+      persistQueue();
+      lastSyncError = '';
+    }catch(err){
+      if (err && err.server){
+        // Server rejected (validation) — drop so the queue can't jam; surface loudly.
+        lastSyncError = err.message;
+        const i = queue.indexOf(item);
+        if (i !== -1) queue.splice(i, 1);
+        persistQueue();
+        toast('The server refused it: ' + err.message);
+      } else if (err && err.badResponse){
+        // Server answered, but not with our API's JSON — a setup problem
+        // (wrong URL/deployment), not offline. Keep the item; surface distinctly.
+        item.tries = (item.tries || 0) + 1;
+        lastSyncError = err.message;
+        if (item.tries === 1) toast(err.message);
+        break;
+      } else {
+        // Network trouble — keep the item (and order); retry on next trigger.
+        item.tries = (item.tries || 0) + 1;
+        lastSyncError = friendlyError(err);
+        break;
+      }
+    }
+  }
+  syncing = false;
+  persistState(); persistQueue(); updateStatus();
+  if (activeTab === 'ibapa') renderIbapa();
+}
+
+function applyServerDay(p, data){
+  const day = asObj(state.days)[p.date];
+  if (!day) return;
+  if (data.total != null){ day.total = num(data.total); day.cash = num(data.cash); }
+  if (Array.isArray(data.lines)){
+    const rows = asArr(asObj(state.counts)[p.date]);
+    for (const l of data.lines){
+      const r = rows.find(x => x.sku === l.sku);
+      if (r){ r.sold = num(l.sold); r.cheese_qty = num(l.cheeseQty); r.regular_qty = num(l.regularQty); r.amount = num(l.amount); }
+    }
+  }
+  persistState();
+}
+
+async function doBootstrap(){
+  if (!config.apiUrl || !navigator.onLine) return false;
+  try{
+    const data = await api('bootstrap', {});
+    applyBootstrap(data);
+    persistState();
+    renderPanel(activeTab);
+    updateStatus();
+    return true;
+  }catch(e){
+    console.error(e);
+    lastSyncError = friendlyError(e);
+    return false;
+  }
+}
+
+// Data from the sheet gets exactly the same treatment as data from storage:
+// every row through its element-wise normalizer, bad rows skipped one by
+// one. One malformed row must cost that row only — never the whole sync.
+function applyBootstrap(data){
+  ensureShape();
+  if (!isObj(data)) return;
+  mergeSettings(state.settings, data.settings);
+  if (Array.isArray(data.prices)){
+    const prices = data.prices.map(normPrice).filter(Boolean);
+    if (prices.length) state.prices = prices;       // no usable prices -> keep what we have
+  }
+  if (Array.isArray(data.backlogs)) state.backlogs = data.backlogs.map(normBacklog).filter(Boolean);
+  if (data.days != null)     Object.assign(state.days, toRowMap(data.days, normDay, r => r.date));
+  if (data.counts != null)   Object.assign(state.counts, toCountsMap(data.counts));
+  if (data.expenses != null) Object.assign(state.expenses, toRowMap(data.expenses, normExpense, r => r.entry_id));
+  // Local, not-yet-synced edits win over the snapshot. Guarded: one odd
+  // queued payload must not throw away the snapshot we just applied.
+  try{ reapplyQueue(); }catch(err){ console.error(err); }
+}
+
+function backlogBalance(bl){
+  let base;
+  if (bl.balance != null && bl.balance !== '') base = num(bl.balance);
+  else {
+    let paid = 0;
+    const exps = asObj(state.expenses);
+    for (const id in exps){
+      const e = asObj(exps[id]);
+      if (e.category === 'Backlog' && e.backlog_ref === bl.name) paid += num(e.amount);
+    }
+    base = num(bl.total_amount) - paid;
+  }
+  // Subtract queued (unsynced) payments the server snapshot can't know about.
+  for (const q of asArr(queue)){
+    if (q.action === 'saveExpense' && q.payload.category === 'Backlog' && q.payload.backlogRef === bl.name){
+      if (bl.balance != null && bl.balance !== '') base -= num(q.payload.amount);
+    }
+  }
+  return base;
+}
+
+/* ============================================================
+   Shared chrome — status pill, demo banner, toast, tabs
+   ============================================================ */
+let activeTab = 'benta';
+const $ = id => document.getElementById(id);
+
+function updateStatus(){
+  const pill = $('statusPill');
+  ensureShape();
+  if (!config.apiUrl){ pill.className = 'pill demo'; pill.textContent = 'Demo'; }
+  else if (!navigator.onLine){ pill.className = 'pill off'; pill.textContent = 'Offline'; }
+  else if (syncing){ pill.className = 'pill pending'; pill.textContent = 'Syncing…'; }
+  else if (queue.length){ pill.className = 'pill pending'; pill.textContent = queue.length + ' pending'; }
+  else { pill.className = 'pill ok'; pill.textContent = 'Synced'; }
+  $('demoBanner').hidden = !!config.apiUrl;
+  $('brandBranch').textContent = asObj(state.settings).branch ? state.settings.branch : 'Takoyaki tracker';
+}
+
+let toastTimer = null;
+function toast(msg){
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+const TABS = ['benta','gastos','cutoff','ibapa'];
+function showTab(name){
+  activeTab = name;
+  for (const t of TABS){
+    $('panel-' + t).hidden = t !== name;
+    $('tab-' + t).setAttribute('aria-selected', String(t === name));
+  }
+  renderPanel(name);
+  window.scrollTo(0, 0);
+}
+function renderPanel(name){
+  ensureShape();
+  try{
+    if (name === 'benta') renderBenta();
+    else if (name === 'gastos') renderGastos();
+    else if (name === 'cutoff') renderCutoff();
+    else renderIbapa();
+  }catch(err){
+    // A blank screen with no explanation is the worst outcome for a
+    // non-technical user — always leave something readable on screen.
+    console.error(err);
+    const panel = $('panel-' + name);
+    if (panel) panel.innerHTML = '<div class="card"><p class="err">This screen could not be shown.</p>' +
+      '<p class="hint" style="margin-top:6px;">Close the app and open it again. Your saved data is still on this phone.</p></div>';
+  }
+}
+
+/* ============================================================
+   SALES (benta panel) — daily entry screen with the live receipt strip
+   ============================================================ */
+let benta = null;
+
+function loadBentaForm(date){
+  ensureShape();
+  const d = isDateStr(date) ? date : todayStr();
+  const hasDay = isObj(state.days[d]);
+  const day = asObj(state.days[d]);
+  const counts = asArr(state.counts[d]).filter(isObj);
+  const staff = staffList();
+  // Rows = union of currently-active SKUs and SKUs already recorded for
+  // this date, so editing an old day after a SKU is deactivated still
+  // round-trips that SKU's counts instead of silently erasing them.
+  const rows = [];
+  const seen = {};
+  for (const pr of activePrices()){
+    const c = counts.find(x => x.sku === pr.sku) || {};
+    rows.push({ sku:pr.sku, sod:num(c.sod), eod:num(c.eod), cheese:num(c.cheese_qty) });
+    seen[pr.sku] = true;
+  }
+  for (const c of counts){
+    if (!c.sku || seen[c.sku]) continue;
+    seen[c.sku] = true;
+    rows.push({ sku:c.sku, sod:num(c.sod), eod:num(c.eod), cheese:num(c.cheese_qty) });
+  }
+  benta = {
+    date: d,
+    closed: !!day.closed,
+    staff: txt(day.staff) || (staff[0] || ''),
+    gcash: num(day.gcash),
+    custom: num(day.custom_amount),
+    notes: txt(day.notes),
+    rows,
+    saved: hasDay,
+    dirty: false // set on any user edit; cleared on load/save
+  };
+}
+
+function bentaPayload(){
+  return {
+    date: benta.date,
+    closed: benta.closed,
+    staff: benta.staff,
+    // Clamp negatives so the queued payload always matches what
+    // applyLocalDay/computeDay store locally.
+    gcash: benta.closed ? 0 : Math.max(0, num(benta.gcash)),
+    customAmount: benta.closed ? 0 : Math.max(0, num(benta.custom)),
+    notes: benta.notes,
+    counts: benta.closed ? [] : asArr(benta.rows).map(r => ({ sku:r.sku, sod:num(r.sod), eod:num(r.eod), cheeseQty:num(r.cheese) }))
+  };
+}
+
+// SKU list to render: active prices plus any SKU already on the form
+// (deactivated-but-recorded, or activated after the form was loaded).
+function bentaSkuList(){
+  const list = activePrices().slice();
+  const seen = {};
+  for (const pr of list) seen[pr.sku] = true;
+  for (const r of asArr(benta.rows)){
+    if (seen[r.sku]) continue;
+    seen[r.sku] = true;
+    const pr = asArr(state.prices).find(p => p.sku === r.sku);
+    list.push(pr || { sku:r.sku, label:r.sku, group:'simple', size:'', price:0, cheese_price:'', active:false });
+  }
+  return list;
+}
+
+// A sku is sheet data: it can contain quotes, angle brackets, anything.
+// Every place it lands in markup — attributes and ids alike — must be
+// escaped, or the tag breaks apart and the steppers stop working.
+function stepperHTML(sku, field, value, label, small){
+  const s = esc(sku);
+  return '<div class="stepper" data-sku="' + s + '" data-field="' + field + '">' +
+    '<button type="button" class="step-btn" data-act="step" data-dir="-1" aria-label="Subtract one: ' + esc(label) + '">−</button>' +
+    '<input class="step-val" id="in-' + s + '-' + field + '" inputmode="numeric" autocomplete="off" value="' + value + '" aria-label="' + esc(label) + '">' +
+    '<button type="button" class="step-btn" data-act="step" data-dir="1" aria-label="Add one: ' + esc(label) + '">+</button>' +
+  '</div>';
+}
+
+function renderBenta(){
+  if (!benta) loadBentaForm(todayStr());
+  const isToday = benta.date === todayStr();
+  const staff = staffList();
+  let h = '';
+
+  // Date header (tap to backfill)
+  h += '<div class="card date-card">' +
+    '<div>' +
+      '<div class="date-kicker' + (isToday ? '' : ' backfill') + '">' + (isToday ? 'Today' : 'Earlier day') + '</div>' +
+      '<div class="date-big">' + fmtLong(benta.date) + '</div>' +
+      '<div class="date-hint">Tap to change the date</div>' +
+    '</div>' +
+    '<svg class="cal-ico" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M8 3v4M16 3v4M3 10h18"/></svg>' +
+    '<input type="date" id="bentaDate" class="date-cover" value="' + benta.date + '" max="' + todayStr() + '" aria-label="Choose the date">' +
+  '</div>';
+
+  if (benta.saved) h += '<p class="saved-hint">✓ This day is already saved. You are editing it.</p>';
+
+  // Closed-day toggle
+  h += '<div class="card"><div class="switch-row">' +
+    '<div><div class="sw-label">Closed today</div><div class="sw-sub">No sales on this day</div></div>' +
+    '<label class="switch"><input type="checkbox" id="closedToggle"' + (benta.closed ? ' checked' : '') + ' aria-label="Closed today — no sales">' +
+    '<span class="track"></span><span class="knob"></span></label>' +
+  '</div></div>';
+
+  // Staff chips
+  if (staff.length){
+    h += '<div class="section-title">Who minded the stall?</div><div class="chips" role="group" aria-label="Staff">';
+    for (const s of staff){
+      h += '<button type="button" class="chip" data-act="staff" data-staff="' + esc(s) + '" aria-pressed="' + String(benta.staff === s) + '">' + esc(s) + '</button>';
+    }
+    h += '</div>';
+  }
+
+  if (!benta.closed){
+    // Count rows: active skus + skus already on the form (union) —
+    // a mid-session bootstrap can activate/deactivate skus, so create a
+    // placeholder row for any sku the form doesn't know yet.
+    h += '<div class="section-title">Container counts</div>';
+    const skus = bentaSkuList();
+    if (!skus.length){
+      h += '<div class="card"><p class="hint">No box sizes to count yet. Add them in the Prices tab of the Google Sheet, then sync.</p></div>';
+    }
+    for (const pr of skus){
+      let row = asArr(benta.rows).find(r => r.sku === pr.sku);
+      if (!row){ row = { sku:pr.sku, sod:0, eod:0, cheese:0 }; benta.rows.push(row); }
+      const sold = Math.max(0, num(row.sod) - num(row.eod));
+      const isBox = pr.group === 'box';
+      const sk = esc(pr.sku);   // sku is sheet data — escape it everywhere it enters markup
+      h += '<div class="card sku-card" data-skucard="' + sk + '">' +
+        '<div class="sku-head"><strong>' + esc(pr.label) + '</strong>' +
+          '<span class="sku-price">' + peso(pr.price) + (isBox ? ' · Cheese ' + peso(pr.cheese_price) : '') +
+          (truthy(pr.active) ? '' : ' · no longer active') + '</span></div>' +
+        '<div class="count-grid">' +
+          '<div class="count-cell"><label for="in-' + sk + '-sod">Start of day</label>' + stepperHTML(pr.sku, 'sod', num(row.sod), 'Start of day, ' + pr.label) + '</div>' +
+          '<div class="count-cell"><label for="in-' + sk + '-eod">End of day</label>' + stepperHTML(pr.sku, 'eod', num(row.eod), 'End of day, ' + pr.label) + '</div>' +
+        '</div>' +
+        '<div class="sold-row">' +
+          '<div class="sold-badge" id="soldbadge-' + sk + '">Sold: <b id="sold-' + sk + '">' + sold + '</b></div>' +
+          (isBox
+            ? '<div class="cheese-cell"><span id="cheeselbl-' + sk + '">Cheese</span>' + stepperHTML(pr.sku, 'cheese', num(row.cheese), 'Cheese sold, ' + pr.label) + '</div>'
+            : '') +
+        '</div>' +
+        '<p class="err" id="err-sku-' + sk + '" hidden></p>' +
+      '</div>';
+    }
+
+    // Custom order + GCash
+    h += '<div class="section-title">Other sales and payments</div>';
+    h += '<div class="card">' +
+      '<div class="field"><label for="customAmount">Custom order (₱)</label>' +
+        '<input class="input money" id="customAmount" inputmode="decimal" autocomplete="off" placeholder="0" value="' + esc(benta.custom || '') + '">' +
+        '<p class="err" id="err-custom" hidden></p></div>' +
+      '<div class="field"><label for="dayNotes">Note (optional)</label>' +
+        '<input class="input" id="dayNotes" autocomplete="off" placeholder="e.g. 30 pcs party order" value="' + esc(benta.notes) + '"></div>' +
+    '</div>';
+    h += '<div class="card">' +
+      '<div class="field"><label for="gcashAmount">GCash (₱)</label>' +
+        '<input class="input money gcash-in" id="gcashAmount" inputmode="decimal" autocomplete="off" placeholder="0" value="' + esc(benta.gcash || '') + '">' +
+        '<p class="hint" style="margin-top:6px;">Check your GCash app history for the total received.</p>' +
+        '<p class="err" id="err-gcash" hidden></p></div>' +
+    '</div>';
+  }
+
+  // Live receipt strip
+  h += '<div class="receipt-wrap" id="receiptWrap">' +
+    '<div class="receipt" id="receipt"></div>' +
+    '<div class="r-tear" aria-hidden="true"></div>' +
+  '</div>';
+
+  h += '<button type="button" class="btn primary block" data-act="save-day" style="margin-bottom:10px;">Save day</button>';
+
+  $('panel-benta').innerHTML = h;
+  updateReceipt();
+  validateBentaLive();
+}
+
+function updateReceipt(){
+  const el = $('receipt');
+  if (!el) return;
+  const c = computeDay(bentaPayload());
+  let h = '<div class="r-brand">Octogo ★ ' + esc(asObj(state.settings).branch || '') + '</div>' +
+          '<div class="r-date">' + fmtLong(benta.date) + '</div>' +
+          '<div class="r-sep" role="presentation"></div>';
+  if (benta.closed){
+    h += '<div class="r-closed">CLOSED</div>';
+  } else {
+    let any = false;
+    for (const l of c.lines){
+      if (l.group === 'box'){
+        if (l.regular_qty > 0){ any = true; h += rLine(l.label + ' ×' + l.regular_qty, l.regular_qty * l.price); }
+        if (l.cheese_qty > 0){ any = true; h += rLine(l.label + ' Cheese ×' + l.cheese_qty, l.cheese_qty * l.cheese_price); }
+      } else if (l.sold > 0){
+        any = true; h += rLine(l.label + ' ×' + l.sold, l.amount);
+      }
+    }
+    const custom = num(benta.custom);
+    if (custom > 0){ any = true; h += rLine('Custom order', custom); }
+    if (!any) h += '<div class="r-empty">Nothing yet — enter the container counts.</div>';
+    h += '<div class="r-sep" role="presentation"></div>' +
+      '<div class="r-total"><span class="lbl">TOTAL</span><span class="amt">' + peso(c.total) + '</span></div>' +
+      '<div class="r-sub gcash"><span>GCash</span><span class="r-amt">' + peso(c.gcash) + '</span></div>' +
+      '<div class="r-sub"><span>Cash</span><span class="r-amt">' + peso(c.cash) + '</span></div>';
+  }
+  el.innerHTML = h;
+}
+function rLine(label, amt){
+  return '<div class="r-line"><span>' + esc(label) + '</span><span class="r-amt">' + fmt(amt) + '</span></div>';
+}
+
+function validateBenta(){
+  const errs = Object.create(null);
+  if (!benta.closed){
+    for (const r of asArr(benta.rows)){
+      const pr = asArr(state.prices).find(p => p.sku === r.sku);
+      const sold = num(r.sod) - num(r.eod);
+      // Per-sku errors live in their own 'sku:' namespace so a sku literally
+      // named 'gcash' or 'custom' cannot collide with those fixed slots (and
+      // a sku named '__proto__' cannot touch the prototype).
+      if (sold < 0) errs['sku:' + r.sku] = 'End of day is bigger than start of day. Please check.';
+      else if (pr && pr.group === 'box' && num(r.cheese) > sold) errs['sku:' + r.sku] = 'Cheese (' + num(r.cheese) + ') is more than sold (' + sold + ').';
+    }
+    if (num(benta.custom) < 0) errs.custom = 'Custom order cannot be less than zero.';
+    const c = computeDay(bentaPayload());
+    if (num(benta.gcash) < 0) errs.gcash = 'GCash cannot be less than zero.';
+    else if (num(benta.gcash) > c.total) errs.gcash = 'GCash is more than the total (' + peso(c.total) + ').';
+  }
+  return errs;
+}
+
+function validateBentaLive(){
+  const errs = validateBenta();
+  for (const r of asArr(benta.rows)){
+    const el = $('err-sku-' + r.sku);
+    if (!el) continue;
+    if (errs['sku:' + r.sku]){ el.textContent = errs['sku:' + r.sku]; el.hidden = false; }
+    else { el.hidden = true; }
+    const badge = $('soldbadge-' + r.sku);
+    if (badge) badge.classList.toggle('neg', num(r.sod) - num(r.eod) < 0);
+  }
+  const g = $('err-gcash');
+  if (g){
+    if (errs.gcash){ g.textContent = errs.gcash; g.hidden = false; }
+    else { g.hidden = true; }
+  }
+  const cu = $('err-custom');
+  if (cu){
+    if (errs.custom){ cu.textContent = errs.custom; cu.hidden = false; }
+    else { cu.hidden = true; }
+  }
+  return errs;
+}
+
+function saveBenta(){
+  const errs = validateBentaLive();
+  if (Object.keys(errs).length){
+    toast('Please fix the errors first.');
+    // Error keys are 'sku:<sku>' plus the fixed 'custom' and 'gcash'; each maps
+    // to <p id="err-sku-<sku>"> or <p id="err-<key>"> respectively.
+    const firstKey = Object.keys(errs)[0];
+    const el = $(firstKey.indexOf('sku:') === 0 ? 'err-sku-' + firstKey.slice(4) : 'err-' + firstKey);
+    if (el) el.scrollIntoView({ block:'center', behavior: prefersReduced() ? 'auto' : 'smooth' });
+    return;
+  }
+  const p = bentaPayload();
+  p.entryId = uuid();
+  applyLocalDay(p);
+  enqueue('saveDay', p);
+  persistState();
+  const savedDate = p.date;
+  tearReceipt(() => {
+    loadBentaForm(savedDate);
+    renderBenta();
+    toast('Saved ' + fmtShort(savedDate) + '.');
+  });
+  drainQueue();
+}
+
+function prefersReduced(){ return window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
+function tearReceipt(done){
+  const wrap = $('receiptWrap');
+  if (!wrap || prefersReduced()){ done(); return; }
+  let fired = false;
+  const fin = () => { if (fired) return; fired = true; done(); };
+  wrap.classList.add('tearing');
+  wrap.addEventListener('animationend', fin, { once:true });
+  setTimeout(fin, 650);
+}
+
+function bentaStep(sku, field, dir){
+  const r = benta.rows.find(x => x.sku === sku);
+  if (!r) return;
+  const key = field === 'cheese' ? 'cheese' : field;
+  let v = num(r[key]) + dir;
+  if (v < 0) v = 0;
+  if (key === 'cheese'){
+    const sold = Math.max(0, num(r.sod) - num(r.eod));
+    if (v > sold){ toast('Cheese can only go up to ' + sold + ' — that is how many were sold.'); v = sold; }
+  }
+  r[key] = v;
+  benta.dirty = true;
+  const input = $('in-' + sku + '-' + field);
+  if (input) input.value = v;
+  afterCountChange(sku);
+}
+
+function afterCountChange(sku){
+  const r = benta.rows.find(x => x.sku === sku);
+  const soldEl = $('sold-' + sku);
+  if (soldEl && r) soldEl.textContent = Math.max(0, num(r.sod) - num(r.eod));
+  updateReceipt();
+  validateBentaLive();
+}
+
+/* ============================================================
+   EXPENSES (gastos panel) — expenses for the current cutoff
+   ============================================================ */
+const GX_CATS = EXPENSE_CATS;   // same six stored values, one source of truth
+let gx = { open:false, category:'Supplies', item:'', amount:'', date:todayStr(), backlogRef:'' };
+
+function renderGastos(){
+  const per = currentPeriod(todayStr());
+  const items = Object.values(asObj(state.expenses)).filter(isObj)
+    .filter(e => inPeriod(e.date, per))
+    .sort((a,b) => (b.date + (b.updated_at||'')).localeCompare(a.date + (a.updated_at||'')));
+
+  let h = '<div class="section-title" style="margin-top:4px;">Expenses this cutoff <span class="hint" style="font-weight:600;">(' +
+    monthName(per.start) + ' ' + d2parts(per.start).d + '–' + d2parts(per.end).d + ')</span></div>';
+
+  // Add form (collapsible)
+  if (!gx.open){
+    h += '<button type="button" class="btn block" data-act="gastos-open">+ Add an expense</button>';
+  } else {
+    h += '<div class="card">' +
+      '<div class="field"><label>Category</label><div class="chips" role="group" aria-label="Expense category">';
+    for (const cat of GX_CATS){
+      h += '<button type="button" class="chip" data-act="gastos-cat" data-cat="' + cat + '" aria-pressed="' + String(gx.category === cat) + '">' + cat + '</button>';
+    }
+    h += '</div></div>';
+    if (gx.category === 'Backlog'){
+      const active = asArr(state.backlogs).filter(b => isObj(b) && truthy(b.active));
+      h += '<div class="field"><label for="gxBacklog">Which backlog?</label><select class="input" id="gxBacklog">';
+      if (!active.length) h += '<option value="">No active backlog</option>';
+      else {
+        h += '<option value=""' + (gx.backlogRef === '' ? ' selected' : '') + '>Choose…</option>';
+        for (const b of active){
+          h += '<option value="' + esc(b.name) + '"' + (gx.backlogRef === b.name ? ' selected' : '') + '>' +
+            esc(b.name) + ' — balance ' + peso(backlogBalance(b)) + '</option>';
+        }
+      }
+      h += '</select><p class="err" id="err-gx-backlog" hidden></p></div>';
+    }
+    h += '<div class="field"><label for="gxItem">What did you buy or pay?</label>' +
+      '<input class="input" id="gxItem" autocomplete="off" placeholder="e.g. flour, eggs, gas" value="' + esc(gx.item) + '"></div>';
+    h += '<div class="field"><label for="gxAmount">How much? (₱)</label>' +
+      '<input class="input money" id="gxAmount" inputmode="decimal" autocomplete="off" placeholder="0" value="' + esc(gx.amount) + '">' +
+      '<p class="err" id="err-gx-amount" hidden></p></div>';
+    h += '<div class="field"><label for="gxDate">Date</label>' +
+      '<input class="input" type="date" id="gxDate" value="' + gx.date + '" max="' + todayStr() + '"></div>';
+    h += '<div class="btn-row"><button type="button" class="btn" data-act="gastos-cancel">Close</button>' +
+      '<button type="button" class="btn primary" data-act="gastos-submit">Add</button></div>';
+    h += '</div>';
+  }
+
+  // Grouped list
+  if (!items.length){
+    h += '<div class="card" style="margin-top:14px;"><p class="hint" style="text-align:center; padding:8px 0;">No expenses yet this cutoff. Tap + to add one.</p></div>';
+  } else {
+    const groups = {};
+    for (const e of items) (groups[e.date] = groups[e.date] || []).push(e);
+    const dates = Object.keys(groups).sort().reverse();
+    h += '<div style="margin-top:16px;">';
+    for (const d of dates){
+      const dayTotal = groups[d].reduce((s,e) => s + num(e.amount), 0);
+      h += '<div class="gx-group"><div class="gx-group-head"><span class="d">' + fmtShort(d) + '</span><span class="t">' + peso(dayTotal) + '</span></div>';
+      for (const e of groups[d]){
+        h += '<div class="gx-item">' +
+          '<span class="gx-cat">' + esc(e.category) + '</span>' +
+          '<div class="gx-main"><div class="gx-name">' + esc(e.item || e.category) + '</div>' +
+            (e.backlog_ref ? '<div class="gx-ref">→ ' + esc(e.backlog_ref) + '</div>' : '') + '</div>' +
+          '<span class="gx-amt">' + peso(e.amount) + '</span>' +
+          '<button type="button" class="icon-btn" data-act="gastos-del" data-id="' + esc(e.entry_id) + '" aria-label="Delete: ' + esc(e.item || e.category) + ' ' + peso(e.amount) + '">' +
+            '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M10 4h4M7 7l1 13h8l1-13M10 11v6M14 11v6"/></svg>' +
+          '</button>' +
+        '</div>';
+      }
+      h += '</div>';
+    }
+    h += '</div>';
+  }
+  $('panel-gastos').innerHTML = h;
+}
+
+function submitGasto(){
+  let ok = true;
+  const amtEl = $('err-gx-amount');
+  if (!(num(gx.amount) > 0)){
+    if (amtEl){ amtEl.textContent = 'Enter the amount.'; amtEl.hidden = false; }
+    ok = false;
+  } else if (amtEl) amtEl.hidden = true;
+  if (gx.category === 'Backlog' && !gx.backlogRef){
+    const be = $('err-gx-backlog');
+    if (be){ be.textContent = 'Choose which backlog you paid.'; be.hidden = false; }
+    ok = false;
+  }
+  if (!ok) return;
+  const payload = {
+    date: gx.date || todayStr(),
+    category: gx.category,
+    item: gx.item.trim(),
+    amount: num(gx.amount),
+    backlogRef: gx.category === 'Backlog' ? gx.backlogRef : '',
+    notes: '',
+    entryId: uuid()
+  };
+  applyLocalExpense(payload);
+  enqueue('saveExpense', payload);
+  persistState();
+  gx = { open:true, category:gx.category, item:'', amount:'', date:gx.date, backlogRef:'' };
+  renderGastos();
+  toast('Expense added.');
+  drainQueue();
+}
+
+function deleteGasto(id){
+  const e = asObj(state.expenses)[id];
+  if (!e) return;
+  if (!confirm('Delete "' + (e.item || e.category) + '" (' + peso(e.amount) + ')?')) return;
+  applyLocalDeleteExpense({ entryId:id });
+  enqueue('deleteExpense', { entryId:id });
+  persistState();
+  renderGastos();
+  toast('Expense deleted.');
+  drainQueue();
+}
+
+/* ============================================================
+   CUTOFF — period preview + note generation (API or demo-local)
+   ============================================================ */
+let cutoffPer = null;
+let lastNote = null; // { key, text, demo }
+
+function periodKey(per){ return per.start + '_' + per.end; }
+
+function renderCutoff(){
+  if (!cutoffPer) cutoffPer = currentPeriod(todayStr());
+  const per = cutoffPer;
+  const f = computeCutoff(per);
+  const s = d2parts(per.start), e = d2parts(per.end);
+  const isCurrent = periodKey(per) === periodKey(currentPeriod(todayStr()));
+  let h = '';
+
+  h += '<div class="card"><div class="period-nav">' +
+    '<button type="button" class="nav-btn" data-act="cutoff-prev" aria-label="Previous cutoff">‹</button>' +
+    '<div class="p-label">' + monthName(per.start) + ' ' + s.d + ' – ' + e.d +
+      '<span class="p-sub">' + (isCurrent ? 'This cutoff' : s.y) + '</span></div>' +
+    '<button type="button" class="nav-btn" data-act="cutoff-next" aria-label="Next cutoff">›</button>' +
+  '</div></div>';
+
+  // Live local preview
+  h += '<div class="card">' +
+    '<div class="co-row big"><span>Total</span><span class="v">' + peso(f.total) + '</span></div>' +
+    '<div class="co-sub">' + f.daysWithSales + (f.daysWithSales === 1 ? ' day with sales' : ' days with sales') + '</div>' +
+    '<div class="r-sep" role="presentation"></div>' +
+    '<div class="co-row"><span>Cash</span><span class="v">' + peso(f.cash) + '</span></div>' +
+    '<div class="co-row gcash"><span>GCash</span><span class="v">' + peso(f.gcash) + '</span></div>' +
+    '<div class="r-sep" role="presentation"></div>' +
+    '<div class="co-row"><span>Mama</span><span class="v">' + peso(f.mama) + '</span></div>' +
+    '<div class="co-row"><span>Supplies</span><span class="v">' + peso(f.supplies) + '</span></div>' +
+    '<div class="co-row"><span>Octopus</span><span class="v">' + peso(f.octopus) + '</span></div>' +
+    '<div class="co-row"><span>Other payments</span><span class="v">' + peso(f.other) + '</span></div>' +
+    '<div class="co-row"><span>Electric bill</span><span class="v">' + peso(f.electric) + '</span></div>' +
+    '<div class="r-sep" role="presentation"></div>' +
+    '<div class="co-row split' + (f.split < 0 ? ' neg' : '') + '"><span>Split</span><span class="v">' + peso(f.split) + '</span></div>' +
+    '<div class="co-sub">' + peso(f.perPartner) + ' each partner' + (f.split < 0 ? ' — this cutoff came up short' : '') + '</div>' +
+  '</div>';
+
+  // Suggested fixed expenses (one tap)
+  const mamaAmt = num(asObj(state.settings).mama_per_cutoff);
+  const elecAmt = num(asObj(state.settings).electric_per_cutoff);
+  const sugg = [];
+  if (f.mama === 0 && mamaAmt > 0) sugg.push({ cat:'Mama', item:'Mama', amount:mamaAmt });
+  if (f.electric === 0 && elecAmt > 0) sugg.push({ cat:'Electric', item:'Electric bill', amount:elecAmt });
+  if (sugg.length){
+    h += '<div class="card"><p style="font-weight:600; margin-bottom:10px;">These fixed expenses are not logged yet:</p><div class="chips">';
+    for (const sg of sugg){
+      h += '<button type="button" class="chip" data-act="cutoff-suggest" data-cat="' + sg.cat + '" data-item="' + esc(sg.item) + '" data-amt="' + sg.amount + '">+ ' + sg.cat + ' ' + peso(sg.amount) + '</button>';
+    }
+    h += '</div></div>';
+  }
+
+  h += '<button type="button" class="btn primary block" data-act="cutoff-generate" id="genBtn">Generate cutoff note</button>';
+
+  if (lastNote && lastNote.key === periodKey(per)){
+    h += '<div style="margin-top:14px;">' +
+      (lastNote.demo ? '<p class="hint" style="margin-bottom:8px;">Demo — this was not saved to the sheet.</p>'
+                     : '<p class="ok-note" style="margin-bottom:8px;">✓ Saved to the Cutoffs tab of the sheet.</p>') +
+      '<pre class="note-pre" id="notePre">' + esc(lastNote.text) + '</pre>' +
+      '<div class="btn-row">' +
+        '<button type="button" class="btn" data-act="copy-note">Copy</button>' +
+        (navigator.share ? '<button type="button" class="btn" data-act="share-note">Share</button>' : '') +
+      '</div>' +
+    '</div>';
+  }
+
+  $('panel-cutoff').innerHTML = h;
+}
+
+async function generateNote(){
+  const per = cutoffPer;
+  const btn = $('genBtn');
+  if (btn){ btn.disabled = true; btn.textContent = 'Generating…'; }
+  if (config.apiUrl && navigator.onLine){
+    try{
+      await drainQueue(); // make sure the note covers everything we've entered
+      // drainQueue no-ops when a drain is already running and leaves items
+      // queued after a failure — never archive an incomplete note.
+      if (queue.length || syncing){
+        toast('Some entries are not synced yet. Sync first, then make the note.');
+        renderCutoff(); // restores the Generate button
+        return;
+      }
+      const data = await api('cutoff', { start:per.start, end:per.end, dryRun:false });
+      lastNote = { key:periodKey(per), text:(data && data.noteText) || buildNote(computeCutoff(per), per), demo:false };
+      renderCutoff();
+      return;
+    }catch(err){
+      console.error(err);
+      toast(friendlyError(err, 'Please try again in a moment.') + ' Showing the copy from this phone.');
+    }
+  }
+  lastNote = { key:periodKey(per), text:buildNote(computeCutoff(per), per), demo:true };
+  renderCutoff();
+}
+
+async function copyNote(){
+  if (!lastNote) return;
+  try{
+    await navigator.clipboard.writeText(lastNote.text);
+    toast('Note copied.');
+  }catch(e){
+    const ta = document.createElement('textarea');
+    ta.value = lastNote.text;
+    document.body.appendChild(ta);
+    ta.select();
+    try{ document.execCommand('copy'); toast('Note copied.'); }
+    catch(e2){ toast('Could not copy. Select the text instead.'); }
+    ta.remove();
+  }
+}
+async function shareNote(){
+  if (!lastNote || !navigator.share) return;
+  try{ await navigator.share({ text:lastNote.text }); }catch(e){ /* user cancelled */ }
+}
+
+function addSuggestedExpense(cat, item, amount){
+  const t = todayStr();
+  const per = cutoffPer;
+  const date = inPeriod(t, per) ? t : per.end;
+  const payload = { date, category:cat, item, amount:num(amount), backlogRef:'', notes:'', entryId:uuid() };
+  applyLocalExpense(payload);
+  enqueue('saveExpense', payload);
+  persistState();
+  renderCutoff();
+  toast('Added: ' + cat + ' ' + peso(amount));
+  drainQueue();
+}
+
+/* ============================================================
+   MORE (ibapa panel) — backlogs, sync status, API setup, about
+   ============================================================ */
+function renderIbapa(){
+  let h = '';
+
+  // Sync status
+  h += '<div class="section-title" style="margin-top:4px;">Sync</div><div class="card">' +
+    '<div class="kv"><span class="k">Status</span><span class="v">' +
+      (!config.apiUrl ? 'Demo (no API)' : (!navigator.onLine ? 'Offline' : (queue.length ? 'Waiting to sync' : 'Synced'))) + '</span></div>' +
+    '<div class="kv"><span class="k">Waiting to send</span><span class="v">' + queue.length + '</span></div>' +
+    (lastSyncError ? '<p class="err">' + esc(lastSyncError) + '</p>' : '') +
+    '<button type="button" class="btn block" data-act="sync-now" style="margin-top:10px;">Sync now</button>' +
+  '</div>';
+
+  // API setup
+  h += '<div class="section-title">API setup</div><div class="card">' +
+    '<div class="field"><label for="cfgUrl">Apps Script Web App URL</label>' +
+      '<input class="input" id="cfgUrl" autocomplete="off" autocapitalize="off" spellcheck="false" inputmode="url" placeholder="https://script.google.com/macros/s/…/exec" value="' + esc(config.apiUrl) + '"></div>' +
+    '<div class="field"><label for="cfgToken">Token (from the Settings tab of the sheet)</label>' +
+      '<input class="input" id="cfgToken" autocomplete="off" autocapitalize="off" spellcheck="false" value="' + esc(config.token) + '"></div>' +
+    '<div class="field"><label for="cfgSheet">Google Sheet link (optional)</label>' +
+      '<input class="input" id="cfgSheet" autocomplete="off" autocapitalize="off" spellcheck="false" inputmode="url" placeholder="https://docs.google.com/spreadsheets/…" value="' + esc(config.sheetUrl) + '"></div>' +
+    '<button type="button" class="btn block" data-act="test-conn" id="testBtn">Test connection</button>' +
+    '<p id="testResult" class="hint" style="margin-top:8px;" aria-live="polite"></p>' +
+  '</div>';
+
+  // Backlogs
+  h += '<div class="section-title">Backlogs</div><div class="card">';
+  const bls = asArr(state.backlogs).filter(b => isObj(b) && truthy(b.active));
+  if (!bls.length){
+    h += '<p class="hint">No active backlogs. Add them in the Backlogs tab of the Google Sheet.</p>';
+  } else {
+    const owed = bls.reduce((s, b) => s + backlogBalance(b), 0);
+    h += '<div class="bl-total"><span>Total remaining</span><strong>' + peso(owed) + '</strong></div>';
+    for (const b of bls){
+      const bal = backlogBalance(b);
+      const total = num(b.total_amount);
+      const paidPct = total > 0 ? Math.min(100, Math.max(0, (total - bal) / total * 100)) : 0;
+      h += '<div class="bl-item">' +
+        '<div class="bl-top"><span class="bl-name">' + esc(b.name) + '</span><span class="bl-bal">' + peso(bal) + '</span></div>' +
+        '<div class="bl-meter" role="img" aria-label="' + Math.round(paidPct) + '% paid"><i style="width:' + paidPct + '%"></i></div>' +
+        '<div class="bl-sub">' + (b.description ? esc(b.description) + ' · ' : '') +
+          (total - bal > 0 ? peso(total - bal) + ' paid of ' + peso(total) : peso(total) + ' — nothing paid yet') + '</div>' +
+      '</div>';
+    }
+  }
+  h += '</div>';
+
+  // Staff (from Settings)
+  h += '<div class="section-title">Staff</div><div class="card"><div class="chips">';
+  for (const s of staffList()) h += '<span class="chip" aria-disabled="true" style="cursor:default;">' + esc(s) + '</span>';
+  h += '</div><p class="hint" style="margin-top:10px;">From the Settings tab of the sheet (key: staff).</p></div>';
+
+  // About
+  h += '<div class="section-title">About</div><div class="card">' +
+    '<div class="kv"><span class="k">App</span><span class="v">Octogo Tracker v' + APP_VERSION + '</span></div>' +
+    '<div class="kv"><span class="k">Branch</span><span class="v">' + esc(asObj(state.settings).branch || '—') + '</span></div>' +
+    (config.sheetUrl ? '<a class="btn block" style="margin-top:10px; text-decoration:none;" href="' + esc(config.sheetUrl) + '" target="_blank" rel="noopener">Open the Google Sheet</a>' : '') +
+  '</div>';
+
+  $('panel-ibapa').innerHTML = h;
+}
+
+async function testConnection(){
+  const btn = $('testBtn'), out = $('testResult');
+  if (!config.apiUrl){ out.textContent = 'Enter the URL first.'; return; }
+  btn.disabled = true; out.textContent = 'Testing…';
+  try{
+    const data = await api('ping', {});
+    out.innerHTML = '<span class="ok-note">✓ Connected. API version ' + esc((data && data.version) || '?') + '</span>';
+    toast('Connected to the API.');
+    await drainQueue();
+    await doBootstrap();
+  }catch(err){
+    console.error(err);
+    const msg = friendlyError(err, 'Check the internet connection and the URL above, then try again.');
+    out.innerHTML = '<span style="color:var(--alert); font-weight:600;">✗ ' + esc(msg) + '</span>';
+  }finally{
+    const b = $('testBtn');
+    if (b) b.disabled = false;
+    updateStatus();
+  }
+}
+
+/* ============================================================
+   Event wiring — delegated clicks/inputs per panel + globals
+   ============================================================ */
+document.addEventListener('click', (ev) => {
+  const el = ev.target.closest('[data-act]');
+  if (!el) return;
+  const act = el.dataset.act;
+
+  if (act === 'goto-ibapa') showTab('ibapa');
+
+  // Sales
+  else if (act === 'step'){
+    const st = el.closest('.stepper');
+    bentaStep(st.dataset.sku, st.dataset.field, Number(el.dataset.dir));
+  }
+  else if (act === 'staff'){
+    benta.staff = el.dataset.staff;
+    benta.dirty = true;
+    document.querySelectorAll('#panel-benta [data-act="staff"]').forEach(c => c.setAttribute('aria-pressed', String(c.dataset.staff === benta.staff)));
+  }
+  else if (act === 'save-day') saveBenta();
+
+  // Expenses
+  else if (act === 'gastos-open'){ gx.open = true; gx.date = todayStr(); renderGastos(); const f = $('gxItem'); if (f) f.focus(); }
+  else if (act === 'gastos-cancel'){ gx.open = false; renderGastos(); }
+  else if (act === 'gastos-cat'){ gx.category = el.dataset.cat; renderGastos(); }
+  else if (act === 'gastos-submit') submitGasto();
+  else if (act === 'gastos-del') deleteGasto(el.dataset.id);
+
+  // Cutoff
+  else if (act === 'cutoff-prev'){ cutoffPer = shiftPeriod(cutoffPer, -1); renderCutoff(); }
+  else if (act === 'cutoff-next'){ cutoffPer = shiftPeriod(cutoffPer, 1); renderCutoff(); }
+  else if (act === 'cutoff-suggest') addSuggestedExpense(el.dataset.cat, el.dataset.item, el.dataset.amt);
+  else if (act === 'cutoff-generate') generateNote();
+  else if (act === 'copy-note') copyNote();
+  else if (act === 'share-note') shareNote();
+
+  // More tab
+  else if (act === 'sync-now'){
+    // Drain FIRST so the bootstrap snapshot reflects our mutations —
+    // the reverse order can overwrite local edits with pre-edit rows.
+    (async () => {
+      await drainQueue();
+      await doBootstrap();
+      if (activeTab === 'ibapa') renderIbapa();
+    })();
+  }
+  else if (act === 'test-conn') testConnection();
+});
+
+document.querySelector('.tabbar').addEventListener('click', (ev) => {
+  const b = ev.target.closest('[data-tab]');
+  if (b) showTab(b.dataset.tab);
+});
+
+document.addEventListener('input', (ev) => {
+  const id = ev.target.id;
+  if (!id) return;
+
+  // Sales fields
+  if (id === 'gcashAmount'){ benta.gcash = ev.target.value; benta.dirty = true; updateReceipt(); validateBentaLive(); }
+  else if (id === 'customAmount'){ benta.custom = ev.target.value; benta.dirty = true; updateReceipt(); validateBentaLive(); }
+  else if (id === 'dayNotes'){ benta.notes = ev.target.value; benta.dirty = true; }
+  else if (id.startsWith('in-')){
+    // Take the sku/field from the stepper's data attributes rather than
+    // parsing them back out of the id — a sku is sheet data and may contain
+    // dashes or other characters that make the id ambiguous.
+    const st = ev.target.closest('.stepper');
+    if (st){
+      const sku = st.dataset.sku, field = st.dataset.field;
+      const r = benta.rows.find(x => x.sku === sku);
+      if (r){ r[field === 'cheese' ? 'cheese' : field] = Math.max(0, num(ev.target.value)); benta.dirty = true; afterCountChange(sku); }
+    }
+  }
+
+  // Expenses fields
+  else if (id === 'gxItem') gx.item = ev.target.value;
+  else if (id === 'gxAmount') gx.amount = ev.target.value;
+  else if (id === 'gxDate') gx.date = ev.target.value || todayStr();
+  else if (id === 'gxBacklog') gx.backlogRef = ev.target.value;
+
+  // Config fields (auto-saved)
+  else if (id === 'cfgUrl'){ config.apiUrl = ev.target.value.trim(); persistConfig(); updateStatus(); }
+  else if (id === 'cfgToken'){ config.token = ev.target.value.trim(); persistConfig(); }
+  else if (id === 'cfgSheet'){ config.sheetUrl = ev.target.value.trim(); persistConfig(); }
+});
+
+document.addEventListener('change', (ev) => {
+  const id = ev.target.id;
+  if (id === 'bentaDate'){
+    const v = ev.target.value;
+    if (v){ loadBentaForm(v); renderBenta(); }
+  }
+  else if (id === 'closedToggle'){
+    benta.closed = ev.target.checked;
+    benta.dirty = true;
+    renderBenta();
+  }
+});
+
+window.addEventListener('online', () => { drainQueue(); });
+window.addEventListener('offline', () => { updateStatus(); });
+
+// App resume (installed PWAs stay alive across days): if the Benta form
+// still shows a stale "today" and has no unsaved edits, reload it for the
+// real today; always re-render so the "Today" kicker, date-input max and
+// current-period displays recompute. Then sync.
+function onAppResume(){
+  const t = todayStr();
+  if (benta && !benta.dirty && benta.date !== t){
+    loadBentaForm(t);
+  }
+  const di = $('bentaDate');
+  if (di) di.max = t;
+  renderPanel(activeTab);
+  drainQueue();
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') onAppResume(); });
+window.addEventListener('pageshow', () => { onAppResume(); });
+
+/* ============================================================
+   Boot
+   ============================================================ */
+// A partial or truncated state_v1 can lose rows that are still sitting in
+// the queue. Replay the queue over whatever survived so unsent work shows
+// up on screen instead of quietly disappearing. (Idempotent: the appliers
+// recompute the same rows from the same payloads.)
+try{ reapplyQueue(); }catch(err){ console.error(err); }
+
+try{
+  loadBentaForm(todayStr());
+}catch(err){
+  console.error(err);
+  state = freshState();
+  loadBentaForm(todayStr());
+}
+updateStatus();
+showTab('benta');
+(async () => {
+  // Drain BEFORE bootstrap so the snapshot can't clobber queued edits.
+  await drainQueue();
+  await doBootstrap();
+})();
+
+if ('serviceWorker' in navigator){
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => { /* file:// or unsupported — app still works */ });
+  });
+}
+</script>
+</body>
+</html>
