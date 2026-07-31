@@ -98,6 +98,10 @@ Tab **Expenses** (… | **stock_product** | **stock_qty**) — optional. A deliv
 
 Tab **StockItems** (product | unit | active | sort | **opening_qty** | **opening_date** | **reorder_at**) — `opening_qty`/`opening_date` are the one-time starting baseline; `reorder_at` is the low-stock threshold (0 or blank = no warning).
 
+**Seed all six items with `opening_qty` 0 and a blank `opening_date`** (owner's decision, 2026-08-01: he will set real figures via "Correct the count" after his first stocktake rather than typing them up front). A blank `opening_date` must mean *count the whole history* — comparisons are lexicographic on `yyyy-MM-dd` strings and `'' < any date`, so this falls out naturally, but it has to be deliberate rather than accidental: a blank baseline date must never be coerced to today, or every delivery already logged would be silently excluded. `reorder_at` seeds blank (no warning) until the owner sets thresholds in the sheet.
+
+Because the seeded baseline is 0, on-hand can legitimately read **negative** before the first stocktake (usage logged against stock that was delivered before tracking began). Show it plainly rather than clamping to zero — a negative figure is honest information that a count is needed, and silently clamping would hide it.
+
 Tab **StockCounts** (date | product | counted_qty | entry_id | updated_at) — a physical stocktake, which **becomes the new baseline**. This is what stops estimation drift accumulating forever: spoilage, breakage and miscounts are absorbed the next time something is counted, instead of skewing on-hand indefinitely.
 
 On hand is **computed, never stored** (same principle as backlog balances):
