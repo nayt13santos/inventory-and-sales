@@ -7,7 +7,11 @@ const vm = require('vm');
 const assert = require('assert');
 const { FakeSheet, FakeSpreadsheet, makeContext } = require('./gas-stubs');
 
-const CODE_GS = '/Users/naytsantos/Claude/Web App/apps-script/Code.gs';
+// Resolved from this file's location so the suite runs anywhere — a developer
+// machine or a CI runner. Absolute paths made CI fail on the first push.
+const path = require('path');
+const ROOT = path.resolve(__dirname, '..');
+const CODE_GS = path.join(ROOT, 'apps-script', 'Code.gs');
 const source = fs.readFileSync(CODE_GS, 'utf8');
 
 let passed = 0, failed = 0;

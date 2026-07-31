@@ -36,8 +36,11 @@ const assert = require('assert');
 const path = require('path');
 const { FakeSpreadsheet, makeContext } = require('./gas-stubs');
 
-const CODE_GS = '/Users/naytsantos/Claude/Web App/apps-script/Code.gs';
-const INDEX_HTML = '/Users/naytsantos/Claude/Web App/pwa/index.html';
+// Resolved from this file's location so the suite runs anywhere — a developer
+// machine or a CI runner. Absolute paths made CI fail on the first push.
+const ROOT = path.resolve(__dirname, '..');
+const CODE_GS = path.join(ROOT, 'apps-script', 'Code.gs');
+const INDEX_HTML = path.join(ROOT, 'pwa', 'index.html');
 
 let passed = 0, failed = 0;
 const failures = [];
