@@ -79,21 +79,20 @@ The repo already contains `.github/workflows/deploy.yml`. Once the repo exists, 
 
 That's it. From then on, any change to the app files publishes itself, and the phones pick it up on their own — see "How the phones update" below.
 
-**Turn on the sheet-script half (optional, ~10 minutes, needs a Google login):**
+**The sheet-script half — DONE (verified 2026-08-01).** All three secrets are set and a full run was confirmed end to end: tests → app published → `Redeployed @3` → the same `/exec` URL still answering `{"ok":true,"data":{"name":"octogo-api","version":"2.0.0"}}`. The API URL and token did not change, so no phone needed touching.
 
-This is the part that can't be free of credentials — publishing to your Apps Script project requires proof it's you.
+If you ever have to redo it (new machine, revoked credential, or the token expires):
 
 1. Turn on the Apps Script API: [script.google.com/home/usersettings](https://script.google.com/home/usersettings) → **Google Apps Script API: On**.
-2. On your computer: `npm install -g @google/clasp` then `clasp login` (opens a browser, approve).
-3. That writes `~/.clasprc.json`. Add its **entire contents** as a repo secret named `CLASPRC_JSON` (**Settings → Secrets and variables → Actions → New repository secret**).
-4. Add two more secrets:
-   - `SCRIPT_ID` — from the Apps Script editor: **Project Settings → Script ID**.
-   - `DEPLOYMENT_ID` — from **Deploy → Manage deployments**, the id of your existing web app deployment.
-5. Done. Pushes now update the script *and* republish that same deployment, so **the URL and token never change** and no phone needs touching.
+2. `npm install -g @google/clasp@3` then `clasp login` (opens a browser, approve).
+   > Pin **3.x**. clasp 3 writes `{"tokens":{"default":{…}}}`, which clasp 2 cannot read — it fails with `Cannot read properties of undefined (reading 'access_token')`. The workflow pins 3.3.0 to match.
+3. `gh secret set CLASPRC_JSON < ~/.clasprc.json --repo <you>/octogo-tracker`
+4. `SCRIPT_ID` — Apps Script → **Project Settings → Script ID**. Container-bound scripts do **not** appear in `clasp list-scripts`, so read it from the editor.
+5. `DEPLOYMENT_ID` — run `clasp list-deployments`. You'll see two: an `@HEAD` dev deployment and your versioned web app. **Pick the versioned one** — confirm by opening its `/exec` URL; the right one returns the ping JSON, the `@HEAD` one shows a Google sign-in page.
 
-> Skip step 4's `DEPLOYMENT_ID` and the workflow deliberately pushes the code but leaves it unpublished, warning you — better than minting a new URL and silently stranding the phones on the old API.
+> Without `DEPLOYMENT_ID` the workflow deliberately pushes the code but leaves it unpublished and warns you — better than minting a new URL and silently stranding the phones on the old API.
 >
-> `CLASPRC_JSON` is a Google credential for your Apps Script projects. It lives in GitHub's encrypted secrets, but if you'd rather not store it, leave this half off: the app still auto-deploys, and the script is a 4-step manual update you'll rarely need now that the schema is settled.
+> `CLASPRC_JSON` is a Google credential for your Apps Script projects, held in GitHub's encrypted secrets. It means a push can change the live script that touches your money data — the test gate runs first and only that one deployment can ever be updated, but it is a real increase in blast radius. To back out: delete the secret (the app half keeps auto-deploying) and run `clasp logout`.
 
 ## How the phones update
 
