@@ -43,10 +43,22 @@ Open the Google Sheet and edit these tabs directly — the app picks up changes 
 - **Backlogs** — your eight obligations are already seeded (₱81,352 outstanding in total): Takoyaki Flour ₱2,538, Takoyaki Sauce ₱114, Ref ₱6,700, Deposit Nayt ₱7,500, Deposit Lou ₱7,500, Deposit Mama ₱7,000, Deposit Ilog Nayt ₱40,000, Deposit Ilog Mama ₱10,000. The `description` column is blank — fill it in if you want a reminder of what each one is. When you pay a variable amount out of a cutoff's excess, log it in Gastos under category **Backlog**, pick which one, and its balance drops. All backlog payments plus anything under **Other** roll up into the note's "Other payments" line. Add or retire obligations by editing rows here (set `active` to FALSE to hide one without deleting its history).
 - **Prices** — current menu: Octobits 4/6/10 pcs at ₱50/65/105, Chizubits at ₱60/80/125. Change a price here and the app uses it for *future* days only; past days keep the price they were saved with, so history never shifts under you. To sell something new later (drinks, for example), add a row: `group` = `box` gives it start/end counts with a cheese split, `group` = `simple` gives counts with one price and no cheese.
 - **Settings** — `mama_per_cutoff` (₱500), `electric_per_cutoff` (₱500), `branch` (Tañong), and `staff` (comma-separated names if more than Mama minds the stall).
+- **SupplyItems** — the nightly picklist for "Supplies bought today", seeded from your old sheet (Veggies, Egg, Ginger, Water, Flour, Tissue, Toothpick, Fork, Bag #3, Bag #6, Bag #16, Cheese, Rags, Fare). Add or retire rows freely; the list is only a convenience, so renaming one never breaks a day that already used it.
+- **StockItems** — the big items tracked by quantity (Takoyaki Flour kg, Takoyaki Sauce gal, Japanese Mayo kg, Bonito g, Aonori g, Togarashi g), all starting at 0.
+
+> **After updating the script, run `setupSheet` once more.** This release adds four tabs and a few columns. It's a safe migration: it only ever *appends* new columns at the right and creates missing tabs — it never moves, renames or deletes anything you already have, and your token and prices are preserved.
 
 ## Daily / cutoff flow after setup
 
-- **Mama, at closing:** open app → Sales tab → enter container counts (start and end of day), cheese counts, GCash total → Save day. Log expenses as they happen in the Expenses tab. Works even with no signal — it syncs later.
+- **Mama, at closing:** open app → **Sales** tab and work down the screen:
+  1. **Container counts** per box size — start of day, end of day. The app works out how many sold.
+  2. **Split those boxes** across three steppers: **Cheese** (paid cash), **GCash**, **GCash cheese**. Whatever's left over is plain regular paid in cash — you never type that. On a night with no cheese and no GCash, leave all three at 0.
+  3. **Custom order** amount, and **how much of it was GCash**.
+  4. **Supplies bought today** — pesos per item (veggies, egg, flour…). Small daily buys only; bulk purchases go under Expenses so nothing is counted twice.
+  5. **Stock used today** — quantities of the big items (flour, sauce, mayo…). Not money.
+  6. **Save day.**
+
+  There is **no GCash total to type** — the app adds it up from the buckets above and shows it on the receipt, so you can check it against your GCash history. Works with no signal; it syncs later.
 - **You, at cutoff:** Cutoff tab → check the preview → Generate cutoff note → Copy or Share it to your partner. Mama ₱500 and Electric ₱500 are pre-suggested each cutoff; add Octopus and backlog payments under Expenses as you pay them.
 - **Your data is always yours:** everything is plain rows in the Google Sheet — open it anytime, or take it elsewhere.
 

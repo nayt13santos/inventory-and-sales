@@ -11,13 +11,13 @@ Locale: Philippines. Timezone **Asia/Manila** everywhere. Currency PHP. Dates ar
 ## Business rules (verified against owner's real cutoff notes)
 
 - Cutoff periods: **1–15** and **16–end of month**.
-- Daily sales are computed from **container counts**: start-of-day (SOD) vs end-of-day (EOD) per box size. Sold = SOD − EOD. Cheese portion of sold is entered separately; Regular = Sold − Cheese.
+- Daily sales are computed from **container counts**: start-of-day (SOD) vs end-of-day (EOD) per box size. Sold = SOD − EOD. Sold then splits into four buckets — Cheese, GCash, GCash Cheese, and plain regular cash as the remainder (see the DailyCounts section).
 - Current prices (seed data; editable in sheet `Prices` tab):
   - Octobits (regular): 4pcs ₱50, 6pcs ₱65, 10pcs ₱105
   - Chizubits (cheese): 4pcs ₱60, 6pcs ₱80, 10pcs ₱125
-  - Drinks: ₱25 (seed; single price, SOD/EOD counted, no cheese split) — Active=FALSE by default, owner can enable
+  - No drinks SKU (owner sells takoyaki only). To add one later, append a Prices row with `group=simple`.
 - Custom orders: free peso amount + optional note per day.
-- **GCash** total entered daily (from GCash app history); **Cash = Total − GCash**.
+- **GCash is computed**, not typed: it is the sum of the per-sku GCash buckets plus `custom_gcash`. **Cash = Total − GCash** still holds. The receipt displays the computed GCash so it can be reconciled against GCash history.
 - Cutoff note accounting identity (verified): `Total = Cash + GCash = Mama + Split + Supplies + Octopus + Other payments + Electric`, so **Split = Total − Mama − Supplies − Octopus − Other − Electric** (residual profit), **PerPartner = Split / 2**.
 - **Mama** (₱500) and **Electric bill** (₱500) are fixed per-cutoff amounts (Settings; editable).
 - **Octopus** is its own expense category (bulk purchase, paid per cutoff — kept separate from Supplies by owner's explicit request).
@@ -92,6 +92,8 @@ Tab **StockUsage** (date | product | qty | entry_id | updated_at) — quantity c
 
 ### Stock on hand — deliveries, counts and the reorder warning
 
+> **STATUS: designed, NOT YET IMPLEMENTED.** Everything in this subsection is the next increment — no StockCounts tab, no `saveStockCount`, no `Expenses.stock_product`/`stock_qty`, no `StockItems.opening_qty`/`opening_date`/`reorder_at`, no on-hand fields in bootstrap, and no on-hand UI exists yet. The shipped "Stock used today" card records quantities only, and its copy says so rather than promising a view that isn't there.
+
 A delivery has two faces: money paid, and quantity received. **Money stays in exactly one place — the `Expenses` row — and the quantity rides along on it.** So `Expenses` gains two appended columns:
 
 Tab **Expenses** (… | **stock_product** | **stock_qty**) — optional. A delivery is an ordinary expense row (category `Supplies`, or `Octopus` for octopus so it lands on its own note line) that additionally names what arrived. `amount` is counted once as it always was; `stock_qty` feeds only the stock ledger. Leaving both blank is normal — most expenses aren't tracked stock.
@@ -150,7 +152,8 @@ A response key that drifts to camelCase fails **silently**: the PWA reads `undef
 
 Actions (all validate token first):
 - `ping` → `{version}`
-- `bootstrap` → `{settings, prices, supplyItems, stockItems, backlogs:[{...,paid,balance}], days:[last 45 DailyLog rows], counts:[DailyCounts for those days], dailySupplies:[for those days], stockUsage:[for those days], expenses:[last 90 days], lastCutoff}`
+- `bootstrap` → `{settings, prices, supplyItems, stockItems, backlogs:[{...,paid,balance}], window_start, days, counts, dailySupplies, stockUsage, expenses, lastCutoff}`
+  **One 90-day date window for all five row collections** (days, counts, dailySupplies, stockUsage, expenses) and `window_start` states it explicitly. Asymmetric windows were a bug: a row-capped `days` beside a 90-day `expenses` made an older cutoff preview show expenses with no sales behind them. And the phone needs the boundary stated, because inferring it from the dates present cannot tell "older than this reply covers" from "deleted in the sheet" — inside the window the snapshot is authoritative and a row it omits must be dropped locally; outside it the phone keeps its own history. Queued work is re-applied on top either way.
 - `saveDay` payload `{date, closed, staff, customAmount, customGcash, notes, counts:[{sku, sod, eod, cheeseQty, gcashQty, gcashCheeseQty}], supplies:[{item, amount}], stock:[{product, qty}], entryId}` → server computes sold, the derived `regular_qty`, per-sku `amount` and `gcash_amount` from Prices, then `total`/`gcash`/`cash` per the roll-up above; upserts DailyLog by date and rewrites that date's DailyCounts, DailySupplies and StockUsage. Returns computed `{total, cash, gcash, supplies_total, lines:[{sku, sold, cheese_qty, gcash_qty, gcash_cheese_qty, regular_qty, amount, gcash_amount}]}`. Closed day: counts/supplies/stock empty, total 0 (supplies and stock are still cleared for that date).
   Validation, each with a plain-English message: `sod`/`eod`/all quantities ≥ 0; `eod ≤ sod`; `cheeseQty + gcashQty + gcashCheeseQty ≤ sold`; `cheeseQty`/`gcashCheeseQty` = 0 for `group=simple`; `customGcash ≤ customAmount`; supply/stock amounts ≥ 0 and items must exist in SupplyItems/StockItems.
   **Note:** `gcash` is no longer accepted from the client — it is computed. Ignore it if an old queued payload still carries it, so a phone that queued work before the update cannot write a bogus GCash figure.
@@ -176,12 +179,12 @@ Screens (bottom tab bar, thumb-reach). Internal ids stay `benta`/`gastos`/`ibapa
    Below that, two collapsible cards saved with the same "Save day" action:
    - **Supplies bought today** — the SupplyItems picklist, peso amount each, with a running total. Hint: bulk purchases go under Expenses instead, so nothing is counted twice.
    - **Stock used today** — StockItems with a quantity each and its unit. Explicitly labelled as not money.
-   Live **receipt strip** (signature element): line items, then TOTAL / Cash / GCash; Save button = "Save day". Editing an already-saved day loads all of it back, including supplies and stock.
+   Live **receipt strip** (signature element): line items, then TOTAL / GCash / Cash (GCash directly under the total, since it is now computed and is the figure worth checking against GCash history); Save button = "Save day". Editing an already-saved day loads all of it back, including supplies and stock.
 2. **Expenses** (panel id `gastos`): list grouped by date for current cutoff; add form: category chips (Supplies / Octopus / Electric / Mama / Backlog / Other — these are stored values, never translated), item, amount, backlog picker when category=Backlog (shows balances), date defaults today. Tap to delete own entries.
 3. **Cutoff**: period picker (defaults to current cutoff; prev/next arrows); live preview computed from local data: Total/Cash/GCash + expense category sums + Split (per partner); pre-fills Mama & Electric from settings as suggested expenses if none logged (one-tap "add ₱500"); **Generate cutoff note** → calls API `cutoff`, shows exact note text with **Copy** and **Share** (Web Share API) buttons.
 4. **More** (panel id `ibapa`): backlogs with computed balances and a "Total remaining" line; sync status + pending queue count + "Sync now"; API setup (URL + token fields, "Test connection"); staff list comes from settings; version; link to open the Google Sheet.
 
-Offline-first: service worker caches app shell (cache-first, versioned). All mutations go into a localStorage queue (`queue_v1`) with entryId; optimistic local state (`state_v1` mirror of bootstrap) updates immediately; background sync drains queue on `online`/`visibilitychange`/app start/after save; per-item retry, keep order; status pill: "Synced" (green) / "N waiting to send" (amber) / "Offline" (gray). Demo mode: if no API URL configured, app is fully usable locally and banner says data is on this phone only until API is set up.
+Offline-first: service worker caches app shell (cache-first, versioned). All mutations go into a localStorage queue (`queue_v1`) with entryId; optimistic local state (`state_v1` mirror of bootstrap) updates immediately; background sync drains queue on `online`/`visibilitychange`/app start/after save; per-item retry, keep order; status pill: "Synced" (green) / "N waiting" (amber) / "Offline" (gray), matching the More screen's "Waiting to send" row. Demo mode: if no API URL configured, app is fully usable locally and banner says data is on this phone only until API is set up.
 
 Resilience: `state_v1`/`queue_v1`/`config_v1` are always merged over complete defaults and element-wise sanitized on load, so a partial, truncated or non-JSON value can never blank the app; well-formed queued mutations always survive. **Data arriving from the API must go through the same sanitizers as data read from storage** — a malformed row in the sheet must never discard an otherwise-good bootstrap, and must never reach the DOM unescaped. Every render is wrapped so a thrown renderer shows a recovery message instead of an empty screen.
 

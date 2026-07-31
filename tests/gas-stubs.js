@@ -111,6 +111,10 @@ class FakeSheet {
     }
     return last;
   }
+  /** Real API: "the position of the last column that has content" — SHEET-WIDE,
+   *  so it sees a column holding data under a blank header. 0 when empty. */
+  getLastColumn() { return this.lastDataCol(); }
+  getLastRow() { return this.lastDataRow(); }
   getDataRange() {
     const nR = Math.max(1, this.lastDataRow());
     const nC = Math.max(1, this.lastDataCol());
@@ -155,6 +159,29 @@ class FakeSheet {
     this.grid.splice(rowPos - 1, 1);
     return this;
   }
+  /** Widen the grid, shifting every cell right of `afterCol` — same as the real
+   *  API. Needed by the append-only migration when the schema is wider than the
+   *  sheet's grid (an owner who deleted his unused columns has exactly that). */
+  insertColumnsAfter(afterCol, howMany) {
+    this.log.push({ op: 'insertColumnsAfter', afterCol, howMany });
+    if (afterCol < 1 || afterCol > this.maxCols) {
+      throw new Error('Those columns are out of bounds.');
+    }
+    const blanks = new Array(howMany).fill('');
+    for (const row of this.grid) row.splice(afterCol, 0, ...blanks);
+    this.maxCols += howMany;
+    const moved = c => (Number(c) > afterCol ? Number(c) + howMany : Number(c));
+    const cols = {};
+    for (const c in this.columnFormats) cols[moved(c)] = this.columnFormats[c];
+    this.columnFormats = cols;
+    const cells = {};
+    for (const k in this.cellFormats) {
+      const rc = k.split(',');
+      cells[rc[0] + ',' + moved(rc[1])] = this.cellFormats[k];
+    }
+    this.cellFormats = cells;
+    return this;
+  }
 }
 
 class FakeSpreadsheet {
@@ -173,8 +200,35 @@ class FakeSpreadsheet {
   getUrl() { return 'https://sheets.example/fake'; }
 }
 
-function makeContext(activeSpreadsheet) {
+// ---------------------------------------------------------------------------
+// A FIXED clock for the harness.
+//
+// Code.gs reads the clock in exactly two places: nowStamp() (`new Date()`) and
+// bootstrap's 90-day window (`Date.now()`). Both suites are full of fixed date
+// literals (2026-07-30, the legacy sheet's 2026-07-20, ...) whose position
+// inside that window would otherwise depend on the day the suite is RUN — so a
+// green suite would quietly start failing months from now, on a LIVE system,
+// for no reason anybody could see in the diff. Freezing "now" pins that.
+// Pass an explicit instant to makeContext for a case that needs another today.
+// ---------------------------------------------------------------------------
+const FIXED_NOW = new Date('2026-08-01T13:00:00+08:00'); // Manila, mid-afternoon
+
+/** Date with `new Date()` / Date.now() pinned. Subclasses the REAL Date so its
+ *  instances still pass Intl's internal brand check inside formatDate. */
+function frozenDateClass(now) {
+  const fixed = now.getTime();
+  return class FrozenDate extends Date {
+    constructor(...args) {
+      if (args.length === 0) super(fixed);
+      else super(...args);
+    }
+    static now() { return fixed; }
+  };
+}
+
+function makeContext(activeSpreadsheet, now) {
   return {
+    Date: frozenDateClass(now || FIXED_NOW),
     SpreadsheetApp: { getActive: () => activeSpreadsheet },
     Utilities: {
       formatDate,
@@ -196,4 +250,4 @@ function makeContext(activeSpreadsheet) {
   };
 }
 
-module.exports = { FakeSheet, FakeSpreadsheet, makeContext, formatDate };
+module.exports = { FakeSheet, FakeSpreadsheet, makeContext, formatDate, FIXED_NOW };
