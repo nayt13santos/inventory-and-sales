@@ -74,12 +74,17 @@ jobs:
             echo "::notice::Apps Script auto-deploy is off. Add CLASPRC_JSON and SCRIPT_ID secrets to enable it (see SETUP.md)."
           fi
 
+      # Pinned to 3.x because that is the format `clasp login` writes today
+      # ({"tokens":{"default":{...}}}). clasp 2.x cannot read that file and
+      # fails with "Cannot read properties of undefined (reading access_token)".
       - if: steps.check.outputs.ready == 'true'
-        run: npm install -g @google/clasp@2.4.2
+        run: npm install -g @google/clasp@3.3.0
 
       - name: Authenticate clasp
         if: steps.check.outputs.ready == 'true'
-        run: echo '${{ secrets.CLASPRC_JSON }}' > ~/.clasprc.json
+        run: |
+          printf '%s' '${{ secrets.CLASPRC_JSON }}' > ~/.clasprc.json
+          chmod 600 ~/.clasprc.json
 
       - name: Push code to the Apps Script project
         if: steps.check.outputs.ready == 'true'
@@ -99,7 +104,10 @@ jobs:
         working-directory: apps-script
         run: |
           if [ -n "${{ secrets.DEPLOYMENT_ID }}" ]; then
-            clasp deploy --deploymentId "${{ secrets.DEPLOYMENT_ID }}" --description "auto ${GITHUB_SHA::7}"
+            # clasp 3: update-deployment (alias redeploy) points an EXISTING
+            # deployment at a new version. `deploy`/create-deployment would mint
+            # a new URL, which is exactly what must never happen here.
+            clasp update-deployment "${{ secrets.DEPLOYMENT_ID }}" --description "auto ${GITHUB_SHA::7}"
           else
             echo "::warning::Code pushed but NOT published — add the DEPLOYMENT_ID secret so the live URL updates."
           fi
