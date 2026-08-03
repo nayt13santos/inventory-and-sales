@@ -248,7 +248,56 @@ select.input{ appearance:auto; }
   font-variant-numeric:tabular-nums;
 }
 
-/* Collapsible cards — supplies bought today, stock used today */
+/* Stock rows: a name that says what its number means, beside a whole-unit
+   stepper. Same 48px targets as the box steppers — this is Mama's card too. */
+.stk-row{ display:flex; align-items:center; gap:12px; min-height:60px; }
+.stk-row + .stk-row{ border-top:1px solid var(--line); }
+.stk-what{ flex:1; min-width:0; }
+.stk-name{ display:block; font-weight:600; }
+.stk-unit{ display:block; font-size:13px; color:var(--muted); }
+.stk-row .stepper{ flex:none; }
+
+/* Low stock: one quiet line on Sales, a small badge on the More list. Never a
+   modal, never anything that blocks the day's entry. */
+.low-line{
+  display:flex; align-items:center; gap:8px;
+  background:#F6E7CF; border:1px solid var(--line); border-radius:12px;
+  padding:10px 12px; margin:0 0 14px; font-size:15px; color:var(--deep);
+}
+.low-line b{ font-weight:700; }
+/* An inline text button that still has a real touch target. */
+.lnk{
+  background:none; border:none; padding:8px 0; min-height:48px;
+  font:inherit; font-weight:700; color:var(--deep); text-decoration:underline; cursor:pointer;
+}
+.badge-low{
+  flex:none; font-family:var(--display); font-weight:700; font-size:12px;
+  background:var(--alert); color:#fff; border-radius:8px; padding:3px 8px;
+  text-transform:uppercase; letter-spacing:.04em;
+}
+
+/* Stock-on-hand list (More) */
+.st-item{ padding:12px 0; border-bottom:1px solid var(--line); }
+.st-item:last-child{ border-bottom:none; }
+.st-top{ display:flex; align-items:baseline; gap:10px; }
+.st-name{ flex:1; min-width:0; font-weight:700; }
+.st-qty{ font-family:var(--display); font-weight:800; font-size:22px; color:var(--deep); font-variant-numeric:tabular-nums; white-space:nowrap; }
+.st-qty.neg{ color:var(--alert); }
+.st-sub{ font-size:13px; color:var(--muted); margin-top:4px; }
+.st-acts{ display:flex; gap:8px; margin-top:10px; }
+.st-count{ display:flex; gap:8px; align-items:flex-end; margin-top:10px; }
+.st-count .input{ width:110px; text-align:right; }
+
+/* Maintenance rows */
+.mt-row{ padding:12px 0; border-bottom:1px solid var(--line); }
+.mt-row:last-of-type{ border-bottom:none; }
+.mt-name{ font-weight:700; margin-bottom:8px; }
+.mt-grid{ display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:8px; }
+.mt-grid label, .mt-cell label{ display:block; font-size:13px; color:var(--muted); margin-bottom:4px; }
+.mt-toggle{ display:flex; align-items:center; gap:10px; min-height:48px; margin-top:6px; cursor:pointer; }
+.mt-toggle input{ width:26px; height:26px; accent-color:var(--accent); }
+
+/* Collapsible cards — stock used today */
 .collapse{ padding:0; overflow:hidden; }
 .collapse-head{
   width:100%; display:flex; align-items:center; gap:10px; min-height:62px;
@@ -342,6 +391,10 @@ select.input{ appearance:auto; }
 .co-row.split .v{ color:var(--ok); }
 .co-row.split.neg .v{ color:var(--alert); }
 .co-sub{ text-align:right; font-size:14px; color:var(--muted); margin-top:-4px; }
+/* The entered Split, with what each partner gets beside it. */
+.split-row{ display:flex; align-items:center; gap:12px; }
+.split-row .input{ flex:1; min-width:0; }
+.split-each{ flex:none; font-family:var(--display); font-weight:700; font-size:16px; color:var(--ok); white-space:nowrap; font-variant-numeric:tabular-nums; }
 .note-pre{
   white-space:pre-wrap; word-break:break-word;
   font-family:ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size:15px; line-height:1.6;
@@ -456,7 +509,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.3.1';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -477,33 +530,60 @@ function isObj(v){ return !!v && typeof v === 'object' && !Array.isArray(v); }
 function asArr(v){ return Array.isArray(v) ? v : []; }
 function asObj(v){ return isObj(v) ? v : {}; }
 function txt(v){ return (v == null || typeof v === 'object') ? '' : String(v); }
+// A number that may legitimately be BLANK, kept blank. Used for the columns
+// where "nothing here" and "zero" mean different things: a day's salary (blank =
+// the standard rate, 0 = a day off) and a stock reorder point (blank = no
+// warning at all, 0 = also no warning, but typed on purpose).
+function rawNum(v){
+  return (v == null || v === '' || typeof v === 'object') ? '' : num(v);
+}
 
-// The two picklists are seeded here with the SAME names Code.gs seeds into the
-// SupplyItems / StockItems tabs, so demo mode (and a phone whose sheet has not
-// been migrated yet) can record supplies and stock on day one. The server
-// auto-creates and seeds those tabs on the first save, so a seeded name is
-// never rejected as "unknown item".
-const SEED_SUPPLY_ITEMS = ['Veggies','Egg','Ginger','Water','Flour','Tissue','Toothpick',
-  'Fork','Bag #3','Bag #6','Bag #16','Cheese','Rags','Fare'];
-const SEED_STOCK_ITEMS = [['Takoyaki Flour','kg'],['Takoyaki Sauce','gal'],['Japanese Mayo','kg'],
-  ['Bonito','g'],['Aonori','g'],['Togarashi','g']];
+// The stock picklist is seeded here with the SAME names AND UNITS Code.gs seeds
+// into the StockItems tab, so demo mode (and a phone whose sheet has not been
+// migrated yet) can record stock on day one. The unit is the thing you OPEN, not
+// a weight — that is what makes usage countable in whole units like the boxes.
+// The server auto-creates and seeds the tab on the first save, so a seeded name
+// is never rejected as "unknown product".
+// (The old SupplyItems picklist is GONE with the retired daily-supplies card:
+// purchases live in Expenses, which is now the only place they can live.)
+const SEED_STOCK_ITEMS = [['Takoyaki Flour','pack'],['Takoyaki Sauce','gallon'],['Japanese Mayo','pack'],
+  ['Bonito','pack'],['Aonori','pack'],['Togarashi','pack']];
+
+// Fallbacks that match Code.gs, used when the Settings row is missing or blank —
+// a blank daily_salary must never quietly make a day of work cost ₱0.
+const DEFAULT_DAILY_SALARY = 200;
+const DEFAULT_SPLIT = 3000;
 
 function freshState(){
   return {
-    settings:{ branch:'Tañong', mama_per_cutoff:500, electric_per_cutoff:500, partners:'Nayt, Partner', staff:'Mama' },
+    settings:{ branch:'Tañong', mama_per_cutoff:500, electric_per_cutoff:500,
+      partners:'Nayt, Partner', staff:'Mama',
+      daily_salary:DEFAULT_DAILY_SALARY, split_default:DEFAULT_SPLIT },
+    // EXACTLY the three skus setupSheet() seeds into the Prices tab, and nothing
+    // else. A seeded sku the sheet does not have is not harmless: Maintenance
+    // sends every sku in this list, and the server refuses a price row it has no
+    // group and size for — so ONE phantom row made the whole batch refusable and
+    // no price could be changed before the first bootstrap. (Owner sells takoyaki
+    // only. A new product is a sheet job: add the Prices row, then sync.)
     prices:[
-      { sku:'box4',   label:'Box 4',  group:'box',    size:4,  price:50,  cheese_price:60,  active:true },
-      { sku:'box6',   label:'Box 6',  group:'box',    size:6,  price:65,  cheese_price:80,  active:true },
-      { sku:'box10',  label:'Box 10', group:'box',    size:10, price:105, cheese_price:125, active:true },
-      { sku:'drinks', label:'Drinks', group:'simple', size:'', price:25,  cheese_price:'',  active:false }
+      { sku:'box4',   label:'Box 4',  group:'box', size:4,  price:50,  cheese_price:60,  active:true },
+      { sku:'box6',   label:'Box 6',  group:'box', size:6,  price:65,  cheese_price:80,  active:true },
+      { sku:'box10',  label:'Box 10', group:'box', size:10, price:105, cheese_price:125, active:true }
     ],
-    supplyItems: SEED_SUPPLY_ITEMS.map((item, i) => ({ item, active:true, sort:i+1 })),
-    stockItems:  SEED_STOCK_ITEMS.map((p, i) => ({ product:p[0], unit:p[1], active:true, sort:i+1 })),
+    stockItems:  SEED_STOCK_ITEMS.map((p, i) => ({
+      product:p[0], unit:p[1], active:true, sort:i+1,
+      // The one-time starting baseline and the low-stock threshold. Seeded the
+      // same way the sheet seeds them: nothing on hand, no baseline date (which
+      // means "count the whole history"), no warning until a point is set.
+      opening_qty:0, opening_date:'', reorder_at:'',
+      baseline_qty:0, baseline_date:'', delivered_since:0, used_since:0
+    })),
     backlogs:[],
     days:{},          // date -> DailyLog row
     counts:{},        // date -> [DailyCounts rows]
-    dailySupplies:{}, // date -> [DailySupplies rows]  (pesos per item — money)
-    stockUsage:{},    // date -> [StockUsage rows]     (quantities — NEVER money)
+    stockUsage:{},    // date -> [StockUsage rows]   (whole units opened — NEVER money)
+    stockCounts:{},   // date -> [StockCounts rows]  (stocktakes; each becomes a baseline)
+    cutoffInputs:{},  // "start_end" -> CutoffInputs row (the ENTERED split)
     expenses:{}       // entry_id -> Expenses row
   };
 }
@@ -568,6 +648,12 @@ function normDay(r, key){
   if (!date) return null;
   return {
     date, closed: truthy(r.closed), staff: txt(r.staff),
+    // That day's WAGE, snapshotted when the day was saved. Kept exactly as it
+    // arrived — a blank (a row written before salary was stored, or a server too
+    // old to send it) stays blank and is resolved by daySalary() at read time.
+    // Resolving it here would mean reading state.settings from inside a
+    // normalizer, which also runs while `state` is still being built.
+    salary: rawNum(r.salary),
     // `gcash` is COMPUTED (server-side on save, locally by computeDay) — it is
     // still stored and still read, it is just no longer typed in by anyone.
     gcash: num(r.gcash), total: num(r.total), cash: num(r.cash),
@@ -598,29 +684,63 @@ function normCount(c, key){
     entry_id: txt(pick(c, 'entry_id', 'entryId'))
   };
 }
-// SupplyItems / StockItems — the two picklists. `sort` fixes the order the
-// phone shows them in, so it matches the order in the sheet.
-function normSupplyItem(s){
-  if (!isObj(s) || !txt(s.item)) return null;
-  return { item: txt(s.item), active: truthy(s.active), sort: num(s.sort) };
-}
+// StockItems — the stock picklist AND the ledger settings behind each product.
+// `sort` fixes the order the phone shows them in, so it matches the sheet.
+//
+// `on_hand` and `low` are DELIBERATELY NOT kept: on hand is computed, never
+// stored (the same rule as a backlog balance). What is kept is everything the
+// arithmetic needs — the baseline, and the totals the server counted over the
+// WHOLE history, which is more history than this phone holds.
 function normStockItem(s){
   if (!isObj(s) || !txt(s.product)) return null;
-  return { product: txt(s.product), unit: txt(s.unit), active: truthy(s.active), sort: num(s.sort) };
+  const openQty = num(pick(s, 'opening_qty', 'openingQty'));
+  // NOT defaulted to today. A blank date means "count the whole history"
+  // ('' < any yyyy-MM-dd), exactly as on the server. Coercing it to today would
+  // silently drop every delivery already logged.
+  const openDate = txt(pick(s, 'opening_date', 'openingDate'));
+  const bq = pick(s, 'baseline_qty', 'baselineQty');
+  return {
+    product: txt(s.product), unit: txt(s.unit),
+    active: truthy(s.active), sort: num(s.sort),
+    opening_qty: openQty,
+    opening_date: openDate,
+    // Blank = no warning at all. Kept blank so the Maintenance field can show
+    // "not set" instead of a 0 the owner never typed.
+    reorder_at: rawNum(pick(s, 'reorder_at', 'reorderAt')),
+    // The baseline the server measured from. A server too old to send it (or a
+    // seeded row) falls back to the opening figure, which is what the baseline
+    // IS until the first stocktake.
+    baseline_qty: (bq == null || bq === '') ? openQty : num(bq),
+    baseline_date: txt(pick(s, 'baseline_date', 'baselineDate')) || openDate,
+    delivered_since: num(pick(s, 'delivered_since', 'deliveredSince')),
+    used_since: num(pick(s, 'used_since', 'usedSince'))
+  };
 }
-// DailySupplies — pesos spent per item per day. This IS money: it feeds the
-// cutoff note's Supplies line together with bulk Expenses(Supplies) rows.
-function normDailySupply(s, key){
-  if (!isObj(s) || !txt(s.item)) return null;
+// StockCounts — a physical stocktake. It BECOMES that product's baseline, which
+// is what stops spoilage, breakage and miscounts skewing on hand forever.
+function normStockCount(s, key){
+  if (!isObj(s) || !txt(s.product)) return null;
   const date = isDateStr(s.date) ? txt(s.date) : (isDateStr(key) ? txt(key) : '');
   if (!date) return null;
   return {
-    date, item: txt(s.item), amount: num(s.amount),
+    date, product: txt(s.product),
+    counted_qty: num(pick(s, 'counted_qty', 'countedQty')),
     entry_id: txt(pick(s, 'entry_id', 'entryId')),
     updated_at: txt(pick(s, 'updated_at', 'updatedAt'))
   };
 }
-// StockUsage — quantities consumed per product per day. NEVER money: it never
+// CutoffInputs — the ENTERED split for one period. Period-keyed, not date-keyed,
+// so the phone can pre-fill and preview it offline.
+function normCutoffInput(r){
+  if (!isObj(r) || !isDateStr(r.start) || !isDateStr(r.end)) return null;
+  return {
+    start: txt(r.start), end: txt(r.end),
+    split_amount: num(pick(r, 'split_amount', 'splitAmount')),
+    entry_id: txt(pick(r, 'entry_id', 'entryId')),
+    updated_at: txt(pick(r, 'updated_at', 'updatedAt'))
+  };
+}
+// StockUsage — WHOLE UNITS OPENED per product per day. NEVER money: it never
 // reaches the note or any total.
 function normStockUse(s, key){
   if (!isObj(s) || !txt(s.product)) return null;
@@ -638,6 +758,17 @@ function normStockUse(s, key){
 const EXPENSE_CATS = ['Supplies','Octopus','Electric','Mama','Backlog','Other'];
 function normCategory(v){ const c = txt(v).trim(); return EXPENSE_CATS.indexOf(c) >= 0 ? c : 'Other'; }
 
+// The ONLY Settings keys the Maintenance screen may write, and how to read each
+// one. Mirrors SETTABLE_SETTINGS in Code.gs exactly. `token` is deliberately
+// absent and must stay absent: it is never shown, never sent, never editable
+// here — an API that can rewrite its own shared secret can lock the owner out of
+// his own sheet from a phone.
+const SETTABLE_SETTINGS = {
+  branch:'text', staff:'text',
+  daily_salary:'money', split_default:'money',
+  mama_per_cutoff:'money', electric_per_cutoff:'money'
+};
+
 function normExpense(e, key){
   if (!isObj(e)) return null;
   const id = txt(pick(e, 'entry_id', 'entryId')) || txt(key);
@@ -646,7 +777,13 @@ function normExpense(e, key){
     date: txt(e.date), category: normCategory(e.category), item: txt(e.item),
     amount: num(e.amount), backlog_ref: txt(pick(e, 'backlog_ref', 'backlogRef')),
     notes: txt(e.notes),
-    entry_id: id, updated_at: txt(pick(e, 'updated_at', 'updatedAt'))
+    entry_id: id, updated_at: txt(pick(e, 'updated_at', 'updatedAt')),
+    // A DELIVERY names what arrived and how much of it, on the same row as the
+    // money that paid for it. Blank on most rows — most expenses are not tracked
+    // stock. `amount` is the money and is counted exactly once, as always;
+    // stock_qty feeds only the stock ledger.
+    stock_product: txt(pick(e, 'stock_product', 'stockProduct')),
+    stock_qty: num(pick(e, 'stock_qty', 'stockQty'))
   };
 }
 
@@ -699,17 +836,16 @@ function sanitizeState(raw){
   mergeSettings(s.settings, raw.settings);
   const prices = asArr(raw.prices).map(normPrice).filter(Boolean);
   if (prices.length) s.prices = prices;            // no usable prices -> keep the seed list
-  // Same rule for the two picklists: an empty or unusable list keeps the seeds
-  // so the supplies/stock cards are never blank.
-  const supplyItems = asArr(raw.supplyItems).map(normSupplyItem).filter(Boolean);
-  if (supplyItems.length) s.supplyItems = supplyItems;
+  // Same rule for the stock picklist: an empty or unusable list keeps the seeds
+  // so the stock card is never blank.
   const stockItems = asArr(raw.stockItems).map(normStockItem).filter(Boolean);
   if (stockItems.length) s.stockItems = stockItems;
   s.backlogs = asArr(raw.backlogs).map(normBacklog).filter(Boolean);
   s.days     = toRowMap(raw.days, normDay, r => r.date);
   s.counts   = toCountsMap(raw.counts);
-  s.dailySupplies = toDateListMap(raw.dailySupplies, normDailySupply);
   s.stockUsage    = toDateListMap(raw.stockUsage, normStockUse);
+  s.stockCounts   = toDateListMap(raw.stockCounts, normStockCount);
+  s.cutoffInputs  = toRowMap(raw.cutoffInputs, normCutoffInput, r => periodKey(r));
   s.expenses = toRowMap(raw.expenses, normExpense, r => r.entry_id);
   return s;
 }
@@ -726,7 +862,21 @@ function sanitizeConfig(raw){
 // Queued mutations are the user's unsaved work — keep every well-formed
 // entry, in order, payload untouched. Only drop entries the sync engine
 // could not send at all (unknown action, missing payload or key).
-const QUEUE_KEY_FOR = { saveDay:'date', saveExpense:'entryId', deleteExpense:'entryId' };
+// Every queued action, and the payload key that identifies it. The key is what
+// coalescing, the needs-attention list and "which day is this?" all read, so a
+// new action MUST be listed here — sanitizeQueue drops what it does not know,
+// and an unlisted action would be thrown away on the next app start.
+// The maintenance writers carry an entryId purely for this bookkeeping; the
+// server ignores it (they upsert by their own natural keys).
+// Actions whose payload is a COMPLETE snapshot of one form, so a second save
+// replaces the first outright instead of queueing behind it (last write wins).
+// Declared here because attnTarget() below needs it.
+const SNAPSHOT_ACTIONS = { savePrices:true, saveSettings:true, saveStockItems:true };
+const QUEUE_KEY_FOR = {
+  saveDay:'date', saveExpense:'entryId', deleteExpense:'entryId',
+  saveStockCount:'entryId', saveCutoffSplit:'entryId',
+  savePrices:'entryId', saveSettings:'entryId', saveStockItems:'entryId'
+};
 function sanitizeQueue(raw){
   const out = [];
   for (const item of asArr(raw)){
@@ -753,6 +903,11 @@ function sanitizeQueue(raw){
    ------------------------------------------------------------ */
 const ATTN_KINDS = { rejected:true, gcash:true, dropped:true };
 function attnTarget(action, payload){
+  // A config form coalesces by ACTION — one form, one pending batch — so its
+  // identity is the action itself. Keying it on entryId (a fresh uuid every
+  // save) meant a later save could never match an earlier refusal, so that
+  // red card could never be cleared and sat there forever.
+  if (SNAPSHOT_ACTIONS[action]) return action;
   const need = QUEUE_KEY_FOR[action];
   return need ? txt(asObj(payload)[need]) : '';
 }
@@ -792,13 +947,15 @@ function sanitizeDrafts(rawv){
     if (!isObj(d)) continue;
     out[k] = {
       date: k, closed: !!d.closed, staff: txt(d.staff),
-      custom: raw1(d.custom), customGcash: raw1(d.customGcash), notes: txt(d.notes),
+      custom: raw1(d.custom), customGcash: raw1(d.customGcash),
+      salary: raw1(d.salary), notes: txt(d.notes),
       rows: asArr(d.rows).filter(isObj).filter(r => txt(r.sku)).map(r => ({
         sku: txt(r.sku), sod: raw1(r.sod), eod: raw1(r.eod),
         cheese: raw1(r.cheese), gcash: raw1(r.gcash), gcashCheese: raw1(r.gcashCheese)
       })),
-      supplies: asArr(d.supplies).filter(isObj).filter(s => txt(s.item))
-        .map(s => ({ item: txt(s.item), amount: raw1(s.amount) })),
+      // A draft written by the old build also carries a `supplies` array. It is
+      // dropped here on purpose: that card is retired, and reviving those figures
+      // would put a purchase in two places.
       stock: asArr(d.stock).filter(isObj).filter(s => txt(s.product))
         .map(s => ({ product: txt(s.product), unit: txt(s.unit), qty: raw1(s.qty) }))
     };
@@ -812,13 +969,13 @@ function ensureShape(){
   if (!isObj(state)) state = freshState();
   if (!isObj(state.settings)) state.settings = freshState().settings;
   if (!Array.isArray(state.prices) || !state.prices.length) state.prices = freshState().prices;
-  if (!Array.isArray(state.supplyItems) || !state.supplyItems.length) state.supplyItems = freshState().supplyItems;
   if (!Array.isArray(state.stockItems) || !state.stockItems.length) state.stockItems = freshState().stockItems;
   if (!Array.isArray(state.backlogs)) state.backlogs = [];
   if (!isObj(state.days)) state.days = {};
   if (!isObj(state.counts)) state.counts = {};
-  if (!isObj(state.dailySupplies)) state.dailySupplies = {};
   if (!isObj(state.stockUsage)) state.stockUsage = {};
+  if (!isObj(state.stockCounts)) state.stockCounts = {};
+  if (!isObj(state.cutoffInputs)) state.cutoffInputs = {};
   if (!isObj(state.expenses)) state.expenses = {};
   if (!Array.isArray(queue)) queue = [];
   if (!isObj(config)) config = freshConfig();
@@ -858,12 +1015,18 @@ function protectedDates(){
   return keep;
 }
 // Expenses are deliberately NOT pruned: a backlog balance is total_amount minus
-// every Backlog payment ever made, so dropping old expense rows would silently
-// inflate the balances the More screen shows. They are one small row each.
+// every Backlog payment ever made, and a delivery's quantity rides on the same
+// row, so dropping old expense rows would silently inflate the balances AND
+// deflate stock on hand. They are one small row each.
+// StockCounts are not pruned either: the latest one per product is that product's
+// baseline, and a baseline can be months old — pruning it would move on hand.
+// Stock USAGE is pruned with the rest of the day's history, and stockStatusOf()
+// is what keeps that honest: it carries whatever the server counted and this
+// phone no longer holds, instead of quietly reading it as zero.
 function pruneState(keepDays){
   const min = daysAgoStr(num(keepDays) || RETAIN_DAYS);
   const keep = protectedDates();
-  for (const map of [state.days, state.counts, state.dailySupplies, state.stockUsage]){
+  for (const map of [state.days, state.counts, state.stockUsage]){
     if (!isObj(map)) continue;
     for (const d in map){ if (!keep[d] && (!isDateStr(d) || d < min)) delete map[d]; }
   }
@@ -958,9 +1121,19 @@ function uuid(){
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function truthy(v){ return v === true || v === 1 || v === 'TRUE' || v === 'true' || v === '1'; }
 function activePrices(){ return asArr(state.prices).filter(p => isObj(p) && truthy(p.active)); }
-function activeSupplyItems(){ return asArr(state.supplyItems).filter(s => isObj(s) && truthy(s.active)); }
 function activeStockItems(){ return asArr(state.stockItems).filter(s => isObj(s) && truthy(s.active)); }
 function staffList(){ return txt(asObj(state.settings).staff || 'Mama').split(',').map(s => s.trim()).filter(Boolean); }
+/** The current daily wage and the default split, from Settings. A blank or
+ *  unusable value falls back to the seeded figure — the same rule Code.gs
+ *  applies, so the phone and the note can never disagree about the rate. */
+function dailySalary(){
+  const v = asObj(state.settings).daily_salary;
+  return (v == null || v === '') ? DEFAULT_DAILY_SALARY : Math.max(0, num(v));
+}
+function splitDefault(){
+  const v = asObj(state.settings).split_default;
+  return (v == null || v === '') ? DEFAULT_SPLIT : Math.max(0, num(v));
+}
 
 /* ============================================================
    Domain math — day computation (mirrors the server rules) and
@@ -1043,19 +1216,51 @@ function shiftPeriod(per, dir){
   }
 }
 function inPeriod(dateStr, per){ return dateStr >= per.start && dateStr <= per.end; }
+/** A period's identity: "2026-07-16_2026-07-31". Defined here, beside the period
+ *  maths, because the cutoff figures need it to find that period's entered
+ *  split — not only the Cutoff screen. */
+function periodKey(per){ return txt(asObj(per).start) + '_' + txt(asObj(per).end); }
+
+/** That day's WAGE as the cutoff will count it: 0 on a closed day, the day's own
+ *  snapshot when it has one, else today's rate for a row saved before the figure
+ *  was stored. Identical to readDays() on the server, so the phone's preview and
+ *  the note can never disagree by ₱200 a day. */
+function daySalary(row){
+  const r = asObj(row);
+  if (truthy(r.closed)) return 0;
+  return r.salary === '' || r.salary == null ? dailySalary() : Math.max(0, num(r.salary));
+}
+
+/** The SPLIT for a period: an ENTERED amount, not the residual (owner,
+ *  2026-08-03). The row saved for this exact period if there is one, else the
+ *  Settings default. `entered` lets the screen say which one it is showing. */
+function splitFor(per){
+  const row = asObj(state.cutoffInputs)[periodKey(per)];
+  if (isObj(row) && row.split_amount !== '' && row.split_amount != null){
+    return { amount: Math.max(0, r2(row.split_amount)), entered: true };
+  }
+  return { amount: splitDefault(), entered: false };
+}
 
 function computeCutoff(per){
-  let rawTotal = 0, rawCash = 0, rawGcash = 0, daysWithSales = 0;
+  let rawTotal = 0, rawGcash = 0, rawSalary = 0, daysWithSales = 0, openDays = 0;
   const days = asObj(state.days);
   for (const d in days){
     if (!inPeriod(d, per)) continue;
     const row = asObj(days[d]);
-    rawTotal += num(row.total); rawCash += num(row.cash); rawGcash += num(row.gcash);
+    rawTotal += num(row.total); rawGcash += num(row.gcash);
+    // The wage for every day that was NOT closed, at the figure that day was
+    // saved with. Snapshotted per day precisely so a later rate change never
+    // rewrites history.
+    rawSalary += daySalary(row);
+    if (!truthy(row.closed)) openDays++;
     if (num(row.total) > 0) daysWithSales++;
   }
-  // Round the running sums BEFORE they feed Split, exactly as apiCutoff does,
-  // so the residual cannot drift from the archived figure by a centavo.
-  const total = r2(rawTotal), cash = r2(rawCash), gcash = r2(rawGcash);
+  // Round the running sums BEFORE they feed the residual, exactly as apiCutoff
+  // does, so the two cannot drift from each other by a centavo. Cash is derived
+  // from Total − GCash on both sides (never summed independently).
+  const total = r2(rawTotal), gcash = r2(rawGcash), salary = r2(rawSalary);
+  const cash = r2(total - gcash);
   // Prototype-free accumulator + whitelisted category, so a category like
   // "toString" can never take a wrong branch and drop money from the note.
   const b = Object.create(null);
@@ -1066,37 +1271,109 @@ function computeCutoff(per){
     if (!inPeriod(e.date, per)) continue;
     b[normCategory(e.category)] += num(e.amount);
   }
-  // The Supplies line is the sum of BOTH places a supply purchase can live:
-  // bulk buys logged as Expenses(Supplies) and the small per-item daily buys in
-  // DailySupplies. Same rule as apiCutoff(), so the preview and the archived
-  // note never differ. (The UI warns against entering one purchase twice.)
-  let dailySup = 0;
-  const sup = asObj(state.dailySupplies);
-  for (const d in sup){
-    if (!inPeriod(d, per)) continue;
-    for (const r of asArr(sup[d])) dailySup += num(asObj(r).amount);
-  }
-  // Stock usage is deliberately absent: it is quantities, never money.
-  const supplies = r2(b.Supplies + dailySup);
+  // Supplies is Expenses(category=Supplies) ALONE (v2.3.0). The nightly
+  // daily-supplies card is retired, so a purchase now lives in exactly one place
+  // and cannot be counted twice. Same rule as apiCutoff(), so the preview and the
+  // archived note never differ.
+  // Stock usage is deliberately absent everywhere here: it is quantities, never
+  // money. A delivery's stock_qty likewise moves only the ledger — its `amount`
+  // is the money and it is already inside b.Supplies exactly once.
+  const supplies = r2(b.Supplies);
   const other = r2(b.Backlog + b.Other);
-  // Split is the residual, so a bigger Supplies figure simply leaves less.
-  const split = r2(total - b.Mama - supplies - b.Octopus - other - b.Electric);
+  const mama = r2(b.Mama), octopus = r2(b.Octopus), electric = r2(b.Electric);
+  // Split is an ENTERED amount now, so it is no longer the residual...
+  const sp = splitFor(per);
+  const split = r2(sp.amount);
+  // ...REMAINING is: what is left in the business after everything, and the
+  // figure backlog payments are funded from. It MAY BE NEGATIVE (a short
+  // cutoff) and is never clamped — a clamp would hide exactly the fortnight
+  // the owner most needs to see.
+  const remaining = r2(total - mama - split - supplies - octopus - salary - other - electric);
   return {
-    total, cash, gcash, daysWithSales,
-    mama:r2(b.Mama), supplies, octopus:r2(b.Octopus), electric:r2(b.Electric),
-    other, split, perPartner: r2(split / 2)
+    total, cash, gcash, daysWithSales, openDays,
+    mama, supplies, octopus, electric, other, salary,
+    split, perPartner: r2(split / 2), splitEntered: sp.entered,
+    remaining
   };
 }
 
-function buildNote(f, per){
+/** The same figures with a DIFFERENT split, so the residual can follow the field
+ *  as it is typed without re-reading the whole period. The arithmetic is the one
+ *  in computeCutoff — kept in one expression here so the two cannot drift. */
+function cutoffWithSplit(f, rawSplit){
+  const split = r2(Math.max(0, num(rawSplit)));
+  const remaining = r2(num(f.total) - num(f.mama) - split - num(f.supplies) -
+    num(f.octopus) - num(f.salary) - num(f.other) - num(f.electric));
+  return Object.assign({}, f, { split, perPartner: r2(split / 2), remaining });
+}
+
+/* ---- The Split field: what it MEANS, and whether it has been saved yet. ----
+   The Split lives in two places at once — the figure saved for the period (in
+   state.cutoffInputs, which is what the note is built from) and the raw text in
+   the field. These three functions are the only bridge between them, so the
+   preview, the note and the save can never read the field differently. */
+// The Split as it is being typed, per period ("start_end" -> raw field value).
+// Kept out of state_v1 on purpose: it is unsaved typing, and the saved figure
+// lives in state.cutoffInputs where the preview and the note both read it.
+let splitEdits = {};
+
+/** The amount a raw field value MEANS. A BLANK field is the usual amount — the
+ *  same reading saveSplit() applies — because blank is how the screen shows "I
+ *  have not changed it". Reading a blank as ₱0 made the headline residual swing
+ *  by the whole split and flip its label, promising a figure no save would ever
+ *  write. */
+function splitFieldAmount(raw){
+  return (raw === '' || raw == null) ? splitDefault() : num(raw);
+}
+
+/** The figures the Cutoff screen is SHOWING: this period's figures with the
+ *  Split field as it currently reads. Untouched field -> the saved figure. */
+function liveCutoff(per){
+  const f = computeCutoff(per);
+  const key = periodKey(per);
+  if (!Object.prototype.hasOwnProperty.call(splitEdits, key)) return f;
+  return cutoffWithSplit(f, splitFieldAmount(splitEdits[key]));
+}
+
+/** A typed-but-UNSAVED Split for this period, or null when the field agrees with
+ *  what is saved. The note is built from the SAVED figure (the server reads
+ *  CutoffInputs), so while this returns something the note would contradict the
+ *  figures printed directly above it — and one screen showing two different
+ *  Splits is worse than no note at all. */
+function pendingSplit(per){
+  const key = periodKey(per);
+  if (!Object.prototype.hasOwnProperty.call(splitEdits, key)) return null;
+  const amount = r2(Math.max(0, splitFieldAmount(splitEdits[key])));
+  const saved = r2(splitFor(per).amount);
+  return amount === saved ? null : { key, raw: splitEdits[key], amount, saved };
+}
+
+/** "July 1 - 15" (same month) or "July 30 - August 2" (spanning months) —
+ *  identical to periodLabel() in Code.gs. Note text only, always English. */
+function notePeriodLabel(per){
   const s = d2parts(per.start), e = d2parts(per.end);
-  const branch = asObj(state.settings).branch || 'Octogo';
+  if (s.y === e.y && s.m === e.m) return EN_MONTHS[s.m-1] + ' ' + s.d + ' - ' + e.d;
+  return EN_MONTHS[s.m-1] + ' ' + s.d + ' - ' + EN_MONTHS[e.m-1] + ' ' + e.d;
+}
+
+function buildNote(f, per){
+  // Default branch matches Code.gs, so a phone that has never synced still
+  // writes the note the sheet would write.
+  const branch = asObj(state.settings).branch || 'Tañong';
+  // The final line is the RESIDUAL and its LABEL carries the sign, so a note can
+  // never read "Remaining - -2,000": "Remaining - 1,000" when it is 0 or more,
+  // "Short - 2,000" when it is negative. It always prints a number.
+  const remaining = num(f.remaining);
+  const residual = remaining < 0
+    ? 'Short - ' + fmt(-remaining)
+    : 'Remaining - ' + fmt(remaining);
   return [
-    branch + ': ' + EN_MONTHS[s.m-1] + ' ' + s.d + ' - ' + e.d + ' Breakdown',
+    branch + ': ' + notePeriodLabel(per) + ' Breakdown',
     '',
-    // Total/Cash/GCash always print a number (0 when empty); only the six
-    // expense categories below blank out at zero. This matches the server's
-    // buildNoteText exactly, so the preview and the archived note never differ.
+    // Total/Cash/GCash always print a number (0 when empty); only the seven
+    // expense/share categories below blank out at zero. This matches the
+    // server's buildNoteText exactly, byte for byte, so the preview and the
+    // archived note never differ.
     'Total - ' + fmt(f.total),
     '',
     'Cash - ' + fmt(f.cash),
@@ -1106,9 +1383,116 @@ function buildNote(f, per){
     'Split - ' + (num(f.split) !== 0 ? fmt(f.split) + '(' + fmt(f.perPartner) + ' each)' : ''),
     'Supplies - ' + noteVal(f.supplies),
     'Octopus - ' + noteVal(f.octopus),
+    'Salary - ' + noteVal(f.salary),
     'Other payments - ' + noteVal(f.other),
-    'Electric bill - ' + noteVal(f.electric)
+    'Electric bill - ' + noteVal(f.electric),
+    '',
+    residual
   ].join('\n');
+}
+
+/* ------------------------------------------------------------
+   STOCK ON HAND — computed, never stored (the same rule as a backlog balance).
+
+     baseline  = the latest stocktake known for the product (by date, then
+                 updated_at), else its opening figure
+     delivered = Σ Expenses.stock_qty  for the product, date > baseline date
+     used      = Σ StockUsage.qty      for the product, date > baseline date
+     on hand   = baseline + delivered − used
+     low       = reorder point > 0 and on hand <= it
+
+   STRICTLY AFTER the baseline date: a stocktake is an end-of-day figure that
+   already reflects that day's deliveries and usage. A BLANK baseline date means
+   the whole history counts ('' < any yyyy-MM-dd).
+
+   The arithmetic runs on the phone's OWN rows, which is what makes demo mode and
+   offline work honest — and it includes anything still queued, because the local
+   appliers have already written it into the mirror. The phone keeps ~120 days
+   though, while the server counts the WHOLE history, so whatever the server
+   counted and this phone cannot see is CARRIED rather than read as zero. An
+   unsynced row the server has not seen makes that difference negative, which is
+   floored at 0 and therefore counted exactly once.
+
+   On hand MAY BE NEGATIVE (the seeded baseline is 0, so usage against stock
+   delivered before tracking began legitimately reads below zero). It is shown
+   as-is: a negative figure is honest information that a count is needed.
+   ------------------------------------------------------------ */
+function latestStockCount(product){
+  let best = null;
+  const byDate = asObj(state.stockCounts);
+  for (const d in byDate){
+    for (const r of asArr(byDate[d])){
+      const c = asObj(r);
+      if (txt(c.product) !== product || !isDateStr(c.date)) continue;
+      if (!best || c.date > best.date ||
+          (c.date === best.date && txt(c.updated_at) >= txt(best.updated_at))) best = c;
+    }
+  }
+  return best;
+}
+
+function stockStatusOf(it){
+  const item = asObj(it);
+  const product = txt(item.product);
+  // The baseline the SERVER used (its latest count anywhere, else the opening
+  // figure). A count this phone knows about that is not older wins, so a
+  // just-queued "Correct the count" re-baselines immediately.
+  const server = { date: txt(item.baseline_date), qty: num(item.baseline_qty) };
+  let base = server;
+  let rebased = false;
+  const local = latestStockCount(product);
+  if (local && local.date >= server.date){
+    base = { date: txt(local.date), qty: num(local.counted_qty) };
+    rebased = local.date !== server.date || num(local.counted_qty) !== server.qty;
+  }
+
+  let delivered = 0;
+  const exps = asObj(state.expenses);
+  for (const id in exps){
+    const e = asObj(exps[id]);
+    if (txt(e.stock_product) === product && txt(e.date) > base.date) delivered += num(e.stock_qty);
+  }
+  let used = 0;
+  const usage = asObj(state.stockUsage);
+  for (const d in usage){
+    if (!(d > base.date)) continue;
+    for (const r of asArr(usage[d])){
+      if (txt(asObj(r).product) === product) used += num(asObj(r).qty);
+    }
+  }
+  // Rows the server counted that this phone no longer holds. Only meaningful
+  // while the baseline is still the server's: a newer local count is dated today,
+  // so everything before it is already inside the counted figure.
+  const carryD = rebased ? 0 : Math.max(0, r2(num(item.delivered_since) - delivered));
+  const carryU = rebased ? 0 : Math.max(0, r2(num(item.used_since) - used));
+  delivered = r2(delivered + carryD);
+  used = r2(used + carryU);
+
+  const onHand = r2(base.qty + delivered - used);
+  const reorderAt = num(item.reorder_at);
+  return {
+    product, unit: txt(item.unit),
+    on_hand: onHand,
+    low: reorderAt > 0 && onHand <= reorderAt,
+    reorder_at: reorderAt,
+    baseline_qty: r2(base.qty), baseline_date: base.date,
+    delivered_since: delivered, used_since: used
+  };
+}
+/** Every active product with its computed figures, in sheet order. */
+function stockStatusList(){ return activeStockItems().map(stockStatusOf); }
+/** The unit a product is opened in ("gallon"), whatever list it is on. */
+function stockUnitOf(product){
+  const it = asArr(state.stockItems).find(x => isObj(x) && x.product === txt(product));
+  return txt(it && it.unit);
+}
+function lowStockList(){ return stockStatusList().filter(s => s.low); }
+/** "2 packs" / "1 gallon" / "3" when the sheet has no unit for it. */
+function qtyWithUnit(qty, unit){
+  const n = num(qty);
+  const u = txt(unit).trim();
+  if (!u) return fmt(n);
+  return fmt(n) + ' ' + (Math.abs(n) === 1 ? u : u + 's');
 }
 
 /* ============================================================
@@ -1130,6 +1514,11 @@ function applyLocalDay(p){
   const stamp = new Date().toISOString();
   state.days[p.date] = {
     date:p.date, closed:!!p.closed, staff:p.staff || '',
+    // The wage, resolved and SNAPSHOTTED exactly as apiSaveDay does it: 0 on a
+    // closed day, the figure sent for a half day (an explicit 0 honoured), else
+    // today's rate. Stored per day so a later rate change never rewrites history.
+    salary: p.closed ? 0
+      : ((p.salary === '' || p.salary == null) ? dailySalary() : Math.max(0, num(p.salary))),
     gcash:c.gcash, total:c.total, cash:c.cash,
     custom_amount:c.custom, custom_gcash:c.customGcash,
     notes:p.notes || '', entry_id:p.entryId, updated_at:stamp
@@ -1140,11 +1529,10 @@ function applyLocalDay(p){
     gcash_qty:l.gcash_qty, gcash_cheese_qty:l.gcash_cheese_qty, gcash_amount:l.gcash_amount
   }));
   // The server rewrites the whole date block and writes only non-zero rows —
-  // mirror that exactly, or a zeroed item would linger on this phone alone.
-  // A closed day clears both, same as the server.
-  state.dailySupplies[p.date] = (p.closed ? [] : asArr(p.supplies))
-    .filter(s => isObj(s) && txt(s.item) && num(s.amount) > 0)
-    .map(s => ({ date:p.date, item:txt(s.item), amount:r2(s.amount), entry_id:p.entryId, updated_at:stamp }));
+  // mirror that exactly, or a zeroed product would linger on this phone alone.
+  // A closed day clears it, same as the server.
+  // (`p.supplies` is ignored: a payload queued by the old build still carries it,
+  // and the server ignores it too. Purchases live in Expenses and nowhere else.)
   state.stockUsage[p.date] = (p.closed ? [] : asArr(p.stock))
     .filter(s => isObj(s) && txt(s.product) && num(s.qty) > 0)
     .map(s => ({ date:p.date, product:txt(s.product), qty:num(s.qty), entry_id:p.entryId, updated_at:stamp }));
@@ -1155,8 +1543,90 @@ function applyLocalExpense(p){
   state.expenses[p.entryId] = {
     date:p.date, category:p.category, item:p.item || '', amount:num(p.amount),
     backlog_ref:p.backlogRef || '', notes:p.notes || '',
-    entry_id:p.entryId, updated_at:new Date().toISOString()
+    entry_id:p.entryId, updated_at:new Date().toISOString(),
+    // The optional delivery riding on this row. Money stays in `amount`, counted
+    // once; the quantity feeds only the stock ledger.
+    stock_product: txt(p.stockProduct),
+    stock_qty: txt(p.stockProduct) ? Math.max(0, num(p.stockQty)) : 0
   };
+}
+/** A stocktake: it becomes that product's new baseline. Keyed by entry_id like
+ *  the sheet, and filed under its date so the ledger can find it. */
+function applyLocalStockCount(p){
+  ensureShape();
+  const date = txt(p.date);
+  if (!isDateStr(date)) return;
+  const row = { date, product:txt(p.product), counted_qty:Math.max(0, num(p.qty)),
+    entry_id:txt(p.entryId), updated_at:new Date().toISOString() };
+  // Upsert by entry_id, across every date: a re-sent count must not become two.
+  for (const d in asObj(state.stockCounts)){
+    state.stockCounts[d] = asArr(state.stockCounts[d]).filter(r => txt(asObj(r).entry_id) !== row.entry_id);
+    if (!state.stockCounts[d].length) delete state.stockCounts[d];
+  }
+  (state.stockCounts[date] = asArr(state.stockCounts[date])).push(row);
+}
+/** The entered Split for one period, upserted by (start, end) like the sheet. */
+function applyLocalCutoffSplit(p){
+  ensureShape();
+  const per = { start:txt(p.start), end:txt(p.end) };
+  if (!isDateStr(per.start) || !isDateStr(per.end)) return;
+  state.cutoffInputs[periodKey(per)] = {
+    start:per.start, end:per.end, split_amount:Math.max(0, r2(p.amount)),
+    entry_id:txt(p.entryId), updated_at:new Date().toISOString()
+  };
+  invalidateNoteFor(per.start);
+}
+/* ---- Maintenance writers, applied locally so the screens show the new figures
+   straight away and keep showing them offline. Each one touches ONLY the fields
+   its action can write, and leaves rows the payload does not mention alone. ---- */
+function applyLocalPrices(p){
+  ensureShape();
+  for (const r of asArr(p.rows)){
+    const row = asObj(r);
+    const pr = asArr(state.prices).find(x => isObj(x) && x.sku === txt(row.sku));
+    if (!pr) continue;                    // the server refuses an unknown sku too
+    pr.price = Math.max(0, num(row.price));
+    pr.cheese_price = Math.max(0, num(row.cheesePrice));
+    pr.active = !!row.active;
+  }
+}
+function applyLocalSettings(p){
+  ensureShape();
+  // A generated note can depend on these (the usual split, and the wage a day
+  // saved before v2.3.0 counts at), so it is stale the moment they change.
+  lastNote = null;
+  const inc = asObj(p.settings);
+  for (const k in inc){
+    // The same whitelist the server enforces. `token` is not on it and must
+    // never be: an API that can rewrite its own secret can lock the owner out.
+    if (!Object.prototype.hasOwnProperty.call(SETTABLE_SETTINGS, k)) continue;
+    const v = inc[k];
+    if (v == null || typeof v === 'object') continue;
+    state.settings[k] = SETTABLE_SETTINGS[k] === 'money' ? Math.max(0, num(v)) : txt(v);
+  }
+}
+function applyLocalStockItems(p){
+  ensureShape();
+  let maxSort = 0;
+  for (const x of asArr(state.stockItems)) maxSort = Math.max(maxSort, num(asObj(x).sort));
+  for (const r of asArr(p.rows)){
+    const row = asObj(r);
+    const product = txt(row.product);
+    if (!product) continue;
+    let it = asArr(state.stockItems).find(x => isObj(x) && x.product === product);
+    if (!it){
+      // A brand-new product is safe to create here (unlike a price): it carries
+      // no money, and it starts with a zero baseline like the seeded six.
+      it = { product, unit:'', active:true, sort:++maxSort,
+        opening_qty:0, opening_date:'', reorder_at:'',
+        baseline_qty:0, baseline_date:'', delivered_since:0, used_since:0 };
+      state.stockItems.push(it);
+    }
+    it.unit = txt(row.unit);
+    it.active = !!row.active;
+    it.reorder_at = rawNum(row.reorderAt);
+    // `sort`, the opening baseline and the ledger figures are never touched here.
+  }
 }
 function applyLocalDeleteExpense(p){
   ensureShape();
@@ -1165,11 +1635,54 @@ function applyLocalDeleteExpense(p){
   delete state.expenses[p.entryId];
 }
 
+// Every queued action has a local applier, and they are replayed IN ORDER on top
+// of a fresh snapshot. An action missing from here would show the old figure
+// until the sheet answered — which offline is "forever".
+const LOCAL_APPLIERS = {
+  saveDay: p => applyLocalDay(p),
+  saveExpense: p => applyLocalExpense(p),
+  deleteExpense: p => applyLocalDeleteExpense(p),
+  saveStockCount: p => applyLocalStockCount(p),
+  saveCutoffSplit: p => applyLocalCutoffSplit(p),
+  savePrices: p => applyLocalPrices(p),
+  saveSettings: p => applyLocalSettings(p),
+  saveStockItems: p => applyLocalStockItems(p)
+};
+function applyLocalMutation(action, payload){
+  const apply = Object.prototype.hasOwnProperty.call(LOCAL_APPLIERS, action)
+    ? LOCAL_APPLIERS[action] : null;
+  if (apply) apply(payload);
+}
+/** Everything this phone holds that the SHEET does not, replayed on top of a
+ *  fresh snapshot — the queue AND the needs-attention list.
+ *
+ *  The attention list is not optional here. A mutation the server REFUSED
+ *  leaves the queue (it would jam every later item) and lives only in
+ *  `attention`, so replaying the queue alone left applyBootstrap deleting that
+ *  date: it sits inside window_start, the reply does not carry it, and inside
+ *  its own window the snapshot is authoritative. The day was wiped off the
+ *  phone — the one copy of it anywhere — while the red card still told her to go
+ *  and fix it. Never tell someone to fix a day that has vanished.
+ *
+ *  Order: the queue first, then anything on the attention list the queue does
+ *  NOT already carry for the same target. A rejection is older than whatever
+ *  was queued after it, so the queue keeps the last word. The appliers are
+ *  idempotent, so replaying is always safe. */
 function reapplyQueue(){
-  for (const item of asArr(queue)){
-    if (item.action === 'saveDay') applyLocalDay(item.payload);
-    else if (item.action === 'saveExpense') applyLocalExpense(item.payload);
-    else if (item.action === 'deleteExpense') applyLocalDeleteExpense(item.payload);
+  const q = asArr(queue);
+  for (const item of q) applyLocalMutation(item.action, item.payload);
+  for (const a of asArr(attention)){
+    // ONLY a 'rejected' entry is work the sheet does not have; it must be
+    // replayed or the bootstrap deletes a day the user was just told to fix.
+    // 'dropped' and 'gcash' are NOTES about days the sheet already holds —
+    // replaying those re-runs applyLocalDay, which recomputes money from
+    // today's prices and throws away the snapshot the server just sent, so a
+    // price change would silently restate an old day's takings.
+    if (a.kind !== 'rejected') continue;
+    const target = attnTarget(a.action, a.payload);
+    if (target && q.some(item => item.action === a.action &&
+        attnTarget(item.action, item.payload) === target)) continue;
+    applyLocalMutation(a.action, a.payload);
   }
 }
 
@@ -1188,8 +1701,14 @@ function enqueue(action, payload){
     const i = queue.findIndex(q => q.action === 'saveDay' && q.payload.date === payload.date);
     if (i >= 0){ queue[i] = { action, payload, tries:0 }; persistQueue(); updateStatus(); return; }
   }
-  if (action === 'saveExpense'){
-    const i = queue.findIndex(q => q.action === 'saveExpense' && q.payload.entryId === payload.entryId);
+  // Everything else is identified by its entryId (the same key the sheet upserts
+  // on), so re-saving the same expense, stocktake or split converges on one item.
+  if (QUEUE_KEY_FOR[action] === 'entryId' && txt(payload.entryId)){
+    const i = queue.findIndex(q => q.action === action && q.payload.entryId === payload.entryId);
+    if (i >= 0){ queue[i] = { action, payload, tries:0 }; persistQueue(); updateStatus(); return; }
+  }
+  if (SNAPSHOT_ACTIONS[action]){
+    const i = queue.findIndex(q => q.action === action);
     if (i >= 0){ queue[i] = { action, payload, tries:0 }; persistQueue(); updateStatus(); return; }
   }
   if (action === 'deleteExpense'){
@@ -1231,6 +1750,30 @@ function clearAttentionFor(action, target){
 }
 function findAttention(key){ return attention.find(a => attnKey(a) === key) || null; }
 function attentionForDate(date){ return asArr(attention).filter(a => a.date === date); }
+/** Whether the sheet is missing this date — a refusal, or a lost GCash split.
+ *  ('dropped' is a note about one sku, not a missing day.) */
+function dateNotInSheet(date){
+  return attentionForDate(date).some(a => a.kind !== 'dropped');
+}
+/** What to say once the receipt has torn off. The tear-off animation runs ~450ms,
+ *  so its callback speaks AFTER drainQueue has already said the server refused
+ *  the day — and "Saved <date>." was landing last, leaving the final word on
+ *  screen a claim that is false. Say nothing when the day is not in the sheet:
+ *  the rejection toast and the red card are the truth. */
+// What we can HONESTLY say the instant a day is written locally. Claiming
+// "Saved" here was a race: it was only true if the server's refusal happened to
+// beat the tear-off animation, and on a cold Apps Script start over mobile data
+// (~1.5s) "Saved August 3" sat on screen for half a second before a rejection
+// replaced it. With prefers-reduced-motion the callback runs synchronously, so
+// the refusal always lost. So: only say "Saved" when there is nothing left to
+// send; while it is still in flight, say what is actually true.
+function daySavedMessage(date){
+  if (dateNotInSheet(date)) return '';                       // already refused
+  if (!config.apiUrl) return 'Saved on this phone.';           // demo mode: nowhere else to go
+  const waiting = asArr(queue).some(q => q.action === 'saveDay' && txt(q.payload.date) === date);
+  return waiting ? 'Sending ' + fmtShort(date) + ' to the sheet…'
+                 : 'Saved ' + fmtShort(date) + '.';
+}
 
 // A day queued BEFORE v2.1 carries a TYPED gcash total and no per-sku GCash
 // buckets. The server ignores that figure (rightly — it is computed now), so
@@ -1374,6 +1917,10 @@ function applyServerDay(p, data){
   // Guarded on its own: an older deployment's reply has no `gcash` at all, and
   // reading it as 0 there would wipe a perfectly good computed figure.
   if (data.gcash != null) day.gcash = num(data.gcash);
+  // The wage the server actually stored, so the phone shows the figure the cutoff
+  // will use rather than its own guess at the rate. Same guard: an older
+  // deployment sends no salary, and 0 would read as "a day off".
+  if (data.salary != null && data.salary !== '') day.salary = num(data.salary);
   if (Array.isArray(data.lines)){
     const rows = asArr(asObj(state.counts)[p.date]);
     for (const l of data.lines){
@@ -1461,13 +2008,9 @@ function applyBootstrap(data){
     const prices = data.prices.map(normPrice).filter(Boolean);
     if (prices.length) state.prices = prices;       // no usable prices -> keep what we have
   }
-  // The two picklists follow the same rule as prices: an empty or all-bad list
-  // keeps what we have, so a sheet that has not been migrated yet (no
-  // SupplyItems/StockItems tab) still shows the seeded cards.
-  if (Array.isArray(data.supplyItems)){
-    const items = data.supplyItems.map(normSupplyItem).filter(Boolean);
-    if (items.length) state.supplyItems = items;
-  }
+  // The stock picklist follows the same rule as prices: an empty or all-bad list
+  // keeps what we have, so a sheet that has not been migrated yet (no StockItems
+  // tab) still shows the seeded card.
   if (Array.isArray(data.stockItems)){
     const items = data.stockItems.map(normStockItem).filter(Boolean);
     if (items.length) state.stockItems = items;
@@ -1475,14 +2018,14 @@ function applyBootstrap(data){
   if (Array.isArray(data.backlogs)) state.backlogs = data.backlogs.map(normBacklog).filter(Boolean);
 
   // REPLACE, never merge, for every date the snapshot covers. Merging left a
-  // date whose supply rows had been CLEARED in the sheet holding its old rows
-  // on this phone forever — and DailySupplies is money: it feeds the cutoff
-  // note's Supplies line. Same for counts and stock usage, which the server
-  // also rewrites per date.
-  const dayMap   = data.days != null          ? toRowMap(data.days, normDay, r => r.date)                  : null;
-  const countMap = data.counts != null        ? toCountsMap(data.counts)                                   : null;
-  const supMap   = data.dailySupplies != null ? toDateListMap(data.dailySupplies, normDailySupply)         : null;
-  const useMap   = data.stockUsage != null    ? toDateListMap(data.stockUsage, normStockUse)               : null;
+  // date whose rows had been CLEARED in the sheet holding its old rows on this
+  // phone forever — and stock rows move on-hand, which is money's twin: they say
+  // what has to be bought. Counts and stock usage are both rewritten per date by
+  // the server, so the snapshot is the truth for a date it mentions.
+  const dayMap   = data.days != null        ? toRowMap(data.days, normDay, r => r.date)      : null;
+  const countMap = data.counts != null      ? toCountsMap(data.counts)                       : null;
+  const useMap   = data.stockUsage != null  ? toDateListMap(data.stockUsage, normStockUse)   : null;
+  const cntMap   = data.stockCounts != null ? toDateListMap(data.stockCounts, normStockCount): null;
   // The window the snapshot speaks for. The server states it (window_start) so
   // that "older than this reply covers" and "deleted in the sheet" are
   // distinguishable: inside the window the snapshot is the truth and a row it
@@ -1496,23 +2039,36 @@ function applyBootstrap(data){
     // authoritative for EVERY collection: a date it omits was deleted. One
     // shared set is right here precisely because the reply covers all of them.
     const covered = Object.create(null);
-    for (const m of [dayMap, countMap, supMap, useMap]){ if (m) for (const d in m) covered[d] = true; }
-    for (const store of [state.days, state.counts, state.dailySupplies, state.stockUsage]){
+    for (const m of [dayMap, countMap, useMap, cntMap]){ if (m) for (const d in m) covered[d] = true; }
+    for (const store of [state.days, state.counts, state.stockUsage, state.stockCounts]){
       for (const d in asObj(store)) if (d >= winStart) covered[d] = true;
     }
     if (dayMap) replaceCovered(state.days, dayMap, covered, true);
     if (countMap) replaceCovered(state.counts, countMap, covered);
-    if (supMap)   replaceCovered(state.dailySupplies, supMap, covered);
     if (useMap)   replaceCovered(state.stockUsage, useMap, covered);
+    if (cntMap)   replaceCovered(state.stockCounts, cntMap, covered);
   } else {
     // No stated window (older deployment): stay cautious. Only touch dates the
     // reply itself mentions, each collection judged on its OWN dates — sharing
-    // one set across them let a date carrying supplies delete that date's day —
+    // one set across them let a date carrying stock rows delete that date's day —
     // and never remove a day, which is the pre-window behaviour.
     if (dayMap) Object.assign(state.days, dayMap);
     if (countMap) replaceCovered(state.counts, countMap, ownDates(countMap));
-    if (supMap)   replaceCovered(state.dailySupplies, supMap, ownDates(supMap));
     if (useMap)   replaceCovered(state.stockUsage, useMap, ownDates(useMap));
+    if (cntMap)   replaceCovered(state.stockCounts, cntMap, ownDates(cntMap));
+  }
+  // The entered splits. Period-keyed, not date-keyed: every row whose period ENDS
+  // inside the window ships, so inside that span the reply is authoritative and a
+  // row it omits was deleted in the sheet.
+  if (data.cutoffInputs != null){
+    const inputs = toRowMap(data.cutoffInputs, normCutoffInput, r => periodKey(r));
+    if (winStart){
+      for (const k in asObj(state.cutoffInputs)){
+        const end = txt(asObj(state.cutoffInputs[k]).end);
+        if (end && end >= winStart && !inputs[k]) delete state.cutoffInputs[k];
+      }
+    }
+    Object.assign(state.cutoffInputs, inputs);
   }
   if (data.expenses != null){
     const expMap = toRowMap(data.expenses, normExpense, r => r.entry_id);
@@ -1692,7 +2248,6 @@ function loadBentaForm(date){
     seen[c.sku] = true;
     rows.push(rowOf(c.sku, c));
   }
-  const supplies = bentaSupplyRows(d);
   const stock = bentaStockRows(d);
   benta = {
     date: d,
@@ -1700,18 +2255,27 @@ function loadBentaForm(date){
     staff: txt(day.staff) || (staff[0] || ''),
     custom: num(day.custom_amount),
     customGcash: num(day.custom_gcash),
+    // The day's WAGE. A saved day shows the figure it was saved with (so history
+    // never moves when the rate changes); a new day starts at today's rate, and
+    // it can be lowered for a half day. A CLOSED day stores 0 and hides the
+    // field, so it shows the usual rate instead — otherwise turning "Closed
+    // today" back off would leave a silent ₱0 wage on a day that was worked.
+    salary: (hasDay && !day.closed) ? daySalary(day) : dailySalary(),
     notes: txt(day.notes),
     rows,
-    supplies,
     stock,
     // Open a card that already has entries so an edited day shows everything it
     // holds; otherwise remember whatever the user had open.
-    suppliesOpen: !!prev.suppliesOpen || supplies.some(s => num(s.amount) > 0),
     stockOpen: !!prev.stockOpen || stock.some(s => num(s.qty) > 0),
+    // Same rule for the wage: collapsed when it is simply the usual rate (which
+    // is almost every night), open whenever the day carries a different figure —
+    // a half day, or a day nobody was paid. Set below, once `benta` exists.
+    wageOpen: !!prev.wageOpen,
     saved: hasDay,
     dirty: false,       // set on any user edit; cleared on load/save
     fromDraft: false    // true when unsaved typing was restored for this date
   };
+  if (wageIsCustom()) benta.wageOpen = true;
   // Unsaved typing for this date always wins over what is stored: changing the
   // date, backgrounding the app or a reload must not cost her the numbers she
   // has already read out of the notebook.
@@ -1727,24 +2291,23 @@ function applyBentaDraft(dr){
   benta.staff = txt(dr.staff) || benta.staff;
   benta.custom = dr.custom;
   benta.customGcash = dr.customGcash;
+  // A draft from the old build has no salary in it: keep the loaded figure rather
+  // than blanking a wage nobody chose to change.
+  if (dr.salary !== '' && dr.salary != null) benta.salary = dr.salary;
   benta.notes = txt(dr.notes);
   for (const d of asArr(dr.rows)){
     const row = benta.rows.find(r => r.sku === d.sku);
     if (row){ row.sod = d.sod; row.eod = d.eod; row.cheese = d.cheese; row.gcash = d.gcash; row.gcashCheese = d.gcashCheese; }
     else benta.rows.push({ sku:d.sku, sod:d.sod, eod:d.eod, cheese:d.cheese, gcash:d.gcash, gcashCheese:d.gcashCheese });
   }
-  for (const d of asArr(dr.supplies)){
-    const row = benta.supplies.find(r => r.item === d.item);
-    if (row) row.amount = d.amount;
-    else benta.supplies.push({ item:d.item, amount:d.amount });
-  }
   for (const d of asArr(dr.stock)){
     const row = benta.stock.find(r => r.product === d.product);
     if (row) row.qty = d.qty;
     else benta.stock.push({ product:d.product, unit:d.unit, qty:d.qty });
   }
-  if (benta.supplies.some(s => num(s.amount) > 0)) benta.suppliesOpen = true;
   if (benta.stock.some(s => num(s.qty) > 0)) benta.stockOpen = true;
+  // A restored draft must show everything it holds, the wage included.
+  if (wageIsCustom()) benta.wageOpen = true;
   benta.dirty = true;      // it is still unsent work
   benta.fromDraft = true;
 }
@@ -1755,12 +2318,12 @@ function stashBentaDraft(){
   if (!isObj(benta) || !benta.dirty || !isDateStr(benta.date)) return;
   drafts[benta.date] = {
     date: benta.date, closed: !!benta.closed, staff: txt(benta.staff),
-    custom: raw1(benta.custom), customGcash: raw1(benta.customGcash), notes: txt(benta.notes),
+    custom: raw1(benta.custom), customGcash: raw1(benta.customGcash),
+    salary: raw1(benta.salary), notes: txt(benta.notes),
     rows: asArr(benta.rows).map(r => ({
       sku: txt(r.sku), sod: raw1(r.sod), eod: raw1(r.eod),
       cheese: raw1(r.cheese), gcash: raw1(r.gcash), gcashCheese: raw1(r.gcashCheese)
     })),
-    supplies: asArr(benta.supplies).map(s => ({ item: txt(s.item), amount: raw1(s.amount) })),
     stock: asArr(benta.stock).map(s => ({ product: txt(s.product), unit: txt(s.unit), qty: raw1(s.qty) }))
   };
   persistDrafts();
@@ -1769,27 +2332,11 @@ function clearBentaDraft(date){
   if (drafts[date] != null){ delete drafts[date]; persistDrafts(); }
 }
 
-// Both picklists follow the SKU rule: every active item, plus any item this
-// date already has a figure for, so editing an old day cannot silently erase
-// an entry whose picklist row was later deactivated or renamed.
-// A blank (not 0) amount means "nothing entered" — nicer to read than a wall
+// The stock picklist follows the SKU rule: every active product, plus any product
+// this date already has a figure for, so editing an old day cannot silently erase
+// an entry whose row was later deactivated or renamed.
+// A blank (not 0) quantity means "nothing opened" — nicer to read than a column
 // of zeroes, and it is what keeps the row out of the payload entirely.
-function bentaSupplyRows(d){
-  const saved = asArr(asObj(state.dailySupplies)[d]).filter(isObj);
-  const rows = [], seen = {};
-  for (const it of activeSupplyItems()){
-    if (seen[it.item]) continue;
-    seen[it.item] = true;
-    const hit = saved.find(r => r.item === it.item);
-    rows.push({ item:it.item, amount: hit ? num(hit.amount) : '' });
-  }
-  for (const r of saved){
-    if (!r.item || seen[r.item]) continue;
-    seen[r.item] = true;
-    rows.push({ item:r.item, amount:num(r.amount) });
-  }
-  return rows;
-}
 function bentaStockRows(d){
   const saved = asArr(asObj(state.stockUsage)[d]).filter(isObj);
   const rows = [], seen = {};
@@ -1819,6 +2366,11 @@ function bentaPayload(){
     staff: benta.staff,
     customAmount: custom,
     customGcash: closed ? 0 : Math.min(custom, Math.max(0, num(benta.customGcash))),
+    // The wage for this day. Sent as a figure so the sheet snapshots exactly what
+    // is on screen; left OUT when the field is empty, which tells the server to
+    // use the current rate. A closed day costs nothing and the server forces 0.
+    salary: closed ? 0
+      : (benta.salary === '' || benta.salary == null ? '' : Math.max(0, num(benta.salary))),
     notes: benta.notes,
     // REQUEST keys are camelCase. `gcash` is deliberately NOT sent: the server
     // computes it from these buckets and ignores a typed figure.
@@ -1826,11 +2378,11 @@ function bentaPayload(){
       sku:r.sku, sod:num(r.sod), eod:num(r.eod),
       cheeseQty:num(r.cheese), gcashQty:num(r.gcash), gcashCheeseQty:num(r.gcashCheese)
     })),
-    // Only what was actually spent/used travels: the server writes non-zero
-    // rows only, and a 0 for an item that has since left the sheet's picklist
-    // would be rejected as an unknown item for no reason.
-    supplies: closed ? [] : asArr(benta.supplies)
-      .filter(s => num(s.amount) > 0).map(s => ({ item:s.item, amount:num(s.amount) })),
+    // Only what was actually opened travels: the server writes non-zero rows
+    // only, and a 0 for a product that has since left the sheet's list would be
+    // rejected as unknown for no reason.
+    // (No `supplies` array any more — that card is retired. Purchases go under
+    // Expenses, which is now the only place they can live.)
     stock: closed ? [] : asArr(benta.stock)
       .filter(s => num(s.qty) > 0).map(s => ({ product:s.product, qty:num(s.qty) }))
   };
@@ -1961,12 +2513,24 @@ function attnCopy(a){
     why: 'This day is NOT in the Google Sheet. The server would not take it: ' + a.message,
     help: 'Open this day, fix what that message says, then tap Save day again.'
   };
+  // Everything else: name WHAT did not reach the sheet, in the words the screen
+  // that made it uses, and where to put it right.
+  const what = ATTN_WHAT[a.action] || { thing:'entry', where:'Add it again.' };
   return {
-    when: when + ' — expense',
-    why: 'This expense is NOT in the Google Sheet. The server would not take it: ' + a.message,
-    help: 'Tap Try again. If it keeps failing, add it again from the Expenses screen.'
+    when: (isDateStr(a.date) ? when + ' — ' : '') + what.thing,
+    why: 'This ' + what.thing + ' is NOT in the Google Sheet. The server would not take it: ' + a.message,
+    help: 'Tap Try again. If it keeps failing: ' + what.where
   };
 }
+const ATTN_WHAT = {
+  saveExpense:     { thing:'expense',    where:'add it again from the Expenses screen.' },
+  deleteExpense:   { thing:'deletion',   where:'delete it again from the Expenses screen.' },
+  saveStockCount:  { thing:'stock count', where:'count it again under More → Stock on hand.' },
+  saveCutoffSplit: { thing:'split',      where:'enter it again on the Cutoff screen.' },
+  savePrices:      { thing:'price change', where:'change it again under More → Maintenance.' },
+  saveSettings:    { thing:'settings change', where:'change it again under More → Maintenance.' },
+  saveStockItems:  { thing:'stock list change', where:'change it again under More → Maintenance.' }
+};
 function attentionCardHTML(){
   ensureShape();
   if (!attention.length && !storageFull) return '';
@@ -2025,6 +2589,21 @@ function dismissAttention(key){
   renderPanel(activeTab);
 }
 
+/* ONE quiet line when something is at or below its reorder point — never a
+   modal, never anything that has to be dismissed before the day can be entered.
+   It is a shopping reminder, not an error. */
+function lowStockLineHTML(){
+  let low = [];
+  try{ low = lowStockList(); }catch(err){ console.error(err); return ''; }
+  if (!low.length) return '';
+  const names = listPhrase(low.map(s => s.product));
+  return '<div class="low-line">' +
+    '<span aria-hidden="true">🛒</span>' +
+    '<span>Running low on <b>' + esc(names) + '</b>. ' +
+      '<button type="button" class="lnk" data-act="goto-stock">See stock on hand</button></span>' +
+  '</div>';
+}
+
 function renderBenta(){
   if (!benta) loadBentaForm(todayStr());
   const isToday = benta.date === todayStr();
@@ -2033,6 +2612,7 @@ function renderBenta(){
 
   // Anything that did not reach the sheet comes FIRST — before the day's entry.
   h += attentionCardHTML();
+  h += lowStockLineHTML();
 
   // Date header (tap to backfill)
   h += '<div class="card date-card">' +
@@ -2047,10 +2627,9 @@ function renderBenta(){
 
   // Never claim a day is saved while it is sitting on the needs-attention list:
   // the sheet does not have it.
-  const dayAttn = attentionForDate(benta.date).filter(a => a.kind !== 'dropped');
   if (benta.fromDraft){
     h += '<p class="saved-hint" style="color:var(--accent);">Your unsent numbers for this day were kept. Tap Save day when it is complete.</p>';
-  } else if (benta.saved && !dayAttn.length){
+  } else if (benta.saved && !dateNotInSheet(benta.date)){
     h += '<p class="saved-hint">✓ This day is already saved. You are editing it.</p>';
   }
 
@@ -2152,9 +2731,15 @@ function renderBenta(){
         '<input class="input" id="dayNotes" autocomplete="off" placeholder="e.g. 30 pcs party order" value="' + esc(benta.notes) + '"></div>' +
     '</div>';
 
-    // Saved by the same "Save day" button as everything above.
-    topUpPicklistRows();
-    h += suppliesCardHTML() + stockCardHTML();
+    // The day's WAGE and the stock used, both saved by the same "Save day"
+    // button as everything above. Both collapsed on the ordinary night — the
+    // wage is already right and nothing was opened — so the common path down to
+    // Save day is short. Either card opens itself when it holds something.
+    h += wageCardHTML();
+    topUpStockRows();
+    h += stockCardHTML();
+  } else {
+    h += '<p class="hint" style="margin:-4px 4px 14px;">A closed day costs no wage, so nothing is added for it.</p>';
   }
 
   // Live receipt strip
@@ -2176,7 +2761,7 @@ function renderBenta(){
   validateBentaLive();
 }
 
-/* ---- The two collapsible cards, saved by the same "Save day" action ---- */
+/* ---- The stock card, saved by the same "Save day" action ---- */
 const CHEV = '<svg class="chev" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
   'stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
 
@@ -2191,80 +2776,110 @@ function collapseCardHTML(key, title, summary, open, body){
   '</div>';
 }
 
-function suppliesTotal(){ return asArr(benta.supplies).reduce((s, r) => s + Math.max(0, num(r.amount)), 0); }
+/* ---- The WAGE card. Collapsed on an ordinary night, because it is already
+   filled in with the usual rate and the nightly job is the boxes, not the wage.
+   It is never hidden when it holds something to see: a half day, or a day nobody
+   was paid, opens the card itself — and the amount is in the card's head either
+   way, so it can be checked without opening anything. ---- */
+/** A wage that is not simply the usual rate. */
+function wageIsCustom(){
+  const v = asObj(benta).salary;
+  return v !== '' && v != null && num(v) !== dailySalary();
+}
+/** The figure shown beside the card's title. A blank field means the usual rate,
+ *  which is exactly what the server will snapshot for the day. */
+function wageSummary(){
+  return peso(asObj(benta).salary === '' ? dailySalary() : num(asObj(benta).salary));
+}
+function wageCardHTML(){
+  const body = '<div class="field" style="margin-bottom:0;">' +
+      '<label for="daySalary">Wage (₱)</label>' +
+      '<input class="input money" id="daySalary" inputmode="decimal" autocomplete="off" placeholder="' +
+        esc(fmt(dailySalary())) + '" value="' + esc(benta.salary === '' ? '' : benta.salary) + '">' +
+      '<p class="hint" style="margin-top:6px;">The usual wage is ' + peso(dailySalary()) +
+        ' a day. Lower it for a half day, or put 0 if nobody was paid. ' +
+        'It is not part of today’s sales — it comes out at the cutoff.</p>' +
+      '<p class="err" id="err-salary" hidden></p>' +
+    '</div>';
+  return collapseCardHTML('wage', 'Wage for this day', wageSummary(), benta.wageOpen, body);
+}
+function updateWageCard(){
+  const sum = document.querySelector('#panel-benta [data-act="toggle-wage"] .ch-sum');
+  if (sum) sum.textContent = wageSummary();
+}
+
 function stockUsedCount(){ return asArr(benta.stock).filter(r => num(r.qty) > 0).length; }
 
-// The two picklists are ADVISORY, not referential integrity: a row whose name
-// has left the sheet's list must still save (the day has to stay re-saveable),
-// so all this answers is whether to show the quiet note next to the row.
-function supplyListed(name){ return activeSupplyItems().some(s => s.item === name); }
+// The stock list is ADVISORY, not referential integrity: a row whose name has
+// left the sheet's list must still save (the day has to stay re-saveable), so all
+// this answers is whether to show the quiet note next to the row.
 function stockListed(name){ return activeStockItems().some(s => s.product === name); }
 
-// A mid-session sync can add an item to either picklist. Top the form up the
-// same way the SKU list does — appended at the end, so nothing already typed
-// moves and every row index stays valid.
-function topUpPicklistRows(){
-  const sup = asArr(benta.supplies);
-  for (const it of activeSupplyItems()){
-    if (!sup.some(r => r.item === it.item)) sup.push({ item:it.item, amount:'' });
-  }
+// A mid-session sync can add a product to the list. Top the form up the same way
+// the SKU list does — appended at the end, so nothing already typed moves and
+// every row index stays valid.
+function topUpStockRows(){
   const stk = asArr(benta.stock);
   for (const it of activeStockItems()){
     if (!stk.some(r => r.product === it.product)) stk.push({ product:it.product, unit:txt(it.unit), qty:'' });
   }
 }
 
-function suppliesCardHTML(){
-  // Both places a supply purchase can be logged land on the SAME Supplies line
-  // of the cutoff note, so the hint has to say which one to use.
-  let body = '<p class="hint">Small things you bought for today. Big or bulk buys go under Expenses instead, so nothing is counted twice.</p>';
-  const rows = asArr(benta.supplies);
-  if (!rows.length){
-    body += '<p class="hint" style="margin-top:10px;">No items yet. Add them in the SupplyItems tab of the Google Sheet, then sync.</p>';
-  }
-  rows.forEach((r, i) => {
-    const nm = esc(r.item);
-    body += '<div class="line-row">' +
-        '<label class="ln-name" for="in-sup-' + i + '">' + nm + '</label>' +
-        '<input class="input money" id="in-sup-' + i + '" data-sup="' + i + '" inputmode="decimal" autocomplete="off" ' +
-          'placeholder="0" value="' + esc(r.amount) + '" aria-label="Pesos spent on ' + nm + '">' +
-      '</div>' +
-      // The picklist is a convenience, not a rule: a name the sheet no longer
-      // lists still saves, so this note is quiet and never blocks anything.
-      (supplyListed(r.item) ? '' : '<p class="ln-note">Not on the sheet’s list any more. It still saves.</p>') +
-      '<p class="err" id="err-supply-' + nm + '" hidden></p>';
-  });
-  body += '<div class="sum-row"><span>Total supplies today</span><b id="supTotal">' + peso(suppliesTotal()) + '</b></div>';
-  return collapseCardHTML('supplies', 'Supplies bought today', peso(suppliesTotal()), benta.suppliesOpen, body);
+/** What a stock row says under its name — what was opened, or the unit it is
+ *  counted in. PLAIN TEXT: the unit is free text typed on Maintenance, so it may
+ *  hold an "&" or a quote, and it is escaped exactly ONCE by whoever renders it.
+ *  Escaping it here as well printed the entity itself ("in gallon &amp; jugs").
+ *  One function so the first render and every later update always agree. */
+function stockRowSaid(qty, unit){
+  const u = txt(unit);
+  return num(qty) > 0 ? qtyWithUnit(num(qty), u) + ' opened' : (u ? 'in ' + u + 's' : '');
 }
 
 function stockCardHTML(){
-  // Honest copy: the app records these quantities, and that is ALL it does with
-  // them today. The on-hand figure and the low-stock warning are the next
-  // increment, so this must not promise them yet.
-  let body = '<p class="hint">How much you used up today. This is not money — it never changes the total. ' +
-    'The amounts are saved so stock can be tracked; seeing how much is left is coming in a later update.</p>';
+  // Whole units OPENED, counted like the boxes: if a gallon of sauce is opened it
+  // counts as used that day. Never a weight, never a running estimate — that is
+  // what makes it countable with +/− buttons at all.
+  let body = '<p class="hint">Count whole units you OPENED today — one gallon of sauce, one pack of flour. ' +
+    'This is not money: it never changes the day’s total. It is what keeps the ' +
+    '“Stock on hand” figures under More right.</p>';
   const rows = asArr(benta.stock);
   if (!rows.length){
-    body += '<p class="hint" style="margin-top:10px;">No products yet. Add them in the StockItems tab of the Google Sheet, then sync.</p>';
+    body += '<p class="hint" style="margin-top:10px;">No products yet. Add them under More → Maintenance, or in the StockItems tab of the Google Sheet.</p>';
   }
   rows.forEach((r, i) => {
     const nm = esc(r.product);
-    body += '<div class="line-row">' +
-        '<label class="ln-name" for="in-stk-' + i + '">' + nm + '</label>' +
-        '<input class="input" id="in-stk-' + i + '" data-stk="' + i + '" inputmode="decimal" autocomplete="off" ' +
-          'placeholder="0" value="' + esc(r.qty) + '" aria-label="How much ' + nm + ' was used' + (r.unit ? ', in ' + esc(r.unit) : '') + '">' +
-        '<span class="unit" aria-hidden="true">' + esc(r.unit) + '</span>' +
+    body += '<div class="stk-row">' +
+        '<div class="stk-what"><span class="stk-name" id="stk-name-' + i + '">' + nm + '</span>' +
+          '<span class="stk-unit" id="stk-said-' + i + '">' + esc(stockRowSaid(r.qty, r.unit)) + '</span></div>' +
+        stockStepperHTML(i, r) +
       '</div>' +
       (stockListed(r.product) ? '' : '<p class="ln-note">Not on the sheet’s list any more. It still saves.</p>') +
       '<p class="err" id="err-stock-' + nm + '" hidden></p>';
   });
   const n = stockUsedCount();
-  return collapseCardHTML('stock', 'Stock used today', n ? n + (n === 1 ? ' item' : ' items') : '', benta.stockOpen, body);
+  return collapseCardHTML('stock', 'Stock used today', n ? n + (n === 1 ? ' product' : ' products') : '', benta.stockOpen, body);
 }
 
+/** Whole-unit stepper for one stock row. Addressed by ROW INDEX, never by name:
+ *  a product name is sheet data and would make the id ambiguous (or breakable). */
+function stockStepperHTML(i, r){
+  const label = 'Units of ' + txt(r.product) + ' opened today';
+  return '<div class="stepper sm" data-stkstep="' + i + '">' +
+    '<button type="button" class="step-btn" data-act="stock-step" data-dir="-1" aria-label="One less: ' + esc(label) + '">−</button>' +
+    '<input class="step-val" id="in-stk-' + i + '" data-stk="' + i + '" inputmode="numeric" autocomplete="off" ' +
+      'value="' + esc(r.qty) + '" aria-label="' + esc(label) + '">' +
+    '<button type="button" class="step-btn" data-act="stock-step" data-dir="1" aria-label="One more: ' + esc(label) + '">+</button>' +
+  '</div>';
+}
+
+// The two collapsible cards on the Sales screen and the flag each one remembers.
+// A whitelist, so a stray data attribute can never write a field on `benta`.
+const COLLAPSE_FLAG = { stock:'stockOpen', wage:'wageOpen' };
 function toggleCollapse(key){
-  const flag = key === 'supplies' ? 'suppliesOpen' : 'stockOpen';
+  // hasOwnProperty, not a plain lookup: "toString" is inherited by every object
+  // and would otherwise read as a valid flag name.
+  const flag = Object.prototype.hasOwnProperty.call(COLLAPSE_FLAG, key) ? COLLAPSE_FLAG[key] : '';
+  if (!flag) return;
   benta[flag] = !benta[flag];
   const head = document.querySelector('#panel-benta [data-act="toggle-' + key + '"]');
   const body = $(key + 'Body');
@@ -2272,17 +2887,30 @@ function toggleCollapse(key){
   if (body) body.hidden = !benta[flag];
 }
 
-function updateSuppliesCard(){
-  const t = peso(suppliesTotal());
-  const sum = $('supTotal');
-  if (sum) sum.textContent = t;
-  const head = document.querySelector('#panel-benta [data-act="toggle-supplies"] .ch-sum');
-  if (head) head.textContent = t;
-}
 function updateStockCard(){
   const n = stockUsedCount();
   const head = document.querySelector('#panel-benta [data-act="toggle-stock"] .ch-sum');
-  if (head) head.textContent = n ? n + (n === 1 ? ' item' : ' items') : '';
+  if (head) head.textContent = n ? n + (n === 1 ? ' product' : ' products') : '';
+  // Each row says what its own figure means, in the unit that gets opened.
+  // textContent, so the text goes in exactly as stockRowSaid wrote it.
+  asArr(benta.stock).forEach((r, i) => {
+    const said = $('stk-said-' + i);
+    if (said) said.textContent = stockRowSaid(r.qty, r.unit);
+  });
+}
+
+/** One tap on a stock stepper: whole units only, never below zero. */
+function stockStep(i, dir){
+  const r = asArr(benta.stock)[num(i)];
+  if (!r) return;
+  let v = Math.floor(num(r.qty)) + dir;
+  if (v < 0) v = 0;
+  r.qty = v;
+  benta.dirty = true;
+  const input = $('in-stk-' + num(i));
+  if (input) input.value = v;
+  updateStockCard();
+  validateBentaLive();
 }
 
 function updateReceipt(){
@@ -2391,11 +3019,19 @@ function validateBenta(){
       ') cannot be more than the custom order (' + peso(custom) + ').';
   }
 
-  for (const s of asArr(benta.supplies)){
-    if (num(s.amount) < 0) errs['supply:' + s.item] = 'This cannot be less than zero.';
+  // The wage. Blank is fine (it means "the usual rate"); a negative one is not.
+  if (benta.salary !== '' && benta.salary != null && num(benta.salary) < 0){
+    errs.salary = 'The wage cannot be less than zero.';
   }
+
   for (const s of asArr(benta.stock)){
-    if (num(s.qty) < 0) errs['stock:' + s.product] = 'This cannot be less than zero.';
+    const qty = num(s.qty);
+    if (qty < 0) errs['stock:' + s.product] = 'This cannot be less than zero.';
+    else if (!isWhole(qty)){
+      // The server says the same thing in the same words: you open whole units.
+      errs['stock:' + s.product] = s.product + ': count whole units opened (1, 2, 3), so "' +
+        txt(s.qty) + '" is not a whole unit.';
+    }
   }
   return errs;
 }
@@ -2435,7 +3071,7 @@ function validateBentaLive(){
   }
   setErr('err-custom', errs.custom);
   setErr('err-customGcash', errs.customGcash);
-  for (const s of asArr(benta.supplies)) setErr('err-supply-' + s.item, errs['supply:' + s.item]);
+  setErr('err-salary', errs.salary);
   for (const s of asArr(benta.stock)) setErr('err-stock-' + s.product, errs['stock:' + s.product]);
   return errs;
 }
@@ -2447,8 +3083,8 @@ function saveBenta(){
     const firstKey = Object.keys(errs)[0];
     // An error inside a collapsed card would otherwise be invisible: open the
     // card first, then scroll to the message.
-    if (firstKey.indexOf('supply:') === 0 && !benta.suppliesOpen) toggleCollapse('supplies');
     if (firstKey.indexOf('stock:') === 0 && !benta.stockOpen) toggleCollapse('stock');
+    if (firstKey === 'salary' && !benta.wageOpen) toggleCollapse('wage');
     const el = $(errSlotId(firstKey));
     if (el) el.scrollIntoView({ block:'center', behavior: prefersReduced() ? 'auto' : 'smooth' });
     return;
@@ -2465,7 +3101,11 @@ function saveBenta(){
   tearReceipt(() => {
     loadBentaForm(savedDate);
     renderBenta();
-    toast('Saved ' + fmtShort(savedDate) + '.');
+    // The drain may already have come back with a refusal while the receipt was
+    // tearing off, so ask before speaking — never let "Saved" be the last word
+    // about a day the sheet does not have.
+    const msg = daySavedMessage(savedDate);
+    if (msg) toast(msg);
   });
   drainQueue().then(() => {
     // The day is safely away — a held-back update can go in now.
@@ -2528,7 +3168,10 @@ function afterCountChange(sku){
    EXPENSES (gastos panel) — expenses for the current cutoff
    ============================================================ */
 const GX_CATS = EXPENSE_CATS;   // same six stored values, one source of truth
-let gx = { open:false, category:'Supplies', item:'', amount:'', date:todayStr(), backlogRef:'' };
+let gx = { open:false, category:'Supplies', item:'', amount:'', date:todayStr(), backlogRef:'',
+  // The OPTIONAL delivery: what arrived, and how many whole units of it. A
+  // delivery is then one entry — the money here, the quantity in the stock ledger.
+  stockProduct:'', stockQty:'' };
 // The last expense that was dated OUTSIDE the cutoff being listed. It saved
 // correctly but it cannot appear in this list, so it is named here instead of
 // seeming to vanish. { label, item, amount, date }
@@ -2590,6 +3233,31 @@ function renderGastos(){
       '<p class="err" id="err-gx-amount" hidden></p></div>';
     h += '<div class="field"><label for="gxDate">Date</label>' +
       '<input class="input" type="date" id="gxDate" value="' + gx.date + '" max="' + todayStr() + '"></div>';
+
+    // OPTIONAL: what arrived. A delivery is money AND a quantity, and the money
+    // stays here on this one row — the quantity only feeds "Stock on hand".
+    // Most expenses are not tracked stock, so both fields stay empty.
+    const stk = activeStockItems();
+    if (stk.length){
+      const unit = txt((stk.find(s => s.product === gx.stockProduct) || {}).unit);
+      h += '<div class="field"><label for="gxStockProduct">What arrived? (optional)</label>' +
+        '<select class="input" id="gxStockProduct">' +
+          '<option value=""' + (gx.stockProduct === '' ? ' selected' : '') + '>Nothing to count</option>' +
+          stk.map(s => '<option value="' + esc(s.product) + '"' +
+            (gx.stockProduct === s.product ? ' selected' : '') + '>' + esc(s.product) +
+            (s.unit ? ' (by the ' + esc(s.unit) + ')' : '') + '</option>').join('') +
+        '</select>' +
+        '<p class="hint" style="margin-top:6px;">Only for a delivery you want counted in your stock. Leave it as it is otherwise.</p>' +
+      '</div>';
+      if (gx.stockProduct){
+        h += '<div class="field"><label for="gxStockQty">How many ' +
+            esc(unit ? unit + 's' : 'units') + ' arrived?</label>' +
+          '<input class="input money" id="gxStockQty" inputmode="numeric" autocomplete="off" placeholder="0" value="' + esc(gx.stockQty) + '">' +
+          '<p class="hint" style="margin-top:6px;">Whole units only — the same way you count what you open.</p>' +
+          '<p class="err" id="err-gx-stock" hidden></p></div>';
+      }
+    }
+
     h += '<div class="btn-row"><button type="button" class="btn" data-act="gastos-cancel">Close</button>' +
       '<button type="button" class="btn primary" data-act="gastos-submit">Add</button></div>';
     h += '</div>';
@@ -2610,7 +3278,11 @@ function renderGastos(){
         h += '<div class="gx-item">' +
           '<span class="gx-cat">' + esc(e.category) + '</span>' +
           '<div class="gx-main"><div class="gx-name">' + esc(e.item || e.category) + '</div>' +
-            (e.backlog_ref ? '<div class="gx-ref">→ ' + esc(e.backlog_ref) + '</div>' : '') + '</div>' +
+            (e.backlog_ref ? '<div class="gx-ref">→ ' + esc(e.backlog_ref) + '</div>' : '') +
+            // A delivery says what arrived, so the quantity is never invisible.
+            (e.stock_product && num(e.stock_qty) > 0
+              ? '<div class="gx-ref">+ ' + esc(qtyWithUnit(e.stock_qty, stockUnitOf(e.stock_product))) +
+                ' of ' + esc(e.stock_product) + '</div>' : '') + '</div>' +
           '<span class="gx-amt">' + peso(e.amount) + '</span>' +
           '<button type="button" class="icon-btn" data-act="gastos-del" data-id="' + esc(e.entry_id) + '" aria-label="Delete: ' + esc(e.item || e.category) + ' ' + peso(e.amount) + '">' +
             '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M10 4h4M7 7l1 13h8l1-13M10 11v6M14 11v6"/></svg>' +
@@ -2636,6 +3308,18 @@ function submitGasto(){
     if (be){ be.textContent = 'Choose which backlog you paid.'; be.hidden = false; }
     ok = false;
   }
+  // The optional delivery quantity: whole units, never negative. Same rule and
+  // the same words as the server, so the phone never queues a refusable row.
+  const stkEl = $('err-gx-stock');
+  if (gx.stockProduct && gx.stockQty !== ''){
+    const q = num(gx.stockQty);
+    const bad = q < 0 ? 'The quantity cannot be less than zero.'
+      : (!isWhole(q) ? 'Count whole units (1, 2, 3) — “' + txt(gx.stockQty) + '” is not a whole unit.' : '');
+    if (bad){
+      if (stkEl){ stkEl.textContent = bad; stkEl.hidden = false; }
+      ok = false;
+    } else if (stkEl) stkEl.hidden = true;
+  } else if (stkEl) stkEl.hidden = true;
   if (!ok) return;
   const payload = {
     date: gx.date || todayStr(),
@@ -2644,6 +3328,9 @@ function submitGasto(){
     amount: num(gx.amount),
     backlogRef: gx.category === 'Backlog' ? gx.backlogRef : '',
     notes: '',
+    // REQUEST keys are camelCase. Both are omitted-as-blank when nothing arrived.
+    stockProduct: gx.stockProduct,
+    stockQty: gx.stockProduct ? Math.max(0, num(gx.stockQty)) : '',
     entryId: uuid()
   };
   applyLocalExpense(payload);
@@ -2658,9 +3345,14 @@ function submitGasto(){
   gxElsewhere = elsewhere
     ? { label: periodLabel(itsPeriod), item: payload.item || payload.category, amount: payload.amount, date: payload.date }
     : null;
-  gx = { open:true, category:gx.category, item:'', amount:'', date:gx.date, backlogRef:'' };
+  gx = { open:true, category:gx.category, item:'', amount:'', date:gx.date, backlogRef:'',
+    stockProduct:'', stockQty:'' };
   renderGastos();
-  toast(elsewhere ? 'Saved to ' + periodLabel(itsPeriod) + '.' : 'Expense added.');
+  toast(elsewhere ? 'Saved to ' + periodLabel(itsPeriod) + '.'
+    : (payload.stockProduct && num(payload.stockQty) > 0
+        ? 'Expense added, and ' + qtyWithUnit(payload.stockQty, stockUnitOf(payload.stockProduct)) +
+          ' of ' + payload.stockProduct + ' went into your stock.'
+        : 'Expense added.'));
   drainQueue();
 }
 
@@ -2681,14 +3373,34 @@ function deleteGasto(id){
    ============================================================ */
 let cutoffPer = null;
 let lastNote = null; // { key, text, demo }
-
-function periodKey(per){ return per.start + '_' + per.end; }
+// A backlog payment being entered on this screen: { ref, amount }.
+let payBl = { ref:'', amount:'' };
+// periodKey(), splitEdits, splitFieldAmount(), liveCutoff() and pendingSplit()
+// all live with the period maths above — the cutoff FIGURES need them to find
+// the split entered for a period, not just this screen.
 
 // Days in this period that this phone has but the SHEET does not. The preview
 // below counts them (they are real money she entered); a note generated by the
 // server would not. Say so rather than letting the two disagree in silence.
 function cutoffMissingDays(per){
   return asArr(attention).filter(a => a.kind !== 'dropped' && isDateStr(a.date) && inPeriod(a.date, per));
+}
+
+/** What the line under the Split field says. Saying plainly that the figure on
+ *  screen is not the one saved is the whole reason the note refuses to be made
+ *  while it differs — the user should never have to guess which figure counts. */
+function splitHintText(per, f){
+  if (pendingSplit(per)) return 'Not saved yet. Tap “Save this split” — the note is made from the saved amount.';
+  return asObj(f).splitEntered
+    ? 'Saved for this cutoff.'
+    : 'The usual amount (' + peso(splitDefault()) + '). Change it for this cutoff only.';
+}
+/** What the residual MEANS, in words, under the figure. */
+function residualNote(remaining){
+  const r = num(remaining);
+  if (r < 0) return 'This cutoff came up short. Nothing is left for the backlogs.';
+  if (r === 0) return 'Nothing left over this cutoff.';
+  return 'Left in the business — this is what backlog payments come out of.';
 }
 
 function renderCutoff(){
@@ -2715,23 +3427,83 @@ function renderCutoff(){
     '<button type="button" class="nav-btn" data-act="cutoff-next" aria-label="Next cutoff">›</button>' +
   '</div></div>';
 
+  // The SPLIT is an entered amount now, so it gets a field of its own — pre-filled
+  // with this period's saved figure, or the usual one when nothing is saved yet.
+  // The residual below updates as it is typed.
+  const key = periodKey(per);
+  // What the field shows: whatever is being typed for this period, else the saved
+  // figure. What the FIGURES show: liveCutoff, which reads a blank field as the
+  // usual amount exactly as saveSplit() does — never as ₱0, which would swing
+  // the residual by the whole split and flip its label.
+  const typed = Object.prototype.hasOwnProperty.call(splitEdits, key) ? splitEdits[key] : null;
+  const splitVal = typed == null ? f.split : typed;
+  const live = liveCutoff(per);
+
   // Live local preview
   h += '<div class="card">' +
     '<div class="co-row big"><span>Total</span><span class="v">' + peso(f.total) + '</span></div>' +
-    '<div class="co-sub">' + f.daysWithSales + (f.daysWithSales === 1 ? ' day with sales' : ' days with sales') + '</div>' +
+    '<div class="co-sub">' + f.daysWithSales + (f.daysWithSales === 1 ? ' day with sales' : ' days with sales') +
+      ' · ' + f.openDays + (f.openDays === 1 ? ' day open' : ' days open') + '</div>' +
     '<div class="r-sep" role="presentation"></div>' +
     '<div class="co-row"><span>Cash</span><span class="v">' + peso(f.cash) + '</span></div>' +
     '<div class="co-row gcash"><span>GCash</span><span class="v">' + peso(f.gcash) + '</span></div>' +
     '<div class="r-sep" role="presentation"></div>' +
     '<div class="co-row"><span>Mama</span><span class="v">' + peso(f.mama) + '</span></div>' +
+    '<div class="co-row"><span>Split</span><span class="v" id="coSplit">' + peso(live.split) + '</span></div>' +
     '<div class="co-row"><span>Supplies</span><span class="v">' + peso(f.supplies) + '</span></div>' +
     '<div class="co-row"><span>Octopus</span><span class="v">' + peso(f.octopus) + '</span></div>' +
+    '<div class="co-row"><span>Salary</span><span class="v">' + peso(f.salary) + '</span></div>' +
     '<div class="co-row"><span>Other payments</span><span class="v">' + peso(f.other) + '</span></div>' +
     '<div class="co-row"><span>Electric bill</span><span class="v">' + peso(f.electric) + '</span></div>' +
     '<div class="r-sep" role="presentation"></div>' +
-    '<div class="co-row split' + (f.split < 0 ? ' neg' : '') + '"><span>Split</span><span class="v">' + peso(f.split) + '</span></div>' +
-    '<div class="co-sub">' + peso(f.perPartner) + ' each partner' + (f.split < 0 ? ' — this cutoff came up short' : '') + '</div>' +
+    // The RESIDUAL: what is left in the business after everything, and what
+    // backlog payments are paid out of. Its LABEL carries the sign, exactly like
+    // the note — "Remaining" when there is something left, "Short" when there is
+    // not. Never clamped to zero.
+    '<div class="co-row split' + (live.remaining < 0 ? ' neg' : '') + '" id="coResidualRow">' +
+      '<span id="coResidualLabel">' + (live.remaining < 0 ? 'Short' : 'Remaining') + '</span>' +
+      '<span class="v" id="coResidual">' + peso(Math.abs(live.remaining)) + '</span></div>' +
+    '<div class="co-sub" id="coResidualNote">' + esc(residualNote(live.remaining)) + '</div>' +
   '</div>';
+
+  // The editable Split.
+  h += '<div class="card">' +
+    '<div class="field" style="margin-bottom:0;">' +
+      '<label for="coSplitIn">Split for this cutoff (₱)</label>' +
+      '<div class="split-row">' +
+        '<input class="input money" id="coSplitIn" inputmode="decimal" autocomplete="off" placeholder="' +
+          esc(fmt(splitDefault())) + '" value="' + esc(splitVal === '' ? '' : splitVal) + '">' +
+        '<span class="split-each" id="coEach">' + peso(live.perPartner) + ' each</span>' +
+      '</div>' +
+      '<p class="hint" style="margin-top:8px;" id="coSplitHint">' + esc(splitHintText(per, f)) + '</p>' +
+      '<p class="err" id="err-split" hidden></p>' +
+      '<button type="button" class="btn block" data-act="split-save" id="splitBtn" style="margin-top:10px;">Save this split</button>' +
+    '</div>' +
+  '</div>';
+
+  // Paying a backlog out of what is left. It is an ordinary Backlog expense —
+  // that is what "Other payments" on the note is made of — but it belongs here,
+  // beside the figure it comes out of.
+  const activeBl = asArr(state.backlogs).filter(b => isObj(b) && truthy(b.active));
+  h += '<div class="section-title">Pay a backlog</div><div class="card">';
+  if (!activeBl.length){
+    h += '<p class="hint">No active backlogs. Add them in the Backlogs tab of the Google Sheet.</p>';
+  } else {
+    h += '<p class="hint" style="margin-bottom:12px;">Paid out of what is left (' +
+      esc(live.remaining < 0 ? 'nothing this cutoff — it is short ' + peso(-live.remaining)
+                             : peso(live.remaining) + ' remaining') +
+      '). It is logged as an expense and shows on the note under “Other payments”.</p>' +
+      '<div class="field"><label for="payBlRef">Which backlog?</label><select class="input" id="payBlRef">' +
+        '<option value=""' + (payBl.ref === '' ? ' selected' : '') + '>Choose…</option>' +
+        activeBl.map(b => '<option value="' + esc(b.name) + '"' + (payBl.ref === b.name ? ' selected' : '') + '>' +
+          esc(b.name) + ' — balance ' + peso(backlogBalance(b)) + '</option>').join('') +
+      '</select></div>' +
+      '<div class="field"><label for="payBlAmount">How much? (₱)</label>' +
+        '<input class="input money" id="payBlAmount" inputmode="decimal" autocomplete="off" placeholder="0" value="' + esc(payBl.amount) + '">' +
+        '<p class="err" id="err-paybl" hidden></p></div>' +
+      '<button type="button" class="btn block" data-act="pay-backlog">Log this payment</button>';
+  }
+  h += '</div>';
 
   // Suggested fixed expenses (one tap)
   const mamaAmt = num(asObj(state.settings).mama_per_cutoff);
@@ -2750,7 +3522,11 @@ function renderCutoff(){
   h += '<button type="button" class="btn primary block" data-act="cutoff-generate" id="genBtn">Generate cutoff note</button>';
 
   if (lastNote && lastNote.key === periodKey(per)){
-    h += '<div style="margin-top:14px;">' +
+    // Hidden the moment the Split field stops agreeing with what is saved: this
+    // note was built from the SAVED figure, so leaving it on screen under a
+    // preview that now says something else is the same contradiction generateNote
+    // refuses to create. updateSplitLive un-hides it if she types the figure back.
+    h += '<div id="noteBlock" style="margin-top:14px;"' + (pendingSplit(per) ? ' hidden' : '') + '>' +
       (lastNote.demo ? '<p class="hint" style="margin-bottom:8px;">Demo — this was not saved to the sheet.</p>'
                      : '<p class="ok-note" style="margin-bottom:8px;">✓ Saved to the Cutoffs tab of the sheet.</p>') +
       '<pre class="note-pre" id="notePre">' + esc(lastNote.text) + '</pre>' +
@@ -2767,6 +3543,19 @@ function renderCutoff(){
 async function generateNote(){
   const per = cutoffPer;
   const btn = $('genBtn');
+  // A Split typed but not saved is NOT in the note: the note is built from the
+  // saved figure (the server reads CutoffInputs, and buildNote reads the same
+  // row), so generating one now would print a Split — and a residual — that
+  // contradict the figures printed directly above it. Refuse, and say what to
+  // tap. Checked before either path: the offline copy is built the same way.
+  const pend = pendingSplit(per);
+  if (pend){
+    setErr('err-split', 'This split is not saved yet. Tap “Save this split”, then make the note.');
+    toast('Save the split first (' + peso(pend.amount) + '), then make the note.');
+    const el = $('err-split');
+    if (el) el.scrollIntoView({ block:'center', behavior: prefersReduced() ? 'auto' : 'smooth' });
+    return;
+  }
   if (btn){ btn.disabled = true; btn.textContent = 'Generating…'; }
   if (config.apiUrl && navigator.onLine){
     try{
@@ -2823,11 +3612,100 @@ async function shareNote(){
   try{ await navigator.share({ text:lastNote.text }); }catch(e){ /* user cancelled */ }
 }
 
+/* ---- The editable Split: live residual, then a queued save ---- */
+// Only the four figures the split moves are touched, so the keyboard stays up
+// and nothing else on the screen flickers while she types.
+function updateSplitLive(){
+  if (!cutoffPer) return;
+  const key = periodKey(cutoffPer);
+  const raw = Object.prototype.hasOwnProperty.call(splitEdits, key) ? splitEdits[key] : '';
+  // The one reading of the field, shared with renderCutoff and the note guard:
+  // blank means the usual amount, so what is shown is what a save would write.
+  const f = computeCutoff(cutoffPer);
+  const live = liveCutoff(cutoffPer);
+  const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
+  set('coSplit', peso(live.split));
+  set('coEach', peso(live.perPartner) + ' each');
+  set('coResidualLabel', live.remaining < 0 ? 'Short' : 'Remaining');
+  set('coResidual', peso(Math.abs(live.remaining)));
+  set('coResidualNote', residualNote(live.remaining));
+  set('coSplitHint', splitHintText(cutoffPer, f));
+  const row = $('coResidualRow');
+  if (row) row.classList.toggle('neg', live.remaining < 0);
+  // A note already on screen was built from the SAVED split. While the field
+  // disagrees with it, take it off the screen rather than let it sit under
+  // figures that now say something else. (Hidden, not re-rendered: a re-render
+  // here would close the keyboard mid-figure.)
+  const block = $('noteBlock');
+  if (block) block.hidden = !!pendingSplit(cutoffPer);
+  setErr('err-split', num(raw) < 0 ? 'The split cannot be less than zero.' : '');
+}
+
+function saveSplit(){
+  const per = cutoffPer;
+  const key = periodKey(per);
+  const raw = Object.prototype.hasOwnProperty.call(splitEdits, key) ? splitEdits[key] : '';
+  // The same reading the preview uses, so the figure saved is the figure shown.
+  const amount = splitFieldAmount(raw);
+  if (amount < 0){ setErr('err-split', 'The split cannot be less than zero.'); return; }
+  // Re-use the entry_id of the row already saved for this period, so re-entering
+  // the figure rewrites ONE row (the sheet upserts by (start, end) as well) and
+  // the queue keeps just one item for it.
+  const existing = asObj(state.cutoffInputs)[key];
+  const payload = {
+    start: per.start, end: per.end, amount: r2(amount),
+    entryId: txt(asObj(existing).entry_id) || uuid()
+  };
+  applyLocalCutoffSplit(payload);
+  enqueue('saveCutoffSplit', payload);
+  delete splitEdits[key];
+  persistState();
+  renderCutoff();
+  toast('Split saved: ' + peso(amount) + ' (' + peso(r2(amount / 2)) + ' each).');
+  drainQueue();
+}
+
+/* ---- Paying a backlog, from the screen that shows what is left to pay it with.
+   It is an ordinary Expenses row of category Backlog — the same thing the
+   Expenses screen writes — so "Other payments" on the note picks it up. ---- */
+function payBacklog(){
+  const amount = num(payBl.amount);
+  const err = $('err-paybl');
+  if (!payBl.ref){
+    if (err){ err.textContent = 'Choose which backlog you paid.'; err.hidden = false; }
+    return;
+  }
+  if (!(amount > 0)){
+    if (err){ err.textContent = 'Enter how much you paid.'; err.hidden = false; }
+    return;
+  }
+  const bl = asArr(state.backlogs).find(b => isObj(b) && b.name === payBl.ref);
+  const balance = bl ? backlogBalance(bl) : 0;
+  if (bl && amount > balance &&
+      !confirm('That is more than the ' + peso(balance) + ' still owed on ' + payBl.ref + '. Log it anyway?')) return;
+  if (err) err.hidden = true;
+  // Dated today when today is inside the period being shown, else its last day,
+  // so the payment lands in the cutoff it is being paid for.
+  const t = todayStr();
+  const date = inPeriod(t, cutoffPer) ? t : cutoffPer.end;
+  const payload = { date, category:'Backlog', item:'Backlog payment', amount:r2(amount),
+    backlogRef: payBl.ref, notes:'', stockProduct:'', stockQty:'', entryId: uuid() };
+  applyLocalExpense(payload);
+  enqueue('saveExpense', payload);
+  persistState();
+  const name = payBl.ref;
+  payBl = { ref:'', amount:'' };
+  renderCutoff();
+  toast('Paid ' + peso(amount) + ' on ' + name + '.');
+  drainQueue();
+}
+
 function addSuggestedExpense(cat, item, amount){
   const t = todayStr();
   const per = cutoffPer;
   const date = inPeriod(t, per) ? t : per.end;
-  const payload = { date, category:cat, item, amount:num(amount), backlogRef:'', notes:'', entryId:uuid() };
+  const payload = { date, category:cat, item, amount:num(amount), backlogRef:'', notes:'',
+    stockProduct:'', stockQty:'', entryId:uuid() };
   applyLocalExpense(payload);
   enqueue('saveExpense', payload);
   persistState();
@@ -2896,10 +3774,17 @@ function renderIbapa(){
   }
   h += '</div>';
 
+  // Stock on hand
+  h += stockOnHandHTML();
+
+  // Maintenance — the prices, the constants and the stock list, without opening
+  // the sheet on a phone.
+  h += maintenanceHTML();
+
   // Staff (from Settings)
   h += '<div class="section-title">Staff</div><div class="card"><div class="chips">';
   for (const s of staffList()) h += '<span class="chip" aria-disabled="true" style="cursor:default;">' + esc(s) + '</span>';
-  h += '</div><p class="hint" style="margin-top:10px;">From the Settings tab of the sheet (key: staff).</p></div>';
+  h += '</div><p class="hint" style="margin-top:10px;">Change this list under Maintenance above.</p></div>';
 
   // About
   h += '<div class="section-title">About</div><div class="card">' +
@@ -2909,6 +3794,333 @@ function renderIbapa(){
   '</div>';
 
   $('panel-ibapa').innerHTML = h;
+}
+
+/* ---- Stock on hand. Every figure here is COMPUTED (see stockStatusOf) and the
+   card says where it comes from, because a number nobody can explain is a number
+   nobody trusts. "Correct the count" is the one action that moves the baseline. ---- */
+let countingProduct = '';   // the product whose count field is open
+let countDraft = '';        // what is typed in it
+
+function stockOnHandHTML(){
+  let list = [];
+  try{ list = stockStatusList(); }catch(err){ console.error(err); }
+  let h = '<div class="section-title">Stock on hand</div><div class="card">';
+  if (!list.length){
+    h += '<p class="hint">No products yet. Add them under Maintenance below.</p></div>';
+    return h;
+  }
+  const anyLow = list.some(s => s.low);
+  h += '<p class="hint" style="margin-bottom:6px;">Worked out from what has arrived and what has been opened since the last count. ' +
+    'A count is an END-OF-DAY figure and becomes the new starting point.</p>';
+  if (anyLow) h += '<p class="hint" style="color:var(--alert); font-weight:600;">Time to buy what is marked LOW.</p>';
+  for (const s of list){
+    const nm = esc(s.product);
+    const isCounting = countingProduct === s.product;
+    h += '<div class="st-item">' +
+      '<div class="st-top">' +
+        '<span class="st-name">' + nm + '</span>' +
+        (s.low ? '<span class="badge-low">Low</span>' : '') +
+        '<span class="st-qty' + (s.on_hand < 0 ? ' neg' : '') + '">' + esc(qtyWithUnit(s.on_hand, s.unit)) + '</span>' +
+      '</div>' +
+      '<div class="st-sub">' + esc(stockExplain(s)) + '</div>' +
+      // A negative figure is honest information, not an error to hide: it means
+      // more has been opened than the count and the deliveries account for.
+      (s.on_hand < 0
+        ? '<div class="st-sub" style="color:var(--alert);">Below zero, so the starting figure is out of date. Count what is really there and tap “Correct the count”.</div>'
+        : '') +
+      (s.reorder_at > 0 ? '<div class="st-sub">Buy more at ' + esc(qtyWithUnit(s.reorder_at, s.unit)) + ' or less.</div>' : '') +
+      (isCounting
+        ? '<div class="st-count">' +
+            '<div><label for="stCountIn">Counted today</label>' +
+              '<input class="input money" id="stCountIn" inputmode="numeric" autocomplete="off" placeholder="0" value="' + esc(countDraft) + '"></div>' +
+            '<button type="button" class="btn small primary" data-act="count-save" data-product="' + nm + '">Save count</button>' +
+            '<button type="button" class="btn small" data-act="count-cancel">Cancel</button>' +
+          '</div>' +
+          '<p class="hint" style="margin-top:8px;">Count what is on the shelf at closing time today. From now on, on hand is this figure plus what arrives and minus what is opened.</p>' +
+          '<p class="err" id="err-count" hidden></p>'
+        : '<div class="st-acts"><button type="button" class="btn small" data-act="count-open" data-product="' + nm + '">Correct the count</button></div>') +
+    '</div>';
+  }
+  return h + '</div>';
+}
+
+/** Where the figure comes from, in one plain sentence. */
+function stockExplain(s){
+  const from = s.baseline_date
+    ? 'Counted ' + qtyWithUnit(s.baseline_qty, s.unit) + ' on ' + fmtShort(s.baseline_date)
+    : 'Started at ' + qtyWithUnit(s.baseline_qty, s.unit);
+  const bits = [];
+  if (s.delivered_since) bits.push(qtyWithUnit(s.delivered_since, s.unit) + ' arrived');
+  if (s.used_since) bits.push(qtyWithUnit(s.used_since, s.unit) + ' opened');
+  return from + (bits.length ? ', then ' + bits.join(' and ') : ', nothing since') + '.';
+}
+
+function openCount(product){
+  countingProduct = txt(product);
+  const s = stockStatusList().find(x => x.product === countingProduct);
+  // Pre-filled with the figure the app thinks is there, so a count that only
+  // confirms it is one tap. A negative one starts blank — there is nothing
+  // sensible to confirm.
+  countDraft = s && s.on_hand > 0 ? String(s.on_hand) : '';
+  renderIbapa();
+  const f = $('stCountIn');
+  if (f) f.focus();
+}
+function saveStockCountNow(product){
+  const p = txt(product);
+  const err = $('err-count');
+  const qty = num(countDraft);
+  if (countDraft === '' || qty < 0 || !isWhole(qty)){
+    if (err){
+      err.textContent = countDraft === ''
+        ? 'Enter how many there are.'
+        : 'Count whole units (1, 2, 3) — “' + txt(countDraft) + '” is not a whole unit.';
+      err.hidden = false;
+    }
+    return;
+  }
+  // Dated TODAY: a stocktake is what you can see now, and the server reads it as
+  // an end-of-day figure that already includes today's deliveries and usage.
+  const payload = { date: todayStr(), product: p, qty, entryId: uuid() };
+  applyLocalStockCount(payload);
+  enqueue('saveStockCount', payload);
+  persistState();
+  countingProduct = ''; countDraft = '';
+  renderIbapa();
+  toast(p + ': counted ' + qtyWithUnit(qty, stockUnitOf(p)) + '. That is the new starting figure.');
+  drainQueue();
+}
+
+/* ---- Maintenance. One place to change the prices, the constants and the stock
+   list without opening the sheet on a phone. Every save goes through the offline
+   queue like any other mutation. The API token is never shown or sent here. ---- */
+let maintOpen = false;
+let maintPrices = null;   // sku -> { price, cheesePrice, active }
+let maintConst = null;    // the six settings, as typed
+let maintStock = null;    // product -> { unit, reorderAt, active }
+
+/** Load the forms from the current state. Called when the section is opened, so
+ *  it always starts from what the sheet last said. */
+function maintLoad(){
+  maintPrices = {};
+  for (const p of asArr(state.prices)){
+    if (!isObj(p) || !txt(p.sku)) continue;
+    maintPrices[p.sku] = { price: num(p.price), cheesePrice: num(p.cheese_price), active: truthy(p.active) };
+  }
+  const st = asObj(state.settings);
+  maintConst = {
+    daily_salary: dailySalary(), split_default: splitDefault(),
+    mama_per_cutoff: num(st.mama_per_cutoff), electric_per_cutoff: num(st.electric_per_cutoff),
+    branch: txt(st.branch), staff: txt(st.staff)
+  };
+  maintStock = {};
+  for (const s of asArr(state.stockItems)){
+    if (!isObj(s) || !txt(s.product)) continue;
+    maintStock[s.product] = { unit: txt(s.unit), reorderAt: s.reorder_at === '' ? '' : num(s.reorder_at), active: truthy(s.active) };
+  }
+}
+
+/** A sync in the middle of editing can add a price or a product, or take one
+ *  away. Top the forms up (never overwriting what is already typed) and drop what
+ *  has gone, so the fields on screen are exactly the rows that will be saved —
+ *  a row rendered from a missing entry would otherwise save a ₱0 price. */
+function maintTopUp(){
+  if (!maintPrices) return maintLoad();
+  const keepP = Object.create(null);
+  for (const p of asArr(state.prices)){
+    if (!isObj(p) || !txt(p.sku)) continue;
+    keepP[p.sku] = true;
+    if (!maintPrices[p.sku]){
+      maintPrices[p.sku] = { price: num(p.price), cheesePrice: num(p.cheese_price), active: truthy(p.active) };
+    }
+  }
+  for (const sku in maintPrices) if (!keepP[sku]) delete maintPrices[sku];
+  const keepS = Object.create(null);
+  for (const s of asArr(state.stockItems)){
+    if (!isObj(s) || !txt(s.product)) continue;
+    keepS[s.product] = true;
+    if (!maintStock[s.product]){
+      maintStock[s.product] = { unit: txt(s.unit), reorderAt: s.reorder_at === '' ? '' : num(s.reorder_at), active: truthy(s.active) };
+    }
+  }
+  for (const p in maintStock) if (!keepS[p]) delete maintStock[p];
+}
+
+function maintenanceHTML(){
+  let h = '<div class="section-title">Maintenance</div>';
+  if (!maintOpen){
+    return h + '<div class="card"><p class="hint" style="margin-bottom:10px;">Prices, the standing amounts and your stock list.</p>' +
+      '<button type="button" class="btn block" data-act="maint-open">Open maintenance</button></div>';
+  }
+  maintTopUp();
+
+  // Prices
+  h += '<div class="card">' +
+    '<p class="mt-name">Prices</p>' +
+    '<p class="hint">A price change counts for the days you save from now on. Days already saved keep the prices they were sold at — nothing in the past ever changes.</p>';
+  for (const p of asArr(state.prices)){
+    if (!isObj(p) || !txt(p.sku)) continue;
+    const m = maintPrices[p.sku] || { price:0, cheesePrice:0, active:false };
+    const sk = esc(p.sku);
+    h += '<div class="mt-row"><div class="mt-name">' + esc(p.label || p.sku) + '</div>' +
+      '<div class="mt-grid">' +
+        '<div class="mt-cell"><label for="mp-' + sk + '">Price (₱)</label>' +
+          '<input class="input money" id="mp-' + sk + '" data-mprice="' + sk + '" inputmode="decimal" autocomplete="off" value="' + esc(m.price) + '"></div>' +
+        '<div class="mt-cell"><label for="mc-' + sk + '">Cheese price (₱)</label>' +
+          '<input class="input money" id="mc-' + sk + '" data-mcheese="' + sk + '" inputmode="decimal" autocomplete="off" value="' + esc(m.cheesePrice) + '"></div>' +
+      '</div>' +
+      '<label class="mt-toggle" for="ma-' + sk + '"><input type="checkbox" id="ma-' + sk + '" data-mactive="' + sk + '"' +
+        (m.active ? ' checked' : '') + '><span>Still selling this</span></label>' +
+    '</div>';
+  }
+  h += '<p class="err" id="err-maint-prices" hidden></p>' +
+    '<button type="button" class="btn block primary" data-act="maint-save-prices" style="margin-top:10px;">Save prices</button></div>';
+
+  // The standing amounts
+  h += '<div class="card">' +
+    '<p class="mt-name">Standing amounts</p>' +
+    '<p class="hint">Used for new days and new cutoffs. Changing one never rewrites a day or a cutoff that is already saved.</p>' +
+    '<div class="field" style="margin-top:12px;"><label for="ms-daily_salary">Wage per day (₱)</label>' +
+      '<input class="input money" id="ms-daily_salary" data-mset="daily_salary" inputmode="decimal" autocomplete="off" value="' + esc(maintConst.daily_salary) + '"></div>' +
+    '<div class="field"><label for="ms-split_default">Usual split per cutoff (₱)</label>' +
+      '<input class="input money" id="ms-split_default" data-mset="split_default" inputmode="decimal" autocomplete="off" value="' + esc(maintConst.split_default) + '">' +
+      '<p class="hint" style="margin-top:6px;">' + peso(r2(num(maintConst.split_default) / 2)) + ' each partner. It can still be changed for one cutoff on the Cutoff screen.</p></div>' +
+    '<div class="field"><label for="ms-mama_per_cutoff">Mama’s share per cutoff (₱)</label>' +
+      '<input class="input money" id="ms-mama_per_cutoff" data-mset="mama_per_cutoff" inputmode="decimal" autocomplete="off" value="' + esc(maintConst.mama_per_cutoff) + '"></div>' +
+    '<div class="field"><label for="ms-electric_per_cutoff">Electric bill per cutoff (₱)</label>' +
+      '<input class="input money" id="ms-electric_per_cutoff" data-mset="electric_per_cutoff" inputmode="decimal" autocomplete="off" value="' + esc(maintConst.electric_per_cutoff) + '"></div>' +
+    '<div class="field"><label for="ms-branch">Branch name</label>' +
+      '<input class="input" id="ms-branch" data-mset="branch" autocomplete="off" value="' + esc(maintConst.branch) + '">' +
+      '<p class="hint" style="margin-top:6px;">The name at the top of the cutoff note.</p></div>' +
+    '<div class="field"><label for="ms-staff">Who can mind the stall</label>' +
+      '<input class="input" id="ms-staff" data-mset="staff" autocomplete="off" value="' + esc(maintConst.staff) + '">' +
+      '<p class="hint" style="margin-top:6px;">Separate the names with commas, e.g. Mama, Nayt.</p></div>' +
+    '<p class="err" id="err-maint-set" hidden></p>' +
+    '<button type="button" class="btn block primary" data-act="maint-save-set">Save amounts</button></div>';
+
+  // Stock list
+  h += '<div class="card">' +
+    '<p class="mt-name">Stock list</p>' +
+    '<p class="hint">The unit is the thing you OPEN — a pack, a gallon. “Buy more at” is when the Low mark appears; leave it empty for no warning.</p>';
+  for (const s of asArr(state.stockItems)){
+    if (!isObj(s) || !txt(s.product)) continue;
+    const m = maintStock[s.product] || { unit:'', reorderAt:'', active:false };
+    const id = 'mt-' + esc(s.product).replace(/[^A-Za-z0-9]+/g, '-');
+    h += '<div class="mt-row"><div class="mt-name">' + esc(s.product) + '</div>' +
+      '<div class="mt-grid">' +
+        '<div class="mt-cell"><label for="' + id + '-u">Unit</label>' +
+          '<input class="input" id="' + id + '-u" data-munit="' + esc(s.product) + '" autocomplete="off" placeholder="pack" value="' + esc(m.unit) + '"></div>' +
+        '<div class="mt-cell"><label for="' + id + '-r">Buy more at</label>' +
+          '<input class="input money" id="' + id + '-r" data-mreorder="' + esc(s.product) + '" inputmode="numeric" autocomplete="off" placeholder="none" value="' + esc(m.reorderAt) + '"></div>' +
+      '</div>' +
+      '<label class="mt-toggle" for="' + id + '-a"><input type="checkbox" id="' + id + '-a" data-mstockactive="' + esc(s.product) + '"' +
+        (m.active ? ' checked' : '') + '><span>Still using this</span></label>' +
+    '</div>';
+  }
+  h += '<p class="err" id="err-maint-stock" hidden></p>' +
+    '<button type="button" class="btn block primary" data-act="maint-save-stock" style="margin-top:10px;">Save stock list</button>' +
+    '<button type="button" class="btn block" data-act="maint-close" style="margin-top:10px;">Close maintenance</button></div>';
+  return h;
+}
+
+/** What is wrong with one price row — or '' when it is fine. `pr` is the sheet's
+ *  own row (for the name, and whether it has a cheese version); `m` is what is
+ *  typed in the fields. Every rule apiSavePrices() enforces is mirrored here, in
+ *  the same order, so the phone never queues a price change the server refuses.
+ *
+ *  A CLEARED field reads as 0, and a ₱0 price on something still marked "Still
+ *  selling this" gives it away all night: the Sales card read "₱0 · Cheese ₱60"
+ *  and every box counted for free, with nothing anywhere saying why. So a price
+ *  is required while a sku is being sold — turning it off is how you stop
+ *  selling it. An inactive sku may keep a 0: it sells nothing. */
+function priceRowError(pr, m){
+  const label = txt(asObj(pr).label) || txt(asObj(pr).sku);
+  const price = num(asObj(m).price), cheese = num(asObj(m).cheesePrice);
+  if (price < 0 || cheese < 0) return 'A price cannot be less than zero.';
+  if (!asObj(m).active) return '';
+  if (!(price > 0)){
+    return label + ' is still being sold, so it needs a price. At ₱0 every box would ' +
+      'count as free. Type a price, or turn “Still selling this” off.';
+  }
+  // Only a box sku has a cheese version at all; group=simple keeps its 0.
+  if (asObj(pr).group === 'box' && !(cheese > 0)){
+    return label + ' is still being sold, so it needs a cheese price too. At ₱0 every ' +
+      'cheese box would count as free. Type a price, or turn “Still selling this” off.';
+  }
+  return '';
+}
+
+function saveMaintPrices(){
+  maintTopUp();
+  const rows = [];
+  for (const sku in maintPrices){
+    const m = maintPrices[sku];
+    const bad = priceRowError(asArr(state.prices).find(p => isObj(p) && p.sku === sku) || { sku }, m);
+    if (bad){ setErr('err-maint-prices', bad); return; }
+    rows.push({ sku, price: r2(m.price), cheesePrice: r2(m.cheesePrice), active: !!m.active });
+  }
+  setErr('err-maint-prices', '');
+  const payload = { rows, entryId: uuid() };
+  applyLocalPrices(payload);
+  enqueue('savePrices', payload);
+  persistState();
+  maintLoad();
+  renderIbapa();
+  toast('Prices saved. They count for the days you save from now on.');
+  drainQueue();
+}
+
+function saveMaintSettings(){
+  if (!txt(maintConst.branch).trim()){
+    setErr('err-maint-set', 'The branch name cannot be empty — it is the first line of the note.');
+    return;
+  }
+  for (const k of ['daily_salary','split_default','mama_per_cutoff','electric_per_cutoff']){
+    if (num(maintConst[k]) < 0){ setErr('err-maint-set', 'These amounts cannot be less than zero.'); return; }
+  }
+  setErr('err-maint-set', '');
+  // Only the whitelisted keys travel, and `token` is not one of them — it is
+  // never read from here, never sent, never editable on this screen.
+  const settings = {
+    daily_salary: r2(maintConst.daily_salary),
+    split_default: r2(maintConst.split_default),
+    mama_per_cutoff: r2(maintConst.mama_per_cutoff),
+    electric_per_cutoff: r2(maintConst.electric_per_cutoff),
+    branch: txt(maintConst.branch).trim(),
+    staff: txt(maintConst.staff).trim()
+  };
+  const payload = { settings, entryId: uuid() };
+  applyLocalSettings(payload);
+  enqueue('saveSettings', payload);
+  persistState();
+  maintLoad();
+  updateStatus();
+  renderIbapa();
+  toast('Saved.');
+  drainQueue();
+}
+
+function saveMaintStock(){
+  maintTopUp();
+  const rows = [];
+  for (const product in maintStock){
+    const m = maintStock[product];
+    if (m.reorderAt !== '' && (num(m.reorderAt) < 0 || !isWhole(num(m.reorderAt)))){
+      setErr('err-maint-stock', 'Use whole units for “Buy more at”, or leave it empty.');
+      return;
+    }
+    rows.push({ product, unit: txt(m.unit).trim(), reorderAt: m.reorderAt === '' ? '' : num(m.reorderAt), active: !!m.active });
+  }
+  setErr('err-maint-stock', '');
+  const payload = { rows, entryId: uuid() };
+  applyLocalStockItems(payload);
+  enqueue('saveStockItems', payload);
+  persistState();
+  maintLoad();
+  renderIbapa();
+  toast('Stock list saved.');
+  drainQueue();
 }
 
 async function testConnection(){
@@ -2960,9 +4172,14 @@ document.addEventListener('click', (ev) => {
     benta.dirty = true;
     document.querySelectorAll('#panel-benta [data-act="staff"]').forEach(c => c.setAttribute('aria-pressed', String(c.dataset.staff === benta.staff)));
   }
-  else if (act === 'toggle-supplies') toggleCollapse('supplies');
   else if (act === 'toggle-stock') toggleCollapse('stock');
+  else if (act === 'toggle-wage') toggleCollapse('wage');
+  else if (act === 'stock-step'){
+    const st = el.closest('[data-stkstep]');
+    if (st) stockStep(st.dataset.stkstep, Number(el.dataset.dir));
+  }
   else if (act === 'save-day') saveBenta();
+  else if (act === 'goto-stock') showTab('ibapa');
 
   // Expenses
   else if (act === 'gastos-open'){ gx.open = true; gx.date = todayStr(); renderGastos(); const f = $('gxItem'); if (f) f.focus(); }
@@ -2978,6 +4195,8 @@ document.addEventListener('click', (ev) => {
   else if (act === 'cutoff-generate') generateNote();
   else if (act === 'copy-note') copyNote();
   else if (act === 'share-note') shareNote();
+  else if (act === 'split-save') saveSplit();
+  else if (act === 'pay-backlog') payBacklog();
 
   // More tab
   else if (act === 'sync-now'){
@@ -2990,6 +4209,18 @@ document.addEventListener('click', (ev) => {
     })();
   }
   else if (act === 'test-conn') testConnection();
+
+  // Stock on hand
+  else if (act === 'count-open') openCount(el.dataset.product);
+  else if (act === 'count-cancel'){ countingProduct = ''; countDraft = ''; renderIbapa(); }
+  else if (act === 'count-save') saveStockCountNow(el.dataset.product);
+
+  // Maintenance
+  else if (act === 'maint-open'){ maintOpen = true; maintLoad(); renderIbapa(); }
+  else if (act === 'maint-close'){ maintOpen = false; renderIbapa(); }
+  else if (act === 'maint-save-prices') saveMaintPrices();
+  else if (act === 'maint-save-set') saveMaintSettings();
+  else if (act === 'maint-save-stock') saveMaintStock();
 });
 
 document.querySelector('.tabbar').addEventListener('click', (ev) => {
@@ -2998,17 +4229,21 @@ document.querySelector('.tabbar').addEventListener('click', (ev) => {
 });
 
 document.addEventListener('input', (ev) => {
-  // The supplies/stock rows are addressed by their row INDEX in a data
-  // attribute: an item name is sheet data and would make an id ambiguous.
+  // The stock rows are addressed by their row INDEX in a data attribute: a
+  // product name is sheet data and would make an id ambiguous.
   const ds = ev.target.dataset || {};
-  if (ds.sup != null){
-    const r = asArr(benta.supplies)[num(ds.sup)];
-    if (r){ r.amount = ev.target.value; benta.dirty = true; updateSuppliesCard(); validateBentaLive(); }
-    return;
-  }
   if (ds.stk != null){
     const r = asArr(benta.stock)[num(ds.stk)];
     if (r){ r.qty = ev.target.value; benta.dirty = true; updateStockCard(); validateBentaLive(); }
+    return;
+  }
+  // Maintenance fields, all keyed by the row they belong to (sku or product).
+  if (ds.mprice != null){ if (maintPrices[ds.mprice]) maintPrices[ds.mprice].price = ev.target.value; return; }
+  if (ds.mcheese != null){ if (maintPrices[ds.mcheese]) maintPrices[ds.mcheese].cheesePrice = ev.target.value; return; }
+  if (ds.munit != null){ if (maintStock[ds.munit]) maintStock[ds.munit].unit = ev.target.value; return; }
+  if (ds.mreorder != null){ if (maintStock[ds.mreorder]) maintStock[ds.mreorder].reorderAt = ev.target.value; return; }
+  if (ds.mset != null){
+    if (maintConst && Object.prototype.hasOwnProperty.call(SETTABLE_SETTINGS, ds.mset)) maintConst[ds.mset] = ev.target.value;
     return;
   }
 
@@ -3018,6 +4253,7 @@ document.addEventListener('input', (ev) => {
   // Sales fields. There is no typed GCash total any more — it is computed.
   if (id === 'customAmount'){ benta.custom = ev.target.value; benta.dirty = true; updateReceipt(); validateBentaLive(); }
   else if (id === 'customGcash'){ benta.customGcash = ev.target.value; benta.dirty = true; updateReceipt(); validateBentaLive(); }
+  else if (id === 'daySalary'){ benta.salary = ev.target.value; benta.dirty = true; updateWageCard(); validateBentaLive(); }
   else if (id === 'dayNotes'){ benta.notes = ev.target.value; benta.dirty = true; }
   else if (id.startsWith('in-')){
     // Take the sku/field from the stepper's data attributes rather than
@@ -3036,6 +4272,18 @@ document.addEventListener('input', (ev) => {
   else if (id === 'gxAmount') gx.amount = ev.target.value;
   else if (id === 'gxDate') gx.date = ev.target.value || todayStr();
   else if (id === 'gxBacklog') gx.backlogRef = ev.target.value;
+  else if (id === 'gxStockQty') gx.stockQty = ev.target.value;
+
+  // Cutoff fields. The split's residual follows the field as it is typed; only
+  // the four figures it moves are rewritten, so the keyboard stays put.
+  else if (id === 'coSplitIn'){
+    if (cutoffPer) splitEdits[periodKey(cutoffPer)] = ev.target.value;
+    updateSplitLive();
+  }
+  else if (id === 'payBlAmount') payBl.amount = ev.target.value;
+
+  // More: the stocktake field
+  else if (id === 'stCountIn') countDraft = ev.target.value;
 
   // Config fields (auto-saved)
   else if (id === 'cfgUrl'){ config.apiUrl = ev.target.value.trim(); persistConfig(); updateStatus(); }
@@ -3045,6 +4293,19 @@ document.addEventListener('input', (ev) => {
 
 document.addEventListener('change', (ev) => {
   const id = ev.target.id;
+  const ds = ev.target.dataset || {};
+  // Checkboxes and selects report through `change` on every phone, so the
+  // maintenance toggles and the two pickers are wired here rather than on input.
+  if (ds.mactive != null){ if (maintPrices[ds.mactive]) maintPrices[ds.mactive].active = ev.target.checked; return; }
+  if (ds.mstockactive != null){ if (maintStock[ds.mstockactive]) maintStock[ds.mstockactive].active = ev.target.checked; return; }
+  if (id === 'gxStockProduct'){
+    gx.stockProduct = ev.target.value;
+    if (!gx.stockProduct) gx.stockQty = '';
+    renderGastos();          // shows (or hides) the quantity field
+    return;
+  }
+  if (id === 'payBlRef'){ payBl.ref = ev.target.value; return; }
+  if (id === 'gxBacklog'){ gx.backlogRef = ev.target.value; return; }
   if (id === 'bentaDate'){
     const v = ev.target.value;
     if (v && v !== benta.date){

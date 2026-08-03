@@ -35,19 +35,46 @@
  *
  * KEY CASING — the contract is deliberately asymmetric, do not "tidy" it:
  *   REQUEST  payload keys are camelCase  (cheeseQty, gcashQty, gcashCheeseQty,
- *            customAmount, customGcash, entryId, backlogRef, dryRun)
+ *            customAmount, customGcash, entryId, backlogRef, stockProduct,
+ *            stockQty, reorderAt, cheesePrice, dryRun)
  *            — see SPEC.md "API contract".
  *   RESPONSE keys are snake_case (cheese_price, custom_amount, custom_gcash,
  *            entry_id, updated_at, cheese_qty, regular_qty, gcash_qty,
- *            gcash_cheese_qty, gcash_amount, supplies_total, backlog_ref,
- *            total_amount, start_date, per_partner, note_text, generated_at)
+ *            gcash_cheese_qty, gcash_amount, backlog_ref, total_amount,
+ *            start_date, per_partner, note_text, generated_at, counted_qty,
+ *            split_amount, stock_product, stock_qty, on_hand, reorder_at,
+ *            baseline_qty, baseline_date, delivered_since, used_since)
  *            — they mirror the sheet's own column headers and the shape the
- *            PWA persists in localStorage (state_v1).
+ *            PWA persists in localStorage (state_v1). The only camelCase names
+ *            a response may carry are the bootstrap/range CONTAINER keys
+ *            (stockItems, stockUsage, stockCounts, cutoffInputs, lastCutoff).
  * Emitting camelCase in a response is a bug: the PWA reads snake_case, so a
  * mismatched key silently arrives as undefined and turns into 0 money.
+ *
+ * WHAT CHANGED IN v2.3.0 (see SPEC.md for the whole picture):
+ *   - the cutoff note gained a "Salary" line and a final residual line whose
+ *     LABEL carries the sign ("Remaining - 1,000" / "Short - 2,000"),
+ *   - Split is an ENTERED amount (CutoffInputs, else Settings split_default),
+ *     so REMAINING is the residual and may legitimately be negative,
+ *   - daily salary is snapshotted onto each DailyLog row at save time,
+ *   - the daily-supplies path is RETIRED: Supplies on the note is
+ *     Expenses(category=Supplies) alone,
+ *   - stock is a ledger: whole units opened, deliveries carried on the expense
+ *     row that paid for them, stocktakes that re-baseline, and a COMPUTED
+ *     on-hand figure that is never stored.
+ *
+ * WHAT CHANGED IN v2.3.1 — three holes in the SERVER's own guards. The client
+ * checks the same things for convenience, but the server is what enforces them:
+ *   - savePrices REFUSES a 0 (or blank) price on a sku that is still ACTIVE,
+ *     naming it. A selling item priced at nothing books every future sale at
+ *     nothing. An inactive sku may keep its 0.
+ *   - readStockItems ships reorder_at RAW, so a blank threshold stays blank
+ *     instead of arriving as 0 and being written back into the cell.
+ *   - whole units are enforced on ALL THREE ledger writers, not just saveDay:
+ *     a delivery's stockQty and a stocktake's qty were accepting 1.5.
  */
 
-var VERSION = '2.2.0';
+var VERSION = '2.3.1';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -65,14 +92,23 @@ var TAB = {
   PRICES: 'Prices',
   DAILY_LOG: 'DailyLog',
   DAILY_COUNTS: 'DailyCounts',
-  SUPPLY_ITEMS: 'SupplyItems',
-  DAILY_SUPPLIES: 'DailySupplies',
   STOCK_ITEMS: 'StockItems',
   STOCK_USAGE: 'StockUsage',
+  STOCK_COUNTS: 'StockCounts',
   EXPENSES: 'Expenses',
   BACKLOGS: 'Backlogs',
+  CUTOFF_INPUTS: 'CutoffInputs',
   CUTOFFS: 'Cutoffs'
 };
+
+// RETIRED TABS (2026-08-03): "SupplyItems" and "DailySupplies". The nightly
+// "supplies bought today" card was judged redundant with the Expenses tab, so
+// nothing reads or writes those two tabs any more and the cutoff's Supplies
+// line is Expenses(category=Supplies) ALONE. They are DELIBERATELY absent from
+// SCHEMA rather than kept as dead definitions: a tab nothing reads should not
+// be re-created on a fresh sheet, and a reader left behind "just in case" is
+// how retired data quietly starts counting again. Migration never deletes, so
+// a live sheet keeps both tabs (and whatever is in them) untouched.
 
 var SCHEMA = [
   // Settings value column is also "@" so the token (or any numeric-looking
@@ -81,19 +117,49 @@ var SCHEMA = [
   { name: TAB.PRICES, headers: ['sku', 'label', 'group', 'size', 'price', 'cheese_price', 'active'], textCols: [] },
   // custom_gcash was appended in v2.1.0 (how much of custom_amount was GCash).
   // `gcash` is computed server-side now — it is still stored, still returned.
-  { name: TAB.DAILY_LOG, headers: ['date', 'closed', 'staff', 'gcash', 'total', 'cash', 'custom_amount', 'notes', 'entry_id', 'updated_at', 'custom_gcash'], textCols: ['date', 'updated_at'] },
+  // salary was appended in v2.3.0: that day's wage, SNAPSHOTTED at save time so
+  // a later daily_salary change never rewrites history.
+  { name: TAB.DAILY_LOG, headers: ['date', 'closed', 'staff', 'gcash', 'total', 'cash', 'custom_amount', 'notes', 'entry_id', 'updated_at', 'custom_gcash', 'salary'], textCols: ['date', 'updated_at'] },
   // gcash_qty / gcash_cheese_qty / gcash_amount were appended in v2.1.0.
   { name: TAB.DAILY_COUNTS, headers: ['date', 'sku', 'sod', 'eod', 'sold', 'cheese_qty', 'regular_qty', 'amount', 'entry_id', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount'], textCols: ['date'] },
-  { name: TAB.SUPPLY_ITEMS, headers: ['item', 'active', 'sort'], textCols: [] },
-  { name: TAB.DAILY_SUPPLIES, headers: ['date', 'item', 'amount', 'entry_id', 'updated_at'], textCols: ['date', 'updated_at'] },
-  { name: TAB.STOCK_ITEMS, headers: ['product', 'unit', 'active', 'sort'], textCols: [] },
+  // opening_qty / opening_date / reorder_at were appended in v2.3.0 (stock
+  // ledger). opening_date is a yyyy-MM-dd string and BLANK means "count the
+  // whole history" — see computeStockStatus.
+  { name: TAB.STOCK_ITEMS, headers: ['product', 'unit', 'active', 'sort', 'opening_qty', 'opening_date', 'reorder_at'], textCols: ['opening_date'] },
   { name: TAB.STOCK_USAGE, headers: ['date', 'product', 'qty', 'entry_id', 'updated_at'], textCols: ['date', 'updated_at'] },
-  { name: TAB.EXPENSES, headers: ['date', 'category', 'item', 'amount', 'backlog_ref', 'notes', 'entry_id', 'updated_at'], textCols: ['date', 'updated_at'] },
+  // A physical stocktake. It BECOMES the new baseline, which is what stops
+  // estimation drift (spoilage, breakage, miscounts) accumulating forever.
+  { name: TAB.STOCK_COUNTS, headers: ['date', 'product', 'counted_qty', 'entry_id', 'updated_at'], textCols: ['date', 'updated_at'] },
+  // stock_product / stock_qty were appended in v2.3.0: a delivery is an
+  // ordinary expense row that additionally names what arrived. Money stays in
+  // exactly one place (`amount`); the quantity rides along on the same row.
+  { name: TAB.EXPENSES, headers: ['date', 'category', 'item', 'amount', 'backlog_ref', 'notes', 'entry_id', 'updated_at', 'stock_product', 'stock_qty'], textCols: ['date', 'updated_at'] },
   { name: TAB.BACKLOGS, headers: ['name', 'description', 'total_amount', 'start_date', 'active'], textCols: ['start_date'] },
+  // The Split is an ENTERED amount per cutoff (v2.3.0), no longer the residual.
+  { name: TAB.CUTOFF_INPUTS, headers: ['start', 'end', 'split_amount', 'entry_id', 'updated_at'], textCols: ['start', 'end', 'updated_at'] },
   { name: TAB.CUTOFFS, headers: ['start', 'end', 'total', 'cash', 'gcash', 'mama', 'split', 'per_partner', 'supplies', 'octopus', 'other', 'electric', 'note_text', 'generated_at'], textCols: ['start', 'end', 'generated_at'] }
 ];
 
 var EXPENSE_CATEGORIES = ['Supplies', 'Octopus', 'Electric', 'Mama', 'Backlog', 'Other'];
+
+// The ONLY Settings keys the Maintenance screen may write. `token` is
+// deliberately absent and must stay absent: an API that can rewrite its own
+// shared secret can lock the owner out of his own sheet from a phone.
+// Keys not on this list are ignored, so an old or hostile payload cannot
+// invent a setting either.
+var SETTABLE_SETTINGS = {
+  branch: 'text',
+  staff: 'text',
+  daily_salary: 'money',
+  split_default: 'money',
+  mama_per_cutoff: 'money',
+  electric_per_cutoff: 'money'
+};
+
+// Seeded fallbacks, used when the Settings row is missing or its cell is blank —
+// a blank daily_salary must never quietly make a day of work cost ₱0.
+var DEFAULT_DAILY_SALARY = 200;
+var DEFAULT_SPLIT = 3000;
 
 var MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'];
@@ -140,7 +206,7 @@ function doPost(e) {
         data = apiBootstrap(ss, settings);
         break;
       case 'saveDay':
-        data = withLock(function () { return apiSaveDay(ss, payload); });
+        data = withLock(function () { return apiSaveDay(ss, settings, payload); });
         break;
       case 'saveExpense':
         data = withLock(function () { return apiSaveExpense(ss, payload); });
@@ -148,8 +214,23 @@ function doPost(e) {
       case 'deleteExpense':
         data = withLock(function () { return apiDeleteExpense(ss, payload); });
         break;
+      case 'saveStockCount':
+        data = withLock(function () { return apiSaveStockCount(ss, payload); });
+        break;
+      case 'saveCutoffSplit':
+        data = withLock(function () { return apiSaveCutoffSplit(ss, payload); });
+        break;
+      case 'savePrices':
+        data = withLock(function () { return apiSavePrices(ss, payload); });
+        break;
+      case 'saveSettings':
+        data = withLock(function () { return apiSaveSettings(ss, payload); });
+        break;
+      case 'saveStockItems':
+        data = withLock(function () { return apiSaveStockItems(ss, payload); });
+        break;
       case 'range':
-        data = apiRange(ss, payload);
+        data = apiRange(ss, settings, payload);
         break;
       case 'cutoff':
         // dryRun is a pure read (preview); only the archiving variant mutates.
@@ -194,6 +275,8 @@ function apiBootstrap(ss, settings) {
   var prices = readPrices(ss).list;
   var expensesAll = readExpenses(ss);
   var backlogs = readBacklogs(ss, expensesAll);
+  var usageAll = readStockUsage(ss);
+  var countsAll = readStockCounts(ss);
 
   // ONE window for everything the phone gets: the last 90 days, by DATE.
   //
@@ -205,7 +288,7 @@ function apiBootstrap(ss, settings) {
   var since = Utilities.formatDate(new Date(Date.now() - 90 * 86400000), TZ, 'yyyy-MM-dd');
   var inWindow = function (row) { return row.date >= since; };
 
-  var daysAll = readDays(ss);
+  var daysAll = readDays(ss, dailySalaryOf(settings));
   daysAll.sort(function (a, b) { return a.date < b.date ? -1 : (a.date > b.date ? 1 : 0); });
   var days = daysAll.filter(inWindow);
 
@@ -220,12 +303,17 @@ function apiBootstrap(ss, settings) {
   // as strings. The API contract ships known-numeric settings as numbers.
   publicSettings.mama_per_cutoff = asNum(settings.mama_per_cutoff);
   publicSettings.electric_per_cutoff = asNum(settings.electric_per_cutoff);
+  publicSettings.daily_salary = dailySalaryOf(settings);
+  publicSettings.split_default = splitDefaultOf(settings);
 
   return {
     settings: publicSettings,
     prices: prices,
-    supplyItems: readSupplyItems(ss).list,
-    stockItems: readStockItems(ss).list,
+    // Each stock item carries its COMPUTED on-hand figure and the three numbers
+    // it is made of, so the phone can show it and explain it without holding
+    // history it does not have. Deliveries and usage are counted over the WHOLE
+    // history (not the 90-day window) or on-hand would be wrong.
+    stockItems: stockItemsWithStatus(ss, expensesAll, usageAll, countsAll),
     backlogs: backlogs,
     // The window this reply SPEAKS FOR. The phone needs it stated explicitly:
     // inferring the window from the dates present cannot distinguish "this date
@@ -237,9 +325,13 @@ function apiBootstrap(ss, settings) {
     // never show one side of a period without the other, and an edited day
     // always reloads complete.
     counts: readCounts(ss).filter(inWindow),
-    dailySupplies: readDailySupplies(ss).filter(inWindow),
-    stockUsage: readStockUsage(ss).filter(inWindow),
+    stockUsage: usageAll.filter(inWindow),
+    stockCounts: countsAll.filter(inWindow),
     expenses: expenses,
+    // The entered Split per cutoff. Period-keyed, not date-keyed, so a period
+    // that ENDS inside the window is shipped — that is every period the phone
+    // can still page back to.
+    cutoffInputs: readCutoffInputs(ss).filter(function (r) { return r.end >= since; }),
     lastCutoff: readLastCutoff(ss)
   };
 }
@@ -259,13 +351,29 @@ function apiBootstrap(ss, settings) {
  *               + (cheese_qty + gcash_cheese_qty) * cheese_price
  *  gcash_amount = gcash_qty * price + gcash_cheese_qty * cheese_price
  */
-function apiSaveDay(ss, payload) {
+function apiSaveDay(ss, settings, payload) {
   var date = reqDate(payload.date, 'date');
   var entryId = asStr(payload.entryId);
   if (!entryId) throw new Error('entryId is required.');
   var closed = asBool(payload.closed);
   var staff = asStr(payload.staff);
   var notes = asStr(payload.notes);
+
+  // --- Daily salary, SNAPSHOTTED onto the row.
+  // 0 on a closed day (nobody worked). Otherwise the payload's own figure when
+  // it sends one (a half day), else the CURRENT Settings daily_salary. It is
+  // stored per day precisely so a later rate change never rewrites history —
+  // the cutoff adds up what each day cost at the time, not today's rate.
+  // An explicit 0 is honoured; only a missing/blank value falls back.
+  var salary;
+  if (closed) {
+    salary = 0;
+  } else if (payload.salary === null || payload.salary === undefined || asStr(payload.salary) === '') {
+    salary = dailySalaryOf(settings);
+  } else {
+    salary = numOrThrow(payload.salary, "The day's salary");
+    if (salary < 0) throw new Error("The day's salary cannot be negative.");
+  }
 
   // A closed day has no sales by definition: counts/supplies/stock empty,
   // total 0. Ignore whatever the client sent for those (offline edits can
@@ -287,12 +395,14 @@ function apiSaveDay(ss, payload) {
   if (!Array.isArray(rawCounts)) throw new Error('counts must be an array.');
 
   var priceMap = readPrices(ss).map;
-  var seenSkus = {};
+  // Prototype-free accumulators throughout: a sku called "toString" must not
+  // read as already-seen (which silently swallowed it from `dropped_skus`).
+  var seenSkus = Object.create(null);
   var lines = [];
   // Skus the day referenced that are no longer in Prices. Reported to the
   // client as `dropped_skus` so it can say plainly what happened.
   var droppedSkus = [];
-  var seenDropped = {};
+  var seenDropped = Object.create(null);
 
   rawCounts.forEach(function (c) {
     c = c || {};
@@ -373,43 +483,23 @@ function apiSaveDay(ss, payload) {
     });
   });
 
-  // --- Daily supplies (pesos per item) — feeds the cutoff note's Supplies line
-  //
-  // The SupplyItems picklist is ADVISORY, not referential integrity: ANY
-  // non-blank (trimmed) item name is accepted. Rejecting a name that is no
-  // longer listed made the whole day permanently un-saveable — INCLUDING its
-  // sales — the moment the owner renamed or deleted a picklist row, and there
-  // was no way out from the phone. The phone still offers the picklist and
-  // shows a quiet note next to a row whose name it no longer lists; it never
-  // blocks the save. Amounts must still be >= 0 and names must still be unique.
-  var rawSupplies = closed ? [] : (payload.supplies || []);
-  if (!Array.isArray(rawSupplies)) throw new Error('supplies must be an array.');
-  // The picklist's CONTENTS are not consulted, but a save that carries supply
-  // rows still creates and seeds the tab if a live sheet has not been migrated
-  // yet, so the next bootstrap can offer the picklist. Same cost as before.
-  if (rawSupplies.length > 0) readTabForWrite(ss, TAB.SUPPLY_ITEMS);
-  var seenSupply = {};
-  var supplyRows = [];
-  rawSupplies.forEach(function (s) {
-    s = s || {};
-    var item = asStr(s.item);
-    if (!item) throw new Error('A supplies row is missing its item name.');
-    if (seenSupply[item]) throw new Error('Duplicate supplies rows for "' + item + '".');
-    seenSupply[item] = true;
-    var amount = numOrThrow(s.amount, item + ' amount');
-    if (amount < 0) throw new Error(item + ': amount cannot be negative.');
-    // Only non-zero items get a row (SPEC) — a zeroed item just disappears.
-    if (amount > 0) supplyRows.push({ item: item, amount: round2(amount) });
-  });
-  var suppliesTotal = round2(supplyRows.reduce(function (s, r) { return s + r.amount; }, 0));
+  // payload.supplies is DELIBERATELY IGNORED (v2.3.0). The nightly "supplies
+  // bought today" card is retired: purchases live in Expenses(Supplies) and
+  // nowhere else, so the cutoff can never count one twice. A phone that queued
+  // a saveDay before this update still carries the old `supplies` array —
+  // writing it would resurrect a tab nothing reads.
 
-  // --- Stock used (quantities) — NEVER money, never touches any total
-  // StockItems is advisory too, for exactly the same reason as SupplyItems
-  // above: a renamed product must never cost the owner a whole day of sales.
+  // --- Stock used (quantities) — NEVER money, never touches any total.
+  // WHOLE UNITS OPENED, counted like the boxes: if a gallon of sauce is opened
+  // it counts as used that day. Integers only — never a fractional weight,
+  // never a running estimate.
+  // StockItems is advisory, not referential integrity, for the same reason it
+  // always was: a renamed product must never cost the owner a whole day of
+  // sales, and there would be no way out from the phone.
   var rawStock = closed ? [] : (payload.stock || []);
   if (!Array.isArray(rawStock)) throw new Error('stock must be an array.');
   if (rawStock.length > 0) readTabForWrite(ss, TAB.STOCK_ITEMS);
-  var seenStock = {};
+  var seenStock = Object.create(null);
   var stockRows = [];
   rawStock.forEach(function (s) {
     s = s || {};
@@ -417,9 +507,9 @@ function apiSaveDay(ss, payload) {
     if (!product) throw new Error('A stock row is missing its product name.');
     if (seenStock[product]) throw new Error('Duplicate stock rows for "' + product + '".');
     seenStock[product] = true;
-    // Quantities can be fractional (kg, gallons), so no whole-number check.
     var qty = numOrThrow(s.qty, product + ' quantity');
     if (qty < 0) throw new Error(product + ': quantity cannot be negative.');
+    wholeUnitsOrThrow(qty, s.qty, product);
     if (qty > 0) stockRows.push({ product: product, qty: qty });
   });
 
@@ -444,7 +534,7 @@ function apiSaveDay(ss, payload) {
   var logObj = {
     date: date, closed: closed, staff: staff, gcash: gcash, total: total, cash: cash,
     custom_amount: custom, custom_gcash: customGcash, notes: notes,
-    entry_id: entryId, updated_at: stamp
+    entry_id: entryId, updated_at: stamp, salary: salary
   };
   var logRow = buildRow(log, logWidth, logObj, found > 0 ? padRow(log.values[found - 1], logWidth) : null);
   if (found > 0) {
@@ -453,7 +543,7 @@ function apiSaveDay(ss, payload) {
     log.sheet.appendRow(logRow);
   }
 
-  // --- Rewrite this date's blocks in the three date-keyed detail tabs.
+  // --- Rewrite this date's blocks in the two date-keyed detail tabs.
   // DailyCounts stays first so a mid-write failure has the same (safe) shape
   // it always had — see rewriteDateBlock for the write-order reasoning.
   rewriteDateBlock(ss, TAB.DAILY_COUNTS, date, lines.map(function (l) {
@@ -463,9 +553,6 @@ function apiSaveDay(ss, payload) {
       entry_id: entryId,
       gcash_qty: l.gcash_qty, gcash_cheese_qty: l.gcash_cheese_qty, gcash_amount: l.gcash_amount
     };
-  }));
-  rewriteDateBlock(ss, TAB.DAILY_SUPPLIES, date, supplyRows.map(function (r) {
-    return { date: date, item: r.item, amount: r.amount, entry_id: entryId, updated_at: stamp };
   }));
   rewriteDateBlock(ss, TAB.STOCK_USAGE, date, stockRows.map(function (r) {
     return { date: date, product: r.product, qty: r.qty, entry_id: entryId, updated_at: stamp };
@@ -477,7 +564,11 @@ function apiSaveDay(ss, payload) {
     total: total,
     cash: cash,
     gcash: gcash,
-    supplies_total: suppliesTotal,
+    // The snapshot that was actually stored, so the phone shows the figure the
+    // cutoff will use rather than re-deriving it. `supplies_total` is GONE with
+    // the retired supplies card: a key that could only ever answer 0 is worse
+    // than no key at all.
+    salary: salary,
     // Always present (empty when nothing was dropped) so the client never has
     // to guess whether an older server simply omitted it.
     dropped_skus: droppedSkus,
@@ -510,9 +601,45 @@ function apiSaveExpense(ss, payload) {
   var item = asStr(payload.item);
   var notes = asStr(payload.notes);
 
+  // --- Optional delivery: what arrived, and how much of it.
+  // A delivery has two faces — money paid and quantity received — and the money
+  // stays in exactly ONE place: this row's `amount`, counted once as always.
+  // `stock_qty` feeds only the stock ledger. Leaving both blank is normal; most
+  // expenses are not tracked stock.
+  var stockProduct = asStr(payload.stockProduct);
+  var hasQty = !(payload.stockQty === null || payload.stockQty === undefined || asStr(payload.stockQty) === '');
+  var stockQty = '';
+  if (hasQty) {
+    stockQty = numOrThrow(payload.stockQty, 'The quantity that arrived');
+    if (stockQty < 0) throw new Error('The quantity that arrived cannot be negative.');
+    if (!stockProduct) {
+      throw new Error('Say what arrived: a quantity needs a product name.');
+    }
+    // A delivery arrives in the same WHOLE UNITS the day's usage is counted in —
+    // 2 gallons, never 1.5 — and it is added straight into on_hand, so a
+    // fraction here shows up in every later figure the shelf card prints.
+    // Checked AFTER the product name, so the message can say which product.
+    wholeUnitsOrThrow(stockQty, payload.stockQty, stockProduct);
+  }
+  if (stockProduct) {
+    // Unlike the day's stock list, a DELIVERY is checked against StockItems: it
+    // moves an on-hand figure, and a typo would silently credit a product that
+    // does not exist (and never show up anywhere). readTabForWrite first, so a
+    // sheet that has not been migrated by hand yet gets the tab and its seeds
+    // instead of refusing every delivery.
+    readTabForWrite(ss, TAB.STOCK_ITEMS);
+    var stockMap = readStockItems(ss).map;
+    if (!stockMap[stockProduct]) {
+      throw new Error('There is no stock product called "' + stockProduct +
+        '". Pick one from the list, or add it under Maintenance first.');
+    }
+    if (!hasQty) stockQty = 0;
+  }
+
   var obj = {
     date: date, category: category, item: item, amount: amount,
-    backlog_ref: backlogRef, notes: notes, entry_id: entryId, updated_at: nowStamp()
+    backlog_ref: backlogRef, notes: notes, entry_id: entryId, updated_at: nowStamp(),
+    stock_product: stockProduct, stock_qty: stockQty
   };
 
   // Upsert by entry_id: replaying the same mutation rewrites the same row.
@@ -547,16 +674,227 @@ function apiDeleteExpense(ss, payload) {
   return { deleted: false };
 }
 
-function apiRange(ss, payload) {
+/** A physical stocktake, which BECOMES the new baseline for that product: from
+ *  here on, on-hand is this figure plus deliveries and minus usage AFTER this
+ *  date. That is what absorbs spoilage, breakage and miscounts instead of
+ *  letting them skew on-hand forever.
+ *  A count is understood as an END-OF-DAY figure, so the same day's deliveries
+ *  and usage are already inside it and are NOT added again. */
+function apiSaveStockCount(ss, payload) {
+  var date = reqDate(payload.date, 'date');
+  var entryId = asStr(payload.entryId);
+  if (!entryId) throw new Error('entryId is required.');
+  var product = asStr(payload.product);
+  if (!product) throw new Error('Say which product you counted.');
+  readTabForWrite(ss, TAB.STOCK_ITEMS);
+  if (!readStockItems(ss).map[product]) {
+    throw new Error('There is no stock product called "' + product +
+      '". Pick one from the list, or add it under Maintenance first.');
+  }
+  var qty = numOrThrow(payload.qty, 'The counted quantity');
+  if (qty < 0) throw new Error('The counted quantity cannot be negative.');
+  // A stocktake counts the same WHOLE UNITS as everything else — and it BECOMES
+  // the baseline, so a 2.5 typed here is not one bad row: every on-hand figure
+  // for that product carries the half from now until the next count.
+  wholeUnitsOrThrow(qty, payload.qty, product);
+
+  // Upsert by entry_id: replaying the same queued mutation rewrites its row.
+  upsertRows(ss, TAB.STOCK_COUNTS, [{
+    date: date, product: product, counted_qty: qty,
+    entry_id: entryId, updated_at: nowStamp()
+  }], ['entry_id']);
+
+  // The figure the phone should now show. Recomputed from the sheet rather than
+  // assumed to equal `qty`: a count backdated behind a later delivery or a
+  // later usage row must land on the arithmetic, not on the number typed.
+  var status = computeStockStatus(ss)[product];
+  return {
+    entry_id: entryId,
+    product: product,
+    on_hand: status ? status.on_hand : qty
+  };
+}
+
+/** The entered Split for one cutoff period. Upsert by (start, end) — the period
+ *  is the natural key, so re-entering it converges on one row. */
+function apiSaveCutoffSplit(ss, payload) {
+  var start = reqDate(payload.start, 'start');
+  var end = reqDate(payload.end, 'end');
+  if (start > end) throw new Error('start (' + start + ') must be on or before end (' + end + ').');
+  var entryId = asStr(payload.entryId);
+  if (!entryId) throw new Error('entryId is required.');
+  var amount = numOrThrow(payload.amount, 'The split amount');
+  if (amount < 0) throw new Error('The split amount cannot be negative.');
+
+  upsertRows(ss, TAB.CUTOFF_INPUTS, [{
+    start: start, end: end, split_amount: round2(amount),
+    entry_id: entryId, updated_at: nowStamp()
+  }], ['start', 'end']);
+  return {
+    entry_id: entryId, start: start, end: end,
+    split_amount: round2(amount), per_partner: round2(amount / 2)
+  };
+}
+
+/** Maintenance screen: edit prices without opening the sheet on a phone.
+ *  Upsert by sku, and ONLY the three editable fields — label, group and size
+ *  are left exactly as they are, and a sku the payload does not mention is not
+ *  touched at all.
+ *  Price edits apply to FUTURE days only: historical DailyCounts keep their
+ *  snapshotted amounts, which is the whole point of computing money at save
+ *  time. */
+function apiSavePrices(ss, payload) {
+  var rows = payload.rows;
+  if (!Array.isArray(rows)) throw new Error('rows must be an array.');
+  var known = readPrices(ss).map;
+  var updated = [];
+  rows.forEach(function (r) {
+    r = r || {};
+    var sku = asStr(r.sku);
+    if (!sku) throw new Error('A price row is missing its sku.');
+    if (!known[sku]) {
+      // Deliberately NOT created: a price row also needs a group (box vs simple)
+      // and a size, and guessing them would misprice every cheese box sold under
+      // that sku. Adding a product is a sheet job, done once.
+      throw new Error('There is no price called "' + sku +
+        '". Add the row in the Prices tab first, then edit it here.');
+    }
+    var price = numOrThrow(r.price, sku + ' price');
+    if (price < 0) throw new Error(sku + ': price cannot be negative.');
+    var cheesePrice = numOrThrow(r.cheesePrice, sku + ' cheese price');
+    if (cheesePrice < 0) throw new Error(sku + ': cheese price cannot be negative.');
+    var active = asBool(r.active);
+    // A ₱0 price on an item that is still SELLING is not a price, it is a
+    // silent hole: every future day computes that sku's amount at nothing, the
+    // receipt shows a box sold for free, and nothing anywhere says why. A blank
+    // field arrives here as 0 (numOrThrow), so this catches the far more likely
+    // case of a field cleared by accident on the Maintenance screen.
+    // An INACTIVE sku may keep its 0 — it is off the Sales screen and sells
+    // nothing, and refusing that would make an unpriced old sku un-saveable.
+    if (active && !(price > 0)) {
+      throw new Error('"' + sku + '" is switched on, so it needs a price. At 0 the app ' +
+        'would count every sale as free. Type a price, or switch the item off first.');
+    }
+    // The cheese price is a price too, and clearing that field is exactly as
+    // easy: it would sell every cheese box for nothing. Only group=box HAS a
+    // cheese version — a group=simple sku must keep its 0 there.
+    if (active && known[sku].group === 'box' && !(cheesePrice > 0)) {
+      throw new Error('"' + sku + '" is switched on, so it needs a cheese price too. At 0 ' +
+        'the app would count every cheese box as free. Type a price, or switch the item off first.');
+    }
+    updated.push({
+      sku: sku, price: round2(price), cheese_price: round2(cheesePrice),
+      active: active
+    });
+  });
+  // Validate the whole batch BEFORE writing any of it, so a typo in the third
+  // row cannot leave the first two applied and the rest not.
+  upsertRows(ss, TAB.PRICES, updated, ['sku']);
+  return { saved: updated.length };
+}
+
+/** Maintenance screen: edit the handful of Settings the owner actually changes.
+ *  WHITELISTED keys only and `token` is not on the list — an API that can
+ *  rewrite its own shared secret can lock the owner out of his own sheet.
+ *  A key that is not on the list is IGNORED (reported back as untouched), and
+ *  every Settings row the payload does not mention is left alone. */
+function apiSaveSettings(ss, payload) {
+  var incoming = (payload.settings && typeof payload.settings === 'object') ? payload.settings : null;
+  if (!incoming) throw new Error('settings must be an object.');
+
+  var accepted = {};
+  var ignored = [];
+  for (var key in incoming) {
+    // hasOwnProperty, not a plain lookup: "toString" and "constructor" are
+    // inherited from Object.prototype and would otherwise read as whitelisted.
+    var kind = Object.prototype.hasOwnProperty.call(SETTABLE_SETTINGS, key)
+      ? SETTABLE_SETTINGS[key] : '';
+    if (!kind) { ignored.push(key); continue; }
+    if (kind === 'money') {
+      var n = numOrThrow(incoming[key], key);
+      if (n < 0) throw new Error(key + ' cannot be negative.');
+      accepted[key] = n;
+    } else {
+      var s = asStr(incoming[key]);
+      if (key === 'branch' && !s) throw new Error('The branch name cannot be empty.');
+      accepted[key] = s;
+    }
+  }
+
+  var t = readTab(ss, TAB.SETTINGS);
+  var valueCol = colOf(t, 'value') + 1;
+  var keyIdx = colOf(t, 'key');
+  var rowOf = {};
+  for (var i = 1; i < t.values.length; i++) {
+    var k = asStr(t.values[i][keyIdx]);
+    if (k && rowOf[k] === undefined) rowOf[k] = i + 1;
+  }
+  var toAppend = [];
+  var savedKeys = [];
+  for (var ak in accepted) {
+    savedKeys.push(ak);
+    if (rowOf[ak]) t.sheet.getRange(rowOf[ak], valueCol).setValue(accepted[ak]);
+    else toAppend.push({ key: ak, value: accepted[ak] });
+  }
+  appendObjects(ss, TAB.SETTINGS, toAppend);
+  savedKeys.sort();
+  ignored.sort();
+  return { saved: savedKeys, ignored: ignored };
+}
+
+/** Maintenance screen: edit each stock product's unit, reorder point and
+ *  whether it is still in use. Upsert by product; opening_qty / opening_date
+ *  are never touched here (the baseline is moved by "Correct the count"), and a
+ *  product the payload does not mention is left alone. */
+function apiSaveStockItems(ss, payload) {
+  var rows = payload.rows;
+  if (!Array.isArray(rows)) throw new Error('rows must be an array.');
+  readTabForWrite(ss, TAB.STOCK_ITEMS);
+  var existing = readStockItems(ss);
+  var maxSort = 0;
+  existing.list.forEach(function (x) { if (x.sort > maxSort) maxSort = x.sort; });
+
+  var out = [];
+  rows.forEach(function (r) {
+    r = r || {};
+    var product = asStr(r.product);
+    if (!product) throw new Error('A stock row is missing its product name.');
+    var reorderAt = '';
+    if (!(r.reorderAt === null || r.reorderAt === undefined || asStr(r.reorderAt) === '')) {
+      reorderAt = numOrThrow(r.reorderAt, product + ' reorder point');
+      if (reorderAt < 0) throw new Error(product + ': the reorder point cannot be negative.');
+    }
+    var o = {
+      product: product,
+      unit: asStr(r.unit),
+      active: asBool(r.active),
+      reorder_at: reorderAt
+    };
+    // A brand-new product is safe to create here (unlike a price): it carries no
+    // money at all. It starts with a zero baseline and no baseline date, exactly
+    // like the seeded six.
+    if (!existing.map[product]) {
+      maxSort += 1;
+      o.sort = maxSort;
+      o.opening_qty = 0;
+      o.opening_date = '';
+    }
+    out.push(o);
+  });
+  upsertRows(ss, TAB.STOCK_ITEMS, out, ['product']);
+  return { saved: out.length };
+}
+
+function apiRange(ss, settings, payload) {
   var start = reqDate(payload.start, 'start');
   var end = reqDate(payload.end, 'end');
   if (start > end) throw new Error('start (' + start + ') must be on or before end (' + end + ').');
   var inRange = function (x) { return x.date >= start && x.date <= end; };
   return {
-    days: readDays(ss).filter(inRange),
+    days: readDays(ss, dailySalaryOf(settings)).filter(inRange),
     counts: readCounts(ss).filter(inRange),
-    dailySupplies: readDailySupplies(ss).filter(inRange),
     stockUsage: readStockUsage(ss).filter(inRange),
+    stockCounts: readStockCounts(ss).filter(inRange),
     expenses: readExpenses(ss).filter(inRange)
   };
 }
@@ -567,14 +905,21 @@ function apiCutoff(ss, settings, payload, dryRun) {
   if (start > end) throw new Error('start (' + start + ') must be on or before end (' + end + ').');
   var inPeriod = function (x) { return x.date >= start && x.date <= end; };
 
-  var days = readDays(ss).filter(inPeriod);
+  var days = readDays(ss, dailySalaryOf(settings)).filter(inPeriod);
   var expenses = readExpenses(ss).filter(inPeriod);
-  var dailySupplies = readDailySupplies(ss).filter(inPeriod);
 
-  var total = 0, gcash = 0;
-  days.forEach(function (d) { total += d.total; gcash += d.gcash; });
+  var total = 0, gcash = 0, salary = 0;
+  days.forEach(function (d) {
+    total += d.total;
+    gcash += d.gcash;
+    // readDays already resolved this: 0 on a closed day, the day's snapshotted
+    // wage when it has one, else the CURRENT daily_salary for a row saved
+    // before salary was stored at all.
+    salary += d.salary;
+  });
   total = round2(total);
   gcash = round2(gcash);
+  salary = round2(salary);
   var cash = round2(total - gcash);
 
   var mama = 0, supplies = 0, octopus = 0, electric = 0, other = 0;
@@ -591,26 +936,35 @@ function apiCutoff(ss, settings, payload, dryRun) {
         break;
     }
   });
-  // The Supplies line is the sum of BOTH places a supply purchase can live:
-  // bulk buys logged under Expenses(Supplies) and the small daily buys logged
-  // per item in DailySupplies. (The UI warns against entering one twice.)
-  dailySupplies.forEach(function (s) { supplies += s.amount; });
+  // Supplies is Expenses(category=Supplies) ALONE (v2.3.0). The nightly daily-
+  // supplies card is retired, so a purchase now lives in exactly one place and
+  // cannot be counted twice.
 
   mama = round2(mama); supplies = round2(supplies); octopus = round2(octopus);
   electric = round2(electric); other = round2(other);
 
-  // Verified identity: Total = Cash + GCash = Mama + Split + Supplies +
-  // Octopus + Other + Electric  =>  Split is the residual profit. A bigger
-  // Supplies figure simply leaves a smaller Split.
-  var split = round2(total - mama - supplies - octopus - other - electric);
+  // Split is an ENTERED amount, not the residual (owner, 2026-08-03): the row
+  // saved for THIS period if there is one, else the Settings default. Half each.
+  var entered = readCutoffInputs(ss).filter(function (r) {
+    return r.start === start && r.end === end;
+  });
+  var split = entered.length > 0 ? round2(entered[entered.length - 1].split_amount)
+    : splitDefaultOf(settings);
   var perPartner = round2(split / 2);
+
+  // REMAINING is the residual now — what is left in the business after
+  // everything, and the figure backlog payments are funded from. It MAY BE
+  // NEGATIVE (a short cutoff); it is never clamped, because a clamp would hide
+  // exactly the fortnight the owner most needs to see.
+  var remaining = round2(total - mama - split - supplies - octopus - salary - other - electric);
 
   // RESPONSE: snake_case (per_partner mirrors the Cutoffs column header).
   var figures = {
     start: start, end: end,
     total: total, cash: cash, gcash: gcash,
     mama: mama, split: split, per_partner: perPartner,
-    supplies: supplies, octopus: octopus, other: other, electric: electric
+    supplies: supplies, octopus: octopus, salary: salary,
+    other: other, electric: electric, remaining: remaining
   };
 
   var branch = asStr(settings.branch) || 'Tañong';
@@ -624,6 +978,10 @@ function apiCutoff(ss, settings, payload, dryRun) {
     var width = writeWidth(t, TAB.CUTOFFS);
     var startIdx = colOf(t, 'start');
     var endIdx = colOf(t, 'end');
+    // The archive keeps the columns SPEC defines for it. Salary and Remaining
+    // are not columns of their own: the archived note_text carries them
+    // verbatim, and both are recomputed from DailyLog + Expenses + CutoffInputs
+    // whenever the period is asked for again.
     var obj = {
       start: start, end: end, total: total, cash: cash, gcash: gcash,
       mama: mama, split: split, per_partner: perPartner, supplies: supplies,
@@ -659,6 +1017,12 @@ function buildNoteText(branch, start, end, f) {
   var orBlank = function (n) { return n === 0 ? '' : fmtAmt(n); };
   // f is the snake_case `figures` response object (per_partner, not perPartner).
   var splitVal = f.split === 0 ? '' : (fmtAmt(f.split) + '(' + fmtAmt(f.per_partner) + ' each)');
+  // The final line is the residual and its LABEL carries the sign, so a note
+  // never reads "Remaining - -2,000": "Remaining - 1,000" when >= 0,
+  // "Short - 2,000" when negative. It ALWAYS prints a number.
+  var residual = (f.remaining < 0)
+    ? 'Short - ' + fmtAmt(-f.remaining)
+    : 'Remaining - ' + fmtAmt(f.remaining);
   return [
     branch + ': ' + periodLabel(start, end) + ' Breakdown',
     '',
@@ -671,8 +1035,11 @@ function buildNoteText(branch, start, end, f) {
     'Split - ' + splitVal,
     'Supplies - ' + orBlank(f.supplies),
     'Octopus - ' + orBlank(f.octopus),
+    'Salary - ' + orBlank(f.salary),
     'Other payments - ' + orBlank(f.other),
-    'Electric bill - ' + orBlank(f.electric)
+    'Electric bill - ' + orBlank(f.electric),
+    '',
+    residual
   ].join('\n');
 }
 
@@ -874,7 +1241,9 @@ function readSettings(ss) {
 function readPrices(ss) {
   var t = readTab(ss, TAB.PRICES);
   var list = [];
-  var map = {};
+  // Prototype-free lookup: a sku (or product, below) called "toString" must not
+  // resolve to Object.prototype.toString and then price a box at NaN.
+  var map = Object.create(null);
   for (var i = 1; i < t.values.length; i++) {
     var r = t.values[i];
     var sku = asStr(cellOf(r, t, 'sku'));
@@ -894,16 +1263,32 @@ function readPrices(ss) {
   return { list: list, map: map };
 }
 
-function readDays(ss) {
+/**
+ * One row per date. `dailySalary` is the CURRENT Settings rate and is used only
+ * to resolve a BLANK salary cell (a row saved before v2.3.0 stored one).
+ *
+ * The `salary` shipped here is the EFFECTIVE figure — 0 on a closed day, the
+ * day's own snapshot when it has one, else the current rate — because it is the
+ * exact number the cutoff adds up. Shipping the raw blank instead would leave
+ * the phone to guess, and a phone that guessed 0 would preview a salary line
+ * ₱200 per legacy day short of the note it is previewing.
+ */
+function readDays(ss, dailySalary) {
   var t = readTab(ss, TAB.DAILY_LOG);
+  var rate = asNum(dailySalary);
   var out = [];
   for (var i = 1; i < t.values.length; i++) {
     var r = t.values[i];
     var date = asDateStr(cellOf(r, t, 'date'));
     if (!date) continue;
+    var closed = asBool(cellOf(r, t, 'closed'));
+    var rawSalary = asStr(cellOf(r, t, 'salary'));
     out.push({
       date: date,
-      closed: asBool(cellOf(r, t, 'closed')),
+      closed: closed,
+      // Nobody worked on a closed day; a blank on an open day predates the
+      // column and counts at today's rate; an explicit 0 (half day off) stands.
+      salary: closed ? 0 : (rawSalary === '' ? rate : asNum(rawSalary)),
       staff: asStr(cellOf(r, t, 'staff')),
       gcash: asNum(cellOf(r, t, 'gcash')),
       total: asNum(cellOf(r, t, 'total')),
@@ -946,52 +1331,53 @@ function readCounts(ss) {
   return out;
 }
 
-/** The supplies picklist the phone offers. ADVISORY only — saveDay does not
- *  validate against it (D1), so this is a plain tolerant read: a sheet that has
- *  not been migrated yet has no tab and simply offers no picklist. */
-function readSupplyItems(ss) {
-  var t = readTabOptional(ss, TAB.SUPPLY_ITEMS);
-  var list = [], map = {};
+/** The stock products the phone offers, plus their ledger settings.
+ *  ADVISORY for the day's usage list — saveDay does not validate against it, so
+ *  a renamed product can never cost the owner a whole day of sales. Deliveries
+ *  and stocktakes DO check it, because those move an on-hand figure.
+ *  Tolerant read: a sheet that has not been migrated yet has no tab and simply
+ *  offers no list. */
+function readStockItems(ss) {
+  var t = readTabOptional(ss, TAB.STOCK_ITEMS);
+  var list = [], map = Object.create(null);
   if (t) {
     for (var i = 1; i < t.values.length; i++) {
       var r = t.values[i];
-      var item = asStr(cellOf(r, t, 'item'));
-      if (!item || map[item]) continue;
-      var o = { item: item, active: asBool(cellOf(r, t, 'active')), sort: asNum(cellOf(r, t, 'sort')) };
+      var product = asStr(cellOf(r, t, 'product'));
+      if (!product || map[product]) continue;
+      // reorder_at is the ONE figure here that is NOT coerced with asNum: a
+      // blank cell must stay blank all the way to the phone. asNum('') is 0, and
+      // 0 is a real threshold value, so a coerced blank made the Maintenance
+      // screen's deliberate blank-preserving path dead code — it loaded 0 into
+      // every empty box and the first "Save stock list" wrote literal 0s back
+      // into six blank cells the owner had never touched. `low` still computes
+      // off asNum(reorder_at), so a blank still means no warning at all.
+      var rawReorder = cellOf(r, t, 'reorder_at');
+      var o = {
+        product: product,
+        unit: asStr(cellOf(r, t, 'unit')),
+        active: asBool(cellOf(r, t, 'active')),
+        sort: asNum(cellOf(r, t, 'sort')),
+        opening_qty: asNum(cellOf(r, t, 'opening_qty')),
+        // NOT coerced to today. A blank opening_date means "count the WHOLE
+        // history" — '' < any yyyy-MM-dd string, so every delivery and every
+        // usage row counts. Defaulting it to today would silently drop every
+        // delivery already logged.
+        opening_date: asDateStr(cellOf(r, t, 'opening_date')),
+        reorder_at: asStr(rawReorder) === '' ? '' : asNum(rawReorder)
+      };
       list.push(o);
-      map[item] = o;
+      map[product] = o;
     }
   }
   list.sort(function (a, b) { return a.sort - b.sort; }); // stable for equal keys
   return { list: list, map: map };
 }
 
-/** The stock products the phone offers. Advisory too — see readSupplyItems. */
-function readStockItems(ss) {
-  var t = readTabOptional(ss, TAB.STOCK_ITEMS);
-  var list = [], map = {};
-  if (t) {
-    for (var i = 1; i < t.values.length; i++) {
-      var r = t.values[i];
-      var product = asStr(cellOf(r, t, 'product'));
-      if (!product || map[product]) continue;
-      var o = {
-        product: product,
-        unit: asStr(cellOf(r, t, 'unit')),
-        active: asBool(cellOf(r, t, 'active')),
-        sort: asNum(cellOf(r, t, 'sort'))
-      };
-      list.push(o);
-      map[product] = o;
-    }
-  }
-  list.sort(function (a, b) { return a.sort - b.sort; });
-  return { list: list, map: map };
-}
-
-/** Pesos spent per item per day. Feeds the cutoff note's Supplies line. */
-function readDailySupplies(ss) {
-  var t = readTabOptional(ss, TAB.DAILY_SUPPLIES);
+/** Physical stocktakes. The latest one per product becomes that product's
+ *  baseline, so miscounts and spoilage are absorbed instead of accumulating. */
+function readStockCounts(ss) {
+  var t = readTabOptional(ss, TAB.STOCK_COUNTS);
   var out = [];
   if (!t) return out;
   for (var i = 1; i < t.values.length; i++) {
@@ -1000,8 +1386,8 @@ function readDailySupplies(ss) {
     if (!date) continue;
     out.push({
       date: date,
-      item: asStr(cellOf(r, t, 'item')),
-      amount: asNum(cellOf(r, t, 'amount')),
+      product: asStr(cellOf(r, t, 'product')),
+      counted_qty: asNum(cellOf(r, t, 'counted_qty')),
       entry_id: asStr(cellOf(r, t, 'entry_id')),
       updated_at: asStr(cellOf(r, t, 'updated_at'))
     });
@@ -1009,8 +1395,30 @@ function readDailySupplies(ss) {
   return out;
 }
 
-/** Quantities consumed per product per day. NEVER money — this never reaches
- *  the note or any total; it exists to show consumption and flag reordering. */
+/** The Split entered for a cutoff period. Period-keyed, not date-keyed. */
+function readCutoffInputs(ss) {
+  var t = readTabOptional(ss, TAB.CUTOFF_INPUTS);
+  var out = [];
+  if (!t) return out;
+  for (var i = 1; i < t.values.length; i++) {
+    var r = t.values[i];
+    var start = asDateStr(cellOf(r, t, 'start'));
+    var end = asDateStr(cellOf(r, t, 'end'));
+    if (!start || !end) continue;
+    out.push({
+      start: start,
+      end: end,
+      split_amount: asNum(cellOf(r, t, 'split_amount')),
+      entry_id: asStr(cellOf(r, t, 'entry_id')),
+      updated_at: asStr(cellOf(r, t, 'updated_at'))
+    });
+  }
+  return out;
+}
+
+/** Quantities consumed per product per day — WHOLE UNITS OPENED. NEVER money:
+ *  this never reaches the note or any total; it drives on-hand and the reorder
+ *  warning. */
 function readStockUsage(ss) {
   var t = readTabOptional(ss, TAB.STOCK_USAGE);
   var out = [];
@@ -1045,10 +1453,120 @@ function readExpenses(ss) {
       backlog_ref: asStr(cellOf(r, t, 'backlog_ref')),
       notes: asStr(cellOf(r, t, 'notes')),
       entry_id: asStr(cellOf(r, t, 'entry_id')),
-      updated_at: asStr(cellOf(r, t, 'updated_at'))
+      updated_at: asStr(cellOf(r, t, 'updated_at')),
+      // A delivery names what arrived and how much of it. Blank on most rows —
+      // most expenses are not tracked stock. `amount` is the money and is
+      // counted exactly once, as it always was; stock_qty feeds only the ledger.
+      stock_product: asStr(cellOf(r, t, 'stock_product')),
+      stock_qty: asNum(cellOf(r, t, 'stock_qty'))
     });
   }
   return out;
+}
+
+/**
+ * On hand is COMPUTED, never stored — the same principle as a backlog balance.
+ *
+ *   baseline   = latest StockCounts row for the product (by date, then
+ *                updated_at), else { date: opening_date, qty: opening_qty }
+ *   delivered  = Σ Expenses.stock_qty   for the product, date > baseline.date
+ *   used       = Σ StockUsage.qty       for the product, date > baseline.date
+ *   on_hand    = baseline.qty + delivered − used
+ *   low        = reorder_at > 0 && on_hand <= reorder_at
+ *
+ * STRICTLY AFTER the baseline date: a stocktake is an end-of-day figure that
+ * already reflects that day's deliveries and usage.
+ *
+ * A BLANK baseline date means the whole history counts ('' < any yyyy-MM-dd).
+ * on_hand MAY BE NEGATIVE — the seeded baseline is 0, so usage logged against
+ * stock delivered before tracking began legitimately reads below zero. It is
+ * returned as-is: a negative figure is honest information that a count is
+ * needed, and clamping it to 0 would hide exactly that.
+ *
+ * The row collections are passed in so one request reads each tab once.
+ */
+function computeStockStatus(ss, expensesAll, usageAll, countsAll) {
+  return stockStatusFor(readStockItems(ss).list, ss, expensesAll, usageAll, countsAll);
+}
+
+/** The arithmetic itself, over an already-read item list (so one request never
+ *  reads StockItems twice). See computeStockStatus for the rules. */
+function stockStatusFor(items, ss, expensesAll, usageAll, countsAll) {
+  var expenses = expensesAll || readExpenses(ss);
+  var usage = usageAll || readStockUsage(ss);
+  var counts = countsAll || readStockCounts(ss);
+
+  // Latest stocktake per product: by date, then updated_at as the tie-break for
+  // two counts on the same day.
+  var latest = Object.create(null);
+  counts.forEach(function (c) {
+    if (!c.product) return;
+    var best = latest[c.product];
+    if (!best || c.date > best.date ||
+        (c.date === best.date && c.updated_at >= best.updated_at)) {
+      latest[c.product] = c;
+    }
+  });
+
+  var out = Object.create(null);
+  items.forEach(function (it) {
+    var base = latest[it.product]
+      ? { date: latest[it.product].date, qty: latest[it.product].counted_qty }
+      : { date: it.opening_date, qty: it.opening_qty };
+    var delivered = 0;
+    expenses.forEach(function (x) {
+      if (x.stock_product === it.product && x.date > base.date) delivered += x.stock_qty;
+    });
+    var used = 0;
+    usage.forEach(function (u) {
+      if (u.product === it.product && u.date > base.date) used += u.qty;
+    });
+    delivered = round2(delivered);
+    used = round2(used);
+    var onHand = round2(base.qty + delivered - used);
+    // reorder_at reaches here RAW ('' for a blank cell, see readStockItems), so
+    // the threshold is resolved with asNum right where it is compared: a blank
+    // (and a 0) means there is no warning to give, however low the shelf gets.
+    var threshold = asNum(it.reorder_at);
+    out[it.product] = {
+      baseline_qty: round2(base.qty),
+      baseline_date: base.date,
+      delivered_since: delivered,
+      used_since: used,
+      on_hand: onHand,
+      low: threshold > 0 && onHand <= threshold
+    };
+  });
+  return out;
+}
+
+/** Stock items with their computed ledger figures attached — the shape
+ *  bootstrap ships so the phone can show on-hand AND explain it without
+ *  holding history it does not have. */
+function stockItemsWithStatus(ss, expensesAll, usageAll, countsAll) {
+  var items = readStockItems(ss).list;
+  var status = stockStatusFor(items, ss, expensesAll, usageAll, countsAll);
+  return items.map(function (it) {
+    var s = status[it.product] || {
+      baseline_qty: 0, baseline_date: '', delivered_since: 0, used_since: 0,
+      on_hand: 0, low: false
+    };
+    return {
+      product: it.product,
+      unit: it.unit,
+      active: it.active,
+      sort: it.sort,
+      opening_qty: it.opening_qty,
+      opening_date: it.opening_date,
+      reorder_at: it.reorder_at,
+      on_hand: s.on_hand,
+      low: s.low,
+      baseline_qty: s.baseline_qty,
+      baseline_date: s.baseline_date,
+      delivered_since: s.delivered_since,
+      used_since: s.used_since
+    };
+  });
 }
 
 /** Backlog balance is always computed (never stored):
@@ -1113,6 +1631,20 @@ function asStr(v) {
   return (v === null || v === undefined) ? '' : String(v).trim();
 }
 
+/** The current daily wage. The Settings value column is "@"-formatted, so it
+ *  reads back as a string; a blank or unparseable cell falls back to the seeded
+ *  rate rather than silently costing the day ₱0. */
+function dailySalaryOf(settings) {
+  var s = asStr(settings ? settings.daily_salary : '');
+  return s === '' ? DEFAULT_DAILY_SALARY : asNum(s);
+}
+
+/** The Split a cutoff uses when no amount was entered for that period. */
+function splitDefaultOf(settings) {
+  var s = asStr(settings ? settings.split_default : '');
+  return s === '' ? DEFAULT_SPLIT : asNum(s);
+}
+
 /** Lenient number: blank/garbage -> 0. Use for reading sheet cells. */
 function asNum(v) {
   if (typeof v === 'number') return isFinite(v) ? v : 0;
@@ -1133,6 +1665,27 @@ function numOrThrow(v, label) {
 function intOrThrow(v, label) {
   var n = numOrThrow(v, label);
   if (Math.floor(n) !== n) throw new Error(label + ' must be a whole number (got "' + v + '").');
+  return n;
+}
+
+/**
+ * Stock moves in WHOLE UNITS — the thing you OPEN, never a weight — and that is
+ * true of every door into the ledger, not just the day's usage list: usage
+ * (saveDay), a delivery's quantity (saveExpense) and a stocktake (saveStockCount)
+ * all feed the SAME arithmetic, on_hand = baseline + delivered − used. A fraction
+ * accepted at any one of them puts a 2.5 on the shelf and quietly contradicts
+ * what SPEC promises and what the screens say. One guard, one wording, called
+ * from all three.
+ *
+ * `n` is already parsed and already known not to be negative — the caller says
+ * that in its own words — so this only has to explain the fraction. `raw` is the
+ * value as it arrived, so the message can quote what was actually typed.
+ */
+function wholeUnitsOrThrow(n, raw, product) {
+  if (Math.floor(n) !== n) {
+    throw new Error(product + ': count whole units opened (1, 2, 3), so "' +
+      asStr(raw) + '" is not a whole unit.');
+  }
   return n;
 }
 
@@ -1234,7 +1787,6 @@ function setupSheet() {
 
   var token = seedSettings(ss);
   seedPrices(ss);
-  seedSupplyItems(ss);
   seedStockItems(ss);
   seedBacklogs(ss);
 
@@ -1318,7 +1870,6 @@ function migrateTab(ss, def) {
  *  lands before setupSheet() is re-run still works. Every seeder is idempotent
  *  and keyed by name, so calling one again can never duplicate or reset a row. */
 var AUTO_SEED = {};
-AUTO_SEED[TAB.SUPPLY_ITEMS] = function (ss) { seedSupplyItems(ss); };
 AUTO_SEED[TAB.STOCK_ITEMS] = function (ss) { seedStockItems(ss); };
 
 /** Append object rows (values placed by header name) below the last data row. */
@@ -1330,6 +1881,72 @@ function appendObjects(ss, name, objs) {
   var at = t.values.length + 1;
   ensureRows(t.sheet, at + rows.length - 1);
   t.sheet.getRange(at, 1, rows.length, width).setValues(rows);
+}
+
+/**
+ * Upsert object rows by a NATURAL KEY (one or more columns), append-only for
+ * keys that are new. ONE read of the tab; rows that exist are rewritten in
+ * place, the rest go out as one appended block.
+ *
+ * Two guarantees the config writers depend on:
+ *   - a row the batch does not mention is never touched (no rewrite of the
+ *     whole tab), and
+ *   - a column the object does not mention keeps whatever it holds, because
+ *     buildRow copies the existing row first — so `sort`, `opening_qty` and any
+ *     column the owner added by hand all survive an edit from the phone.
+ */
+function upsertRows(ss, name, objs, keyCols) {
+  if (!objs || objs.length === 0) return 0;
+  var t = readTabForWrite(ss, name);
+  var width = writeWidth(t, name);
+  var idx = keyCols.map(function (k) { return colOf(t, k); });
+  // Key parts are joined on a character no sheet cell can contain, so the
+  // pair ("2026-08-01", "15") can never collide with ("2026-08-0", "115").
+  // Both sides go through asDateStr, so a date cell that lost its "@" format
+  // and became a real Date still matches the yyyy-MM-dd string being written.
+  var SEP = '\u0001';
+  var rowKey = function (row) {
+    return idx.map(function (i) { return asDateStr(row[i]); }).join(SEP);
+  };
+  var objKey = function (o) {
+    return keyCols.map(function (k) { return asDateStr(o[k]); }).join(SEP);
+  };
+
+  var rowAt = Object.create(null);
+  for (var i = 1; i < t.values.length; i++) {
+    var k = rowKey(t.values[i]);
+    if (k !== '' && rowAt[k] === undefined) rowAt[k] = i + 1;
+  }
+
+  var buffer = [];  // new rows, in the order they arrived
+  var bufAt = Object.create(null);
+  objs.forEach(function (o) {
+    var key = objKey(o);
+    if (rowAt[key] !== undefined) {
+      var at = rowAt[key];
+      var row = buildRow(t, width, o, padRow(t.values[at - 1], width));
+      t.sheet.getRange(at, 1, 1, width).setValues([row]);
+      t.values[at - 1] = row; // keep the cached copy in step for a repeated key
+    } else if (bufAt[key] !== undefined) {
+      buffer[bufAt[key]] = buildRow(t, width, o, buffer[bufAt[key]]);
+    } else {
+      bufAt[key] = buffer.length;
+      buffer.push(buildRow(t, width, o, null));
+    }
+  });
+
+  if (buffer.length > 0) {
+    var start = t.values.length + 1;
+    var grown = ensureRows(t.sheet, start + buffer.length - 1);
+    if (grown) {
+      (schemaFor(name).textCols || []).forEach(function (h) {
+        var c = t.col[h];
+        if (c !== undefined) t.sheet.getRange(grown.from, c + 1, grown.count, 1).setNumberFormat('@');
+      });
+    }
+    t.sheet.getRange(start, 1, buffer.length, width).setValues(buffer);
+  }
+  return objs.length;
 }
 
 /** Existing values of one column, as a {value: true} set. */
@@ -1365,12 +1982,19 @@ function seedSettings(ss) {
     token = asStr(have.token.value);
   }
 
+  // ONLY the keys that are missing are appended — an existing value is never
+  // overwritten, so an owner who lowered daily_salary keeps his figure across
+  // every future setupSheet() run.
   var defaults = [
     ['branch', 'Tañong'],
     ['mama_per_cutoff', 500],
     ['electric_per_cutoff', 500],
     ['partners', 'Nayt, Partner'],
-    ['staff', 'Mama']
+    ['staff', 'Mama'],
+    // v2.3.0: the daily wage added to every non-closed day, and the Split the
+    // Cutoff screen pre-fills (₱1,500 each).
+    ['daily_salary', DEFAULT_DAILY_SALARY],
+    ['split_default', DEFAULT_SPLIT]
   ];
   defaults.forEach(function (d) {
     if (!have[d[0]]) toAppend.push({ key: d[0], value: d[1] });
@@ -1395,32 +2019,38 @@ function seedPrices(ss) {
   appendObjects(ss, TAB.PRICES, seeds.filter(function (s) { return !have[s.sku]; }));
 }
 
-/** The daily supplies picklist, from the owner's old DailyWeekly Supplies
- *  columns. `sort` fixes the order the phone shows them in. */
-function seedSupplyItems(ss) {
-  var t = readTab(ss, TAB.SUPPLY_ITEMS);
-  var have = existingKeys(t, 'item');
-  var names = ['Veggies', 'Egg', 'Ginger', 'Water', 'Flour', 'Tissue', 'Toothpick',
-    'Fork', 'Bag #3', 'Bag #6', 'Bag #16', 'Cheese', 'Rags', 'Fare'];
-  var seeds = names.map(function (n, i) {
-    return { item: n, active: true, sort: i + 1 };
-  });
-  appendObjects(ss, TAB.SUPPLY_ITEMS, seeds.filter(function (s) { return !have[s.item]; }));
-}
-
-/** Stock products, from the owner's Supplies Calculator. Quantities only —
- *  StockUsage is never money. */
+/**
+ * Stock products. Quantities only — StockUsage is never money.
+ *
+ * The unit is the thing you OPEN, not a weight (owner, 2026-08-03: "if a gallon
+ * of sauce is opened, it's considered used in that day"), which is what makes
+ * usage countable in whole units like the boxes.
+ *
+ * opening_qty seeds at 0 and opening_date seeds BLANK: the owner sets his real
+ * figures with "Correct the count" after his first stocktake rather than typing
+ * them up front, and a blank baseline date means the whole history counts.
+ * reorder_at seeds blank, i.e. no warning until he sets a threshold.
+ *
+ * Rows are matched by product name, so a row that already exists is left
+ * completely alone — an owner who changed a unit or set a reorder point keeps
+ * both, and the seeded units below only ever reach a brand-new row.
+ */
 function seedStockItems(ss) {
   var t = readTab(ss, TAB.STOCK_ITEMS);
   var have = existingKeys(t, 'product');
   var seeds = [
-    { product: 'Takoyaki Flour', unit: 'kg', active: true, sort: 1 },
-    { product: 'Takoyaki Sauce', unit: 'gal', active: true, sort: 2 },
-    { product: 'Japanese Mayo', unit: 'kg', active: true, sort: 3 },
-    { product: 'Bonito', unit: 'g', active: true, sort: 4 },
-    { product: 'Aonori', unit: 'g', active: true, sort: 5 },
-    { product: 'Togarashi', unit: 'g', active: true, sort: 6 }
+    { product: 'Takoyaki Flour', unit: 'pack', active: true, sort: 1 },
+    { product: 'Takoyaki Sauce', unit: 'gallon', active: true, sort: 2 },
+    { product: 'Japanese Mayo', unit: 'pack', active: true, sort: 3 },
+    { product: 'Bonito', unit: 'pack', active: true, sort: 4 },
+    { product: 'Aonori', unit: 'pack', active: true, sort: 5 },
+    { product: 'Togarashi', unit: 'pack', active: true, sort: 6 }
   ];
+  seeds.forEach(function (s) {
+    s.opening_qty = 0;
+    s.opening_date = '';
+    s.reorder_at = '';
+  });
   appendObjects(ss, TAB.STOCK_ITEMS, seeds.filter(function (s) { return !have[s.product]; }));
 }
 

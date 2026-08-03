@@ -42,11 +42,10 @@ Open the Google Sheet and edit these tabs directly — the app picks up changes 
 
 - **Backlogs** — your eight obligations are already seeded (₱81,352 outstanding in total): Takoyaki Flour ₱2,538, Takoyaki Sauce ₱114, Ref ₱6,700, Deposit Nayt ₱7,500, Deposit Lou ₱7,500, Deposit Mama ₱7,000, Deposit Ilog Nayt ₱40,000, Deposit Ilog Mama ₱10,000. The `description` column is blank — fill it in if you want a reminder of what each one is. When you pay a variable amount out of a cutoff's excess, log it in Gastos under category **Backlog**, pick which one, and its balance drops. All backlog payments plus anything under **Other** roll up into the note's "Other payments" line. Add or retire obligations by editing rows here (set `active` to FALSE to hide one without deleting its history).
 - **Prices** — current menu: Octobits 4/6/10 pcs at ₱50/65/105, Chizubits at ₱60/80/125. Change a price here and the app uses it for *future* days only; past days keep the price they were saved with, so history never shifts under you. To sell something new later (drinks, for example), add a row: `group` = `box` gives it start/end counts with a cheese split, `group` = `simple` gives counts with one price and no cheese.
-- **Settings** — `mama_per_cutoff` (₱500), `electric_per_cutoff` (₱500), `branch` (Tañong), and `staff` (comma-separated names if more than Mama minds the stall).
-- **SupplyItems** — the nightly picklist for "Supplies bought today", seeded from your old sheet (Veggies, Egg, Ginger, Water, Flour, Tissue, Toothpick, Fork, Bag #3, Bag #6, Bag #16, Cheese, Rags, Fare). Add or retire rows freely; the list is only a convenience, so renaming one never breaks a day that already used it.
-- **StockItems** — the big items tracked by quantity (Takoyaki Flour kg, Takoyaki Sauce gal, Japanese Mayo kg, Bonito g, Aonori g, Togarashi g), all starting at 0.
+- **Settings** — `mama_per_cutoff` (₱500), `electric_per_cutoff` (₱500), `daily_salary` (₱200 — added to every day that is not marked closed), `split_default` (₱3,000, i.e. ₱1,500 each), `branch` (Tañong), and `staff` (comma-separated names if more than Mama minds the stall). **You can now edit all of these from the phone** under **More → Maintenance**, along with prices and the stock list — the sheet is no longer the only way in.
+- **StockItems** — the things you open, counted whole: Takoyaki Flour (pack), Takoyaki Sauce (gallon), Japanese Mayo (pack), Bonito (pack), Aonori (pack), Togarashi (pack). All start at 0 with no reorder point. After your first stocktake, use **More → Stock on hand → Correct the count** rather than typing figures in here; `reorder_at` is when the **Low** mark appears (leave it blank for no warning).
 
-> **After updating the script, run `setupSheet` once more.** This release adds four tabs and a few columns. It's a safe migration: it only ever *appends* new columns at the right and creates missing tabs — it never moves, renames or deletes anything you already have, and your token and prices are preserved.
+> **After updating the script, run `setupSheet` once more.** This release adds tabs (StockItems, StockUsage, StockCounts, CutoffInputs) and a few columns (a `salary` column on DailyLog, `stock_product`/`stock_qty` on Expenses, and the baseline columns on StockItems). It's a safe migration: it only ever *appends* new columns at the right and creates missing tabs — it never moves, renames or deletes anything you already have, and your token and prices are preserved. The old `SupplyItems`/`DailySupplies` tabs are left exactly as they are and simply stop being used.
 
 ## Daily / cutoff flow after setup
 
@@ -54,12 +53,16 @@ Open the Google Sheet and edit these tabs directly — the app picks up changes 
   1. **Container counts** per box size — start of day, end of day. The app works out how many sold.
   2. **Split those boxes** across three steppers: **Cheese** (paid cash), **GCash**, **GCash cheese**. Whatever's left over is plain regular paid in cash — you never type that. On a night with no cheese and no GCash, leave all three at 0.
   3. **Custom order** amount, and **how much of it was GCash**.
-  4. **Supplies bought today** — pesos per item (veggies, egg, flour…). Small daily buys only; bulk purchases go under Expenses so nothing is counted twice.
-  5. **Stock used today** — quantities of the big items (flour, sauce, mayo…). Not money.
+  4. **Wage for this day** — ₱200 already filled in. Lower it for a half day, or 0 if nobody was paid. It is not part of the day's sales; it comes out at the cutoff.
+  5. **Stock used today** — tap **+** once for each whole unit you OPENED: one gallon of sauce, one pack of flour. Not money, and not a weight.
   6. **Save day.**
 
-  There is **no GCash total to type** — the app adds it up from the buckets above and shows it on the receipt, so you can check it against your GCash history. Works with no signal; it syncs later.
-- **You, at cutoff:** Cutoff tab → check the preview → Generate cutoff note → Copy or Share it to your partner. Mama ₱500 and Electric ₱500 are pre-suggested each cutoff; add Octopus and backlog payments under Expenses as you pay them.
+  There is **no GCash total to type** — the app adds it up from the buckets above and shows it on the receipt, so you can check it against your GCash history. There is no "supplies bought today" card any more either: every purchase goes under **Expenses**, so nothing can be counted twice. Works with no signal; it syncs later.
+- **When a delivery arrives:** Expenses → add the amount as usual, and answer the optional **"What arrived?"** with the product and how many whole units. One entry: the money lands in Expenses, the quantity in your stock.
+- **You, at cutoff:** Cutoff tab → check the preview → adjust **Split** if this fortnight is different (it remembers per cutoff, ₱1,500 each by default) → pay a backlog from the **Pay a backlog** card if there is anything left → **Generate cutoff note** → Copy or Share it to your partner. Mama ₱500 and Electric ₱500 are pre-suggested each cutoff; add Octopus under Expenses as you pay it.
+
+  The note's last line is the **residual**: `Remaining - 1,000` when there is money left in the business, or `Short - 2,000` when the fortnight came up short. Split is now an amount you enter, not whatever was left over.
+- **Checking stock:** More → **Stock on hand** shows each item's count, a **Low** mark when it is at or below its reorder point, and **Correct the count** for a stocktake. A count is an end-of-day figure and becomes the new starting point, which is what absorbs spoilage and miscounts. A figure below zero just means the starting point is out of date — count it.
 - **Your data is always yours:** everything is plain rows in the Google Sheet — open it anytime, or take it elsewhere.
 
 ## Who can see what

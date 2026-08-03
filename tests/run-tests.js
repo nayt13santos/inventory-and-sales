@@ -54,6 +54,11 @@ function post(ctx, body) {
 console.log('\n--- 1. Cutoff note format (exact-string, spec sample) ---');
 
 // The spec's sample note, verbatim (note the trailing space on "Octopus - ").
+//
+// v2.3.0 changed this note DELIBERATELY: a "Salary" line, and a final residual
+// line whose LABEL carries the sign so a note never reads "- -2,000". Split is
+// now an ENTERED amount (₱3,000 = ₱1,500 each by default) and REMAINING is the
+// residual — negative here, which is exactly the case the owner needs to see.
 const SPEC_NOTE = [
   'Tañong: July 1 - 15 Breakdown',
   '',
@@ -63,21 +68,62 @@ const SPEC_NOTE = [
   'GCash - 1,327',
   '',
   'Mama - 500',
-  'Split - 4,000(2,000 each)',
+  'Split - 3,000(1,500 each)',
   'Supplies - 5,440',
   'Octopus - ',
+  'Salary - 3,000',
   'Other payments - 1,417',
-  'Electric bill - 500'
+  'Electric bill - 500',
+  '',
+  'Short - 2,000'
 ].join('\n');
+
+const SPEC_FIGURES = {
+  total: 11857, cash: 10530, gcash: 1327,
+  mama: 500, split: 3000, per_partner: 1500,
+  supplies: 5440, octopus: 0, salary: 3000, other: 1417, electric: 500,
+  remaining: -2000
+};
 
 test('buildNoteText reproduces the spec sample EXACTLY', () => {
   const { ctx } = load();
-  const note = ctx.buildNoteText('Tañong', '2025-07-01', '2025-07-15', {
-    total: 11857, cash: 10530, gcash: 1327,
-    mama: 500, split: 4000, per_partner: 2000,
-    supplies: 5440, octopus: 0, other: 1417, electric: 500
-  });
+  const note = ctx.buildNoteText('Tañong', '2025-07-01', '2025-07-15', SPEC_FIGURES);
   assert.strictEqual(note, SPEC_NOTE);
+  // Spelled out so a future edit cannot quietly "tidy" one of these away.
+  const lines = note.split('\n');
+  assert.strictEqual(lines.length, 16);
+  assert.deepStrictEqual([lines[1], lines[3], lines[6], lines[14]], ['', '', '', ''],
+    'blank-line placement, including the one before the residual');
+  assert.strictEqual(lines[8], 'Split - 3,000(1,500 each)', 'no space before the bracket');
+  assert.strictEqual(lines[10], 'Octopus - ', 'a zero category keeps the trailing space');
+  assert.strictEqual(lines[11], 'Salary - 3,000');
+  assert.strictEqual(lines[15], 'Short - 2,000', 'the LABEL carries the sign');
+  assert.ok(!/- -/.test(note), 'a note must never print a minus sign after "- "');
+});
+
+test('the residual line: "Remaining" when >= 0, "Short" when negative, always a number', () => {
+  const { ctx } = load();
+  const noteWith = (remaining) => ctx.buildNoteText('Tañong', '2025-07-01', '2025-07-15',
+    Object.assign({}, SPEC_FIGURES, { remaining: remaining }));
+
+  assert.strictEqual(noteWith(1000).split('\n').pop(), 'Remaining - 1,000');
+  assert.strictEqual(noteWith(-2000).split('\n').pop(), 'Short - 2,000');
+  // Zero is a NUMBER on this line, never a blank like the categories above it.
+  assert.strictEqual(noteWith(0).split('\n').pop(), 'Remaining - 0');
+  assert.strictEqual(noteWith(-0.5).split('\n').pop(), 'Short - 0.50');
+  assert.strictEqual(noteWith(12345.5).split('\n').pop(), 'Remaining - 12,345.50');
+});
+
+test('a zero Salary blanks like the other categories, and never blanks Total', () => {
+  const { ctx } = load();
+  const note = ctx.buildNoteText('Tañong', '2025-07-01', '2025-07-15',
+    Object.assign({}, SPEC_FIGURES, { salary: 0, total: 0, cash: 0, gcash: 0, remaining: 0 }));
+  const lines = note.split('\n');
+  assert.strictEqual(lines[11], 'Salary - ', 'a zero Salary keeps the line and blanks the value');
+  assert.strictEqual(lines[2], 'Total - 0');
+  assert.strictEqual(lines[4], 'Cash - 0');
+  assert.strictEqual(lines[5], 'GCash - 0');
+  assert.strictEqual(lines[15], 'Remaining - 0');
 });
 
 test('periodLabel spans months: "July 30 - August 2"', () => {
@@ -98,25 +144,33 @@ test('fmtAmt: separators, centavos, whole numbers', () => {
 console.log('\n--- 2. End-to-end cutoff math + note via apiCutoff (spec figures) ---');
 
 // Seed days/expenses that sum exactly to the spec sample figures.
+//
+// SALARY is why this seeds all FIFTEEN days of the period: ₱200 a day for 15
+// open days is the sample's ₱3,000 Salary line. Two of them carry the money
+// (11,857 total, 1,327 GCash); the other thirteen are open days that happened to
+// sell nothing, which still cost a day's wage.
 function seedSpecPeriod(ctx, token) {
-  // Two days totalling 11,857 with GCash totalling 1,327. GCash is COMPUTED
-  // server-side now, so it is produced here by the custom order's GCash part
-  // (customGcash) rather than typed in.
-  const days = [
-    { date: '2025-07-03', gcashPart: 1000, custom: 6000 },
-    { date: '2025-07-10', gcashPart: 327, custom: 5857 }
-  ];
-  days.forEach((d, i) => {
+  // GCash is COMPUTED server-side now, so it is produced here by the custom
+  // order's GCash part (customGcash) rather than typed in.
+  const money = {
+    '2025-07-03': { gcashPart: 1000, custom: 6000 },
+    '2025-07-10': { gcashPart: 327, custom: 5857 }
+  };
+  for (let day = 1; day <= 15; day++) {
+    const date = '2025-07-' + (day < 10 ? '0' + day : day);
+    const m = money[date] || { gcashPart: 0, custom: 0 };
     const res = post(ctx, {
       token, action: 'saveDay',
       payload: {
-        date: d.date, closed: false, staff: 'Mama',
-        customAmount: d.custom, customGcash: d.gcashPart,
-        notes: '', counts: [], entryId: 'day-' + i
+        date: date, closed: false, staff: 'Mama',
+        customAmount: m.custom, customGcash: m.gcashPart,
+        notes: '', counts: [], entryId: 'day-' + date
       }
     });
     assert.strictEqual(res.ok, true, 'saveDay failed: ' + res.error);
-  });
+  }
+  // Supplies is Expenses(category=Supplies) ALONE now, so the sample's 5,440
+  // is logged here in full.
   const expenses = [
     { category: 'Mama', amount: 500 },
     { category: 'Supplies', amount: 5440 },
@@ -153,13 +207,33 @@ test('apiCutoff computes spec figures and the exact note text', () => {
   assert.strictEqual(f.octopus, 0);
   assert.strictEqual(f.other, 1417); // Backlog 1000 + Other 417
   assert.strictEqual(f.electric, 500);
-  assert.strictEqual(f.split, 4000); // residual
-  assert.strictEqual(f.per_partner, 2000);
+  assert.strictEqual(f.salary, 3000, '15 open days at the seeded ₱200');
+  assert.strictEqual(f.split, 3000, 'the Settings default, NOT the residual');
+  assert.strictEqual(f.per_partner, 1500);
+  assert.strictEqual(f.remaining, -2000, 'the residual, negative and unclamped');
   // Accounting identity
   assert.strictEqual(f.total, f.cash + f.gcash);
-  assert.strictEqual(f.total, f.mama + f.split + f.supplies + f.octopus + f.other + f.electric);
+  assert.strictEqual(f.total,
+    f.mama + f.split + f.supplies + f.octopus + f.salary + f.other + f.electric + f.remaining);
   // Exact note text
   assert.strictEqual(res.data.note_text, SPEC_NOTE);
+});
+
+test('Remaining is shown, never clamped: a good cutoff reads "Remaining"', () => {
+  const { ctx, token } = freshSetup();
+  seedSpecPeriod(ctx, token);
+  // The owner deletes the big Supplies expense (it belonged to the next cutoff).
+  let r = post(ctx, { token, action: 'deleteExpense', payload: { entryId: 'exp-1' } });
+  assert.strictEqual(r.ok, true, r.error);
+  r = post(ctx, { token, action: 'cutoff', payload: { start: '2025-07-01', end: '2025-07-15', dryRun: true } });
+  assert.strictEqual(r.ok, true, r.error);
+  const f = r.data.figures;
+  assert.strictEqual(f.supplies, 0);
+  assert.strictEqual(f.remaining, 3440, '−2,000 + the 5,440 that left');
+  assert.strictEqual(f.split, 3000, 'Split is entered, so it does NOT absorb the difference');
+  assert.strictEqual(r.data.note_text, SPEC_NOTE
+    .replace('Supplies - 5,440', 'Supplies - ')
+    .replace('Short - 2,000', 'Remaining - 3,440'));
 });
 
 // ---------------------------------------------------------------------------
@@ -191,7 +265,10 @@ test('regenerating after new data UPDATES the same row in place', () => {
   const rows = ss.getSheetByName('Cutoffs').getDataRange().getValues();
   assert.strictEqual(rows.length - 1, 1, 'still exactly 1 row for the period');
   assert.strictEqual(rows[1][9], 800, 'octopus column updated in place');
-  assert.strictEqual(rows[1][6], 3200, 'split recomputed (4000 - 800)');
+  assert.strictEqual(rows[1][6], 3000, 'split is ENTERED, so a late expense cannot move it');
+  // The residual is what moved, and the archived note says so.
+  assert.strictEqual(r.data.figures.remaining, -2800);
+  assert.match(rows[1][12], /\nShort - 2,800$/, 'the archived note text was rewritten too');
 });
 
 test('a different period still APPENDS a new row', () => {
@@ -281,6 +358,27 @@ test('"@" format is applied as WHOLE-COLUMN (A:A-style) ranges on every textCol'
     assert.ok(fmtOps.length >= expected[tab].length && fmtOps.every(e => e.wholeColumn),
       tab + ': every "@" format op must target a whole column');
   });
+});
+
+test('re-running setupSheet never resets an edited stock unit or threshold', () => {
+  // The seeded units are the thing you OPEN (pack/gallon), but the owner may
+  // still change one — and setupSheet is run by hand after every release, so it
+  // must only ever ADD the rows that are missing.
+  const { ctx, ss, token } = freshSetup();
+  assert.strictEqual(post(ctx, {
+    token, action: 'saveStockItems',
+    payload: { rows: [{ product: 'Takoyaki Sauce', unit: 'jug', reorderAt: 2, active: true }] }
+  }).ok, true);
+  deleteFirstColRow(ss, 'StockItems', 'Togarashi'); // and he dropped one he never uses
+
+  ctx.setupSheet();
+
+  const rows = ss.getSheetByName('StockItems').getDataRange().getValues().slice(1);
+  const sauce = rows.find(r => r[0] === 'Takoyaki Sauce');
+  assert.deepStrictEqual([sauce[1], sauce[6]], ['jug', 2], "the owner's edit must survive");
+  assert.strictEqual(rows.filter(r => r[0] === 'Takoyaki Sauce').length, 1, 'no duplicate row');
+  assert.strictEqual(rows.filter(r => r[0] === 'Togarashi').length, 1,
+    'a row he deleted is re-seeded once, because only MISSING rows are added');
 });
 
 test('setupSheet is idempotent (re-run keeps token, no duplicate seeds)', () => {
@@ -722,9 +820,16 @@ test('a pre-change sheet still READS correctly before setupSheet is re-run', () 
   assert.strictEqual(day.total, 1045);
   assert.strictEqual(day.gcash, 300, 'the historical GCash figure is left exactly as it was');
   assert.strictEqual(day.custom_gcash, 0);
-  assert.deepStrictEqual(r.data.supplyItems, [], 'no SupplyItems tab yet -> empty list, not a crash');
-  assert.deepStrictEqual(r.data.dailySupplies, []);
+  // A pre-v2.3.0 row has no salary cell. An OPEN day counts at the current rate
+  // (the seeded ₱200 when Settings has no daily_salary yet) — never 0, which
+  // would understate the very first cutoff after the deploy.
+  assert.strictEqual(day.salary, 200);
+  assert.deepStrictEqual(r.data.stockItems, [], 'no StockItems tab yet -> empty list, not a crash');
   assert.deepStrictEqual(r.data.stockUsage, []);
+  assert.deepStrictEqual(r.data.stockCounts, []);
+  assert.deepStrictEqual(r.data.cutoffInputs, []);
+  assert.strictEqual(r.data.settings.daily_salary, 200, 'the default is stated, not left blank');
+  assert.strictEqual(r.data.settings.split_default, 3000);
 });
 
 test('setupSheet APPENDS the new columns and moves nothing', () => {
@@ -742,42 +847,88 @@ test('setupSheet APPENDS the new columns and moves nothing', () => {
   assert.deepStrictEqual(counts[1].slice(9), ['', '', ''], 'new cells start blank (= all cash)');
 
   const log = ss.getSheetByName('DailyLog').getDataRange().getValues();
-  assert.deepStrictEqual(log[0], OLD_LOG_HEADERS.concat(['custom_gcash']));
+  assert.deepStrictEqual(log[0], OLD_LOG_HEADERS.concat(['custom_gcash', 'salary']));
   assert.deepStrictEqual(log[1].slice(0, 10), OLD_LOG_ROW);
+  assert.deepStrictEqual(log[1].slice(10), ['', ''], 'new cells start blank, not 0');
+
+  const exp = ss.getSheetByName('Expenses').getDataRange().getValues();
+  assert.deepStrictEqual(exp[0], ['date', 'category', 'item', 'amount', 'backlog_ref',
+    'notes', 'entry_id', 'updated_at', 'stock_product', 'stock_qty']);
+  assert.deepStrictEqual(exp[1].slice(0, 8),
+    ['2026-07-18', 'Supplies', 'flour', 300, '', '', 'old-exp-1', '2026-07-18 20:00:00']);
 
   const prices = ss.getSheetByName('Prices').getDataRange().getValues();
   assert.strictEqual(prices[1][4], 55, "the owner's edited Box 4 price must survive");
   assert.strictEqual(prices.length - 1, 3, 'no duplicate price rows');
 });
 
-test('setupSheet creates and seeds the four new tabs', () => {
+test('setupSheet creates and seeds the stock + cutoff tabs', () => {
   const ss = legacySpreadsheet();
   const { ctx } = load(ss);
   ctx.setupSheet();
 
-  const si = ss.getSheetByName('SupplyItems').getDataRange().getValues();
-  assert.deepStrictEqual(si[0], ['item', 'active', 'sort']);
-  assert.deepStrictEqual(si.slice(1).map(r => r[0]), [
-    'Veggies', 'Egg', 'Ginger', 'Water', 'Flour', 'Tissue', 'Toothpick',
-    'Fork', 'Bag #3', 'Bag #6', 'Bag #16', 'Cheese', 'Rags', 'Fare'
-  ]);
-  si.slice(1).forEach(r => assert.strictEqual(r[1], true, 'seeded supply items are active'));
-
+  // The unit is the thing you OPEN, not a weight — that is what makes usage
+  // countable in whole units like the boxes.
   const st = ss.getSheetByName('StockItems').getDataRange().getValues();
-  assert.deepStrictEqual(st[0], ['product', 'unit', 'active', 'sort']);
+  assert.deepStrictEqual(st[0],
+    ['product', 'unit', 'active', 'sort', 'opening_qty', 'opening_date', 'reorder_at']);
   assert.deepStrictEqual(st.slice(1).map(r => [r[0], r[1]]), [
-    ['Takoyaki Flour', 'kg'], ['Takoyaki Sauce', 'gal'], ['Japanese Mayo', 'kg'],
-    ['Bonito', 'g'], ['Aonori', 'g'], ['Togarashi', 'g']
+    ['Takoyaki Flour', 'pack'], ['Takoyaki Sauce', 'gallon'], ['Japanese Mayo', 'pack'],
+    ['Bonito', 'pack'], ['Aonori', 'pack'], ['Togarashi', 'pack']
   ]);
+  // Baseline 0 with a BLANK date, and no reorder threshold until he sets one.
+  st.slice(1).forEach(r => assert.deepStrictEqual(r.slice(4, 7), [0, '', ''],
+    'the baseline is seeded empty: he sets it with "Correct the count"'));
 
-  assert.deepStrictEqual(ss.getSheetByName('DailySupplies').getDataRange().getValues()[0],
-    ['date', 'item', 'amount', 'entry_id', 'updated_at']);
   assert.deepStrictEqual(ss.getSheetByName('StockUsage').getDataRange().getValues()[0],
     ['date', 'product', 'qty', 'entry_id', 'updated_at']);
+  assert.deepStrictEqual(ss.getSheetByName('StockCounts').getDataRange().getValues()[0],
+    ['date', 'product', 'counted_qty', 'entry_id', 'updated_at']);
+  assert.deepStrictEqual(ss.getSheetByName('CutoffInputs').getDataRange().getValues()[0],
+    ['start', 'end', 'split_amount', 'entry_id', 'updated_at']);
   // Newly appended/created date + timestamp columns get the plain-text format.
-  assert.strictEqual(ss.getSheetByName('DailySupplies').columnFormats[1], '@');
-  assert.strictEqual(ss.getSheetByName('DailySupplies').columnFormats[5], '@');
   assert.strictEqual(ss.getSheetByName('StockUsage').columnFormats[1], '@');
+  assert.strictEqual(ss.getSheetByName('StockCounts').columnFormats[1], '@');
+  assert.strictEqual(ss.getSheetByName('StockCounts').columnFormats[5], '@');
+  assert.strictEqual(ss.getSheetByName('StockItems').columnFormats[6], '@',
+    'opening_date is a yyyy-MM-dd string, so it must be plain text too');
+  assert.strictEqual(ss.getSheetByName('CutoffInputs').columnFormats[1], '@');
+  assert.strictEqual(ss.getSheetByName('CutoffInputs').columnFormats[2], '@');
+
+  // The retired tabs are NOT created on a sheet that never had them: nothing
+  // reads or writes them, and a tab that looks live but is dead is a trap.
+  assert.strictEqual(ss.getSheetByName('SupplyItems'), null);
+  assert.strictEqual(ss.getSheetByName('DailySupplies'), null);
+});
+
+test('a live sheet KEEPS its retired supplies tabs (migration never deletes)', () => {
+  const ss = legacySpreadsheet();
+  // His v2.2.0 sheet has both tabs, with rows in them.
+  makeTab(ss, 'SupplyItems', ['item', 'active', 'sort'], [['Veggies', true, 1]]);
+  makeTab(ss, 'DailySupplies', ['date', 'item', 'amount', 'entry_id', 'updated_at'], [
+    ['2026-07-20', 'Veggies', 120, 'old-day-1', '2026-07-20 21:00:00']
+  ]);
+  const before = JSON.stringify(snapshot(ss).DailySupplies);
+  const { ctx } = load(ss);
+  ctx.setupSheet();
+
+  assert.strictEqual(JSON.stringify(snapshot(ss).DailySupplies), before,
+    'the retired tab must be left exactly as it is — migration never deletes');
+  assert.strictEqual(ss.getSheetByName('SupplyItems').getDataRange().getValues().length - 1, 1);
+
+  // ...and its rows no longer count anywhere.
+  const r = post(ctx, {
+    token: LEGACY_TOKEN, action: 'cutoff',
+    payload: { start: '2026-07-16', end: '2026-07-31', dryRun: true }
+  });
+  assert.strictEqual(r.ok, true, r.error);
+  // The period holds one Supplies EXPENSE of ₱300 and one dead DailySupplies row
+  // of ₱120. Only the expense counts now.
+  assert.strictEqual(r.data.figures.supplies, 300,
+    'the ₱120 in DailySupplies must NOT reach the Supplies line any more');
+  const boot = post(ctx, { token: LEGACY_TOKEN, action: 'bootstrap', payload: {} });
+  assert.strictEqual(boot.data.dailySupplies, undefined, 'bootstrap must not ship a dead collection');
+  assert.strictEqual(boot.data.supplyItems, undefined);
 });
 
 test('migrating an already-migrated sheet changes NOTHING (byte-for-byte)', () => {
@@ -830,21 +981,23 @@ test('saveDay on a not-yet-migrated sheet self-heals instead of failing', () => 
     payload: {
       date: '2026-07-22', closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
       counts: [{ sku: 'box6', sod: 4, eod: 0, cheeseQty: 0, gcashQty: 1 }],
-      supplies: [{ item: 'Veggies', amount: 120 }],
-      stock: [{ product: 'Bonito', qty: 50 }],
+      stock: [{ product: 'Bonito', qty: 2 }],
       entryId: 'heal-1'
     }
   });
   assert.strictEqual(r.ok, true, r.error);
   assert.strictEqual(r.data.total, 260);
   assert.strictEqual(r.data.gcash, 65);
-  assert.strictEqual(r.data.supplies_total, 120);
+  assert.strictEqual(r.data.salary, 200, 'the wage is snapshotted even before setupSheet is re-run');
   // The tabs and columns it needed were created/appended on the fly...
   assert.deepStrictEqual(ss.getSheetByName('DailyCounts').getDataRange().getValues()[0],
     OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount']));
-  assert.deepStrictEqual(ss.getSheetByName('DailySupplies').getDataRange().getValues().slice(1),
-    [['2026-07-22', 'Veggies', 120, 'heal-1', ss.getSheetByName('DailySupplies').getDataRange().getValues()[1][4]]]);
-  assert.strictEqual(ss.getSheetByName('StockUsage').getDataRange().getValues()[1][2], 50);
+  assert.deepStrictEqual(ss.getSheetByName('DailyLog').getDataRange().getValues()[0],
+    OLD_LOG_HEADERS.concat(['custom_gcash', 'salary']));
+  const healed = ss.getSheetByName('DailyLog').getDataRange().getValues().slice(1)
+    .find(x => x[0] === '2026-07-22');
+  assert.strictEqual(healed[11], 200, 'the salary column was appended and written');
+  assert.strictEqual(ss.getSheetByName('StockUsage').getDataRange().getValues()[1][2], 2);
   // ...and nothing already in the sheet was disturbed.
   assert.deepStrictEqual(ss.getSheetByName('DailyCounts').getDataRange().getValues()[1].slice(0, 9), OLD_COUNT_ROWS[0]);
   assert.deepStrictEqual(ss.getSheetByName('DailyLog').getDataRange().getValues()[1].slice(0, 10), OLD_LOG_ROW);
@@ -988,44 +1141,49 @@ test('group=simple splits payment but has no cheese', () => {
   assert.match(r.error, /has no cheese version/);
 });
 
-test('supplies: only non-zero rows are written, duplicate/negative/blank rejected', () => {
+test('a queued `supplies` array is IGNORED and writes no dead tab', () => {
+  // The nightly supplies card is retired. A phone that queued a saveDay before
+  // the update still carries the old array; writing it would resurrect a tab
+  // nothing reads and quietly re-create the double-counting hazard.
   const { ctx, ss, token } = freshSetup();
-  let r = saveDay(ctx, token, {
-    counts: [],
-    supplies: [{ item: 'Veggies', amount: 120 }, { item: 'Egg', amount: 0 }, { item: 'Fare', amount: 30 }],
-    entryId: 'sup-1'
+  const r = saveDay(ctx, token, {
+    counts: [{ sku: 'box4', sod: 4, eod: 0 }],
+    supplies: [{ item: 'Veggies', amount: 120 }, { item: 'Egg', amount: 80 }],
+    entryId: 'sup-ignored'
   });
   assert.strictEqual(r.ok, true, r.error);
-  assert.strictEqual(r.data.supplies_total, 150);
-  const rows = ss.getSheetByName('DailySupplies').getDataRange().getValues().slice(1);
-  assert.deepStrictEqual(rows.map(x => [x[0], x[1], x[2]]),
-    [['2026-07-30', 'Veggies', 120], ['2026-07-30', 'Fare', 30]], 'a zero item gets no row');
-
-  // The picklist is ADVISORY (D1): an item that is not on it is still accepted.
-  r = saveDay(ctx, token, { counts: [], supplies: [{ item: 'Truffle Oil', amount: 5 }], entryId: 'sup-2' });
-  assert.strictEqual(r.ok, true, r.error);
-  assert.strictEqual(r.data.supplies_total, 5);
-  // ...but the real validation still holds.
-  r = saveDay(ctx, token, { counts: [], supplies: [{ item: 'Egg', amount: 5 }, { item: 'Egg', amount: 6 }], entryId: 'sup-3' });
-  assert.strictEqual(r.ok, false); assert.match(r.error, /Duplicate supplies rows/);
-  r = saveDay(ctx, token, { counts: [], supplies: [{ item: 'Egg', amount: -5 }], entryId: 'sup-4' });
-  assert.strictEqual(r.ok, false); assert.match(r.error, /amount cannot be negative/);
-  r = saveDay(ctx, token, { counts: [], supplies: [{ item: '   ', amount: 5 }], entryId: 'sup-5' });
-  assert.strictEqual(r.ok, false); assert.match(r.error, /missing its item name/);
+  assert.strictEqual(r.data.total, 200, 'the sales half of the day is unaffected');
+  assert.strictEqual(ss.getSheetByName('DailySupplies'), null, 'no dead tab created');
+  assert.strictEqual(ss.getSheetByName('SupplyItems'), null);
+  assert.ok(!Object.prototype.hasOwnProperty.call(r.data, 'supplies_total'),
+    'a figure that can only ever answer 0 is worse than no figure at all');
 });
 
-test('stock: quantities may be fractional and are never money', () => {
+test('stock usage is WHOLE UNITS OPENED: a fraction is refused in plain English', () => {
   const { ctx, ss, token } = freshSetup();
   let r = saveDay(ctx, token, {
     counts: [{ sku: 'box4', sod: 4, eod: 0 }],
-    stock: [{ product: 'Takoyaki Flour', qty: 1.5 }, { product: 'Bonito', qty: 0 }],
+    stock: [{ product: 'Takoyaki Sauce', qty: 1 }, { product: 'Bonito', qty: 0 }],
     entryId: 'stk-1'
   });
   assert.strictEqual(r.ok, true, r.error);
   assert.strictEqual(r.data.total, 200, 'stock never adds to the day total');
-  const rows = ss.getSheetByName('StockUsage').getDataRange().getValues().slice(1);
-  assert.deepStrictEqual(rows.map(x => [x[1], x[2]]), [['Takoyaki Flour', 1.5]]);
-  // Advisory picklist again (D1): an unlisted product is accepted, not refused.
+  assert.deepStrictEqual(ss.getSheetByName('StockUsage').getDataRange().getValues().slice(1)
+    .map(x => [x[1], x[2]]), [['Takoyaki Sauce', 1]], 'a zero product gets no row');
+
+  // If a gallon is opened, it counts as used that day. Half a gallon is not a
+  // thing you can open.
+  r = saveDay(ctx, token, { counts: [], stock: [{ product: 'Takoyaki Sauce', qty: 0.5 }], entryId: 'stk-frac' });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /whole unit/, 'the message must say what to do, not "NaN"');
+  assert.match(r.error, /Takoyaki Sauce/, 'and which product it is about');
+  r = saveDay(ctx, token, { counts: [], stock: [{ product: 'Bonito', qty: 2.0001 }], entryId: 'stk-frac2' });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /whole unit/);
+  // A whole number written as a string is still whole.
+  r = saveDay(ctx, token, { counts: [], stock: [{ product: 'Bonito', qty: '3' }], entryId: 'stk-str' });
+  assert.strictEqual(r.ok, true, r.error);
+
+  // Advisory picklist (D1): an unlisted product is accepted, not refused.
   r = saveDay(ctx, token, { counts: [], stock: [{ product: 'Wasabi', qty: 1 }], entryId: 'stk-2' });
   assert.strictEqual(r.ok, true, r.error);
   assert.strictEqual(r.data.total, 0, 'and it is still not money');
@@ -1035,31 +1193,31 @@ test('stock: quantities may be fractional and are never money', () => {
   assert.strictEqual(r.ok, false); assert.match(r.error, /missing its product name/);
 });
 
-test('re-saving a date rewrites only that date in DailySupplies (write, then clear surplus)', () => {
+test('re-saving a date rewrites only that date in StockUsage (write, then clear surplus)', () => {
   const { ctx, ss, token } = freshSetup();
   assert.strictEqual(saveDay(ctx, token, {
     date: '2026-07-29', counts: [],
-    supplies: [{ item: 'Veggies', amount: 10 }, { item: 'Egg', amount: 20 }, { item: 'Fare', amount: 30 }],
+    stock: [{ product: 'Bonito', qty: 1 }, { product: 'Aonori', qty: 2 }, { product: 'Togarashi', qty: 3 }],
     entryId: 'a'
   }).ok, true);
   assert.strictEqual(saveDay(ctx, token, {
     date: '2026-07-30', counts: [],
-    supplies: [{ item: 'Water', amount: 40 }, { item: 'Flour', amount: 50 }],
+    stock: [{ product: 'Japanese Mayo', qty: 4 }, { product: 'Takoyaki Flour', qty: 5 }],
     entryId: 'b'
   }).ok, true);
-  const sh = ss.getSheetByName('DailySupplies');
+  const sh = ss.getSheetByName('StockUsage');
   assert.strictEqual(sh.getDataRange().getValues().length - 1, 5);
   sh.log.length = 0;
 
   assert.strictEqual(saveDay(ctx, token, {
-    date: '2026-07-29', counts: [], supplies: [{ item: 'Veggies', amount: 99 }], entryId: 'a2'
+    date: '2026-07-29', counts: [], stock: [{ product: 'Bonito', qty: 9 }], entryId: 'a2'
   }).ok, true);
 
   const rows = sh.getDataRange().getValues().slice(1).filter(r => r.some(c => c !== '' && c !== null));
   assert.strictEqual(rows.length, 3, "2026-07-29's 3 rows became 1; the other date keeps its 2");
-  assert.deepStrictEqual(rows.filter(r => r[0] === '2026-07-29').map(r => [r[1], r[2]]), [['Veggies', 99]]);
+  assert.deepStrictEqual(rows.filter(r => r[0] === '2026-07-29').map(r => [r[1], r[2]]), [['Bonito', 9]]);
   assert.deepStrictEqual(rows.filter(r => r[0] === '2026-07-30').map(r => [r[1], r[2]]),
-    [['Water', 40], ['Flour', 50]], 'another date must never be touched');
+    [['Japanese Mayo', 4], ['Takoyaki Flour', 5]], 'another date must never be touched');
   const ops = sh.log.filter(e => e.op === 'setValues' || e.op === 'clearContent');
   const firstWrite = ops.findIndex(e => e.op === 'setValues');
   const firstClear = ops.findIndex(e => e.op === 'clearContent');
@@ -1068,93 +1226,92 @@ test('re-saving a date rewrites only that date in DailySupplies (write, then cle
     'the clear must start strictly below the written block');
 });
 
-test('a closed day clears that date\'s supplies and stock too', () => {
+test('a closed day clears that date\'s stock too, and costs no salary', () => {
   const { ctx, ss, token } = freshSetup();
   assert.strictEqual(saveDay(ctx, token, {
-    date: '2026-07-29', counts: [], supplies: [{ item: 'Egg', amount: 20 }],
-    stock: [{ product: 'Bonito', qty: 5 }], entryId: 'keep'
+    date: '2026-07-29', counts: [], stock: [{ product: 'Bonito', qty: 5 }], entryId: 'keep'
   }).ok, true);
   assert.strictEqual(saveDay(ctx, token, {
-    counts: [{ sku: 'box4', sod: 5, eod: 0 }], supplies: [{ item: 'Egg', amount: 20 }],
-    stock: [{ product: 'Bonito', qty: 5 }], entryId: 'wipe-me'
+    counts: [{ sku: 'box4', sod: 5, eod: 0 }], stock: [{ product: 'Bonito', qty: 5 }], entryId: 'wipe-me'
   }).ok, true);
-  const r = saveDay(ctx, token, { closed: true, counts: [], supplies: [{ item: 'Egg', amount: 20 }], stock: [{ product: 'Bonito', qty: 5 }], entryId: 'closed-day' });
+  const r = saveDay(ctx, token, { closed: true, counts: [], stock: [{ product: 'Bonito', qty: 5 }], entryId: 'closed-day' });
   assert.strictEqual(r.ok, true, r.error);
   assert.strictEqual(r.data.total, 0);
-  assert.strictEqual(r.data.supplies_total, 0);
-  const sup = ss.getSheetByName('DailySupplies').getDataRange().getValues().slice(1).filter(x => x[0] === '2026-07-30');
+  assert.strictEqual(r.data.salary, 0, 'nobody worked, so the day costs nothing');
   const stk = ss.getSheetByName('StockUsage').getDataRange().getValues().slice(1).filter(x => x[0] === '2026-07-30');
-  assert.strictEqual(sup.length, 0);
   assert.strictEqual(stk.length, 0);
   // the other date is untouched
-  assert.strictEqual(ss.getSheetByName('DailySupplies').getDataRange().getValues().slice(1)
+  assert.strictEqual(ss.getSheetByName('StockUsage').getDataRange().getValues().slice(1)
     .filter(x => x[0] === '2026-07-29').length, 1);
+  const log = ss.getSheetByName('DailyLog').getDataRange().getValues().slice(1)
+    .find(x => x[0] === '2026-07-30');
+  assert.strictEqual(log[11], 0, 'the stored snapshot is 0, not a blank that later reads as ₱200');
 });
 
-test('replaying a saveDay with supplies and stock does not duplicate rows', () => {
+test('replaying a saveDay with stock does not duplicate rows', () => {
   const { ctx, ss, token } = freshSetup();
   const payload = {
     counts: [{ sku: 'box4', sod: 5, eod: 0, gcashQty: 1 }],
-    supplies: [{ item: 'Egg', amount: 20 }], stock: [{ product: 'Bonito', qty: 5 }],
+    stock: [{ product: 'Bonito', qty: 5 }],
     entryId: 'replay-1'
   };
   const r1 = saveDay(ctx, token, payload);
   const r2 = saveDay(ctx, token, payload);
   assert.strictEqual(r1.ok, true, r1.error);
   assert.deepStrictEqual(r1.data, r2.data, 'replay returns identical computed result');
-  assert.strictEqual(ss.getSheetByName('DailySupplies').getDataRange().getValues().length - 1, 1);
   assert.strictEqual(ss.getSheetByName('StockUsage').getDataRange().getValues().length - 1, 1);
   assert.strictEqual(ss.getSheetByName('DailyLog').getDataRange().getValues().length - 1, 1);
 });
 
-test('bootstrap returns supplyItems, stockItems, dailySupplies and stockUsage', () => {
+test('bootstrap returns stockItems with computed on-hand, stockUsage and stockCounts', () => {
   const { ctx, token } = freshSetup();
   assert.strictEqual(saveDay(ctx, token, {
-    counts: [], supplies: [{ item: 'Egg', amount: 20 }], stock: [{ product: 'Bonito', qty: 5 }], entryId: 'boot-1'
+    counts: [], stock: [{ product: 'Bonito', qty: 5 }], entryId: 'boot-1'
   }).ok, true);
   const r = post(ctx, { token, action: 'bootstrap', payload: {} });
   assert.strictEqual(r.ok, true, r.error);
-  assert.strictEqual(r.data.supplyItems.length, 14);
-  assert.deepStrictEqual(r.data.supplyItems[0], { item: 'Veggies', active: true, sort: 1 });
   assert.strictEqual(r.data.stockItems.length, 6);
-  assert.deepStrictEqual(r.data.dailySupplies.map(x => [x.date, x.item, x.amount]), [['2026-07-30', 'Egg', 20]]);
+  assert.deepStrictEqual(r.data.stockItems[0].product, 'Takoyaki Flour');
   assert.deepStrictEqual(r.data.stockUsage.map(x => [x.date, x.product, x.qty]), [['2026-07-30', 'Bonito', 5]]);
-  // Same window as counts: a supplies row for a date with no DailyLog row is
+  assert.deepStrictEqual(r.data.stockCounts, [], 'no stocktake yet, but the key is always there');
+  // Same window as counts: a stock row for a date with no DailyLog row is
   // outside the window and is not shipped.
-  assert.ok(r.data.dailySupplies.every(x => r.data.days.some(d => d.date === x.date)));
+  assert.ok(r.data.stockUsage.every(x => r.data.days.some(d => d.date === x.date)));
+  // The retired collections are gone, not empty: the phone must not keep a
+  // reader for a tab that stopped counting.
+  assert.strictEqual(r.data.supplyItems, undefined);
+  assert.strictEqual(r.data.dailySupplies, undefined);
 });
 
-test('cutoff Supplies = Expenses(Supplies) + DailySupplies, identity still balances', () => {
+test('cutoff Supplies is Expenses(Supplies) ALONE — nothing else can inflate it', () => {
   const { ctx, token } = freshSetup();
   seedSpecPeriod(ctx, token); // total 11,857 / gcash 1,327 / Supplies expense 5,440
-  // The owner also logged small daily buys on two days inside the period.
+  // The owner's phone still queues the retired daily-supplies rows, and the day
+  // also opens stock. NEITHER may touch the Supplies line.
   assert.strictEqual(saveDay(ctx, token, {
     date: '2025-07-03', customAmount: 6000, customGcash: 1000, counts: [],
-    supplies: [{ item: 'Veggies', amount: 200 }, { item: 'Egg', amount: 100 }], entryId: 'day-0'
+    supplies: [{ item: 'Veggies', amount: 200 }, { item: 'Egg', amount: 100 }],
+    stock: [{ product: 'Takoyaki Flour', qty: 2 }],
+    entryId: 'day-2025-07-03'
   }).ok, true);
   assert.strictEqual(saveDay(ctx, token, {
     date: '2025-07-10', customAmount: 5857, customGcash: 327, counts: [],
-    supplies: [{ item: 'Fare', amount: 60 }], entryId: 'day-1'
-  }).ok, true);
-  // ...and one OUTSIDE the period, which must not count.
-  assert.strictEqual(saveDay(ctx, token, {
-    date: '2025-07-20', counts: [], supplies: [{ item: 'Water', amount: 999 }], entryId: 'day-out'
+    supplies: [{ item: 'Fare', amount: 60 }], entryId: 'day-2025-07-10'
   }).ok, true);
 
   const r = post(ctx, { token, action: 'cutoff', payload: { start: '2025-07-01', end: '2025-07-15', dryRun: true } });
   assert.strictEqual(r.ok, true, r.error);
   const f = r.data.figures;
-  assert.strictEqual(f.supplies, 5440 + 360, 'bulk Expenses(Supplies) + the daily buys');
-  assert.strictEqual(f.total, 11857, 'daily supplies are spending, not sales');
-  assert.strictEqual(f.split, 4000 - 360, 'Split absorbs the bigger Supplies figure as the residual');
-  assert.strictEqual(f.per_partner, (4000 - 360) / 2);
+  assert.strictEqual(f.supplies, 5440, 'ONLY the Expenses(Supplies) rows');
+  assert.strictEqual(f.total, 11857);
+  assert.strictEqual(f.salary, 3000, 're-saving two days must not change the salary total');
+  assert.strictEqual(f.remaining, -2000);
   assert.strictEqual(f.total, f.cash + f.gcash);
-  assert.strictEqual(f.total, f.mama + f.split + f.supplies + f.octopus + f.other + f.electric,
-    'the verified accounting identity must still hold');
-  // Format is untouched: only the Supplies figure got bigger.
-  assert.strictEqual(r.data.note_text, SPEC_NOTE
-    .replace('Supplies - 5,440', 'Supplies - 5,800')
-    .replace('Split - 4,000(2,000 each)', 'Split - 3,640(1,820 each)'));
+  assert.strictEqual(f.total,
+    f.mama + f.split + f.supplies + f.octopus + f.salary + f.other + f.electric + f.remaining,
+    'the accounting identity must still hold');
+  // The note is byte-identical to the sample: nothing leaked in.
+  assert.strictEqual(r.data.note_text, SPEC_NOTE);
 });
 
 // ---------------------------------------------------------------------------
@@ -1253,13 +1410,15 @@ test('B1: append beyond a STRAY value too, leaving the blank gap alone', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 12. B2 / D1 — the SupplyItems and StockItems picklists are ADVISORY.
+// 12. B2 / D1 — the StockItems picklist is ADVISORY for the DAY'S USAGE.
 //
-// They used to be enforced like foreign keys, so the moment the owner renamed
-// or deleted a picklist row, every day that referenced it became permanently
+// It used to be enforced like a foreign key, so the moment the owner renamed or
+// deleted a picklist row, every day that referenced it became permanently
 // un-saveable — INCLUDING its sales — with no way out from the phone.
+// (A DELIVERY and a STOCKTAKE are checked, because those move an on-hand
+// figure — see section 15.)
 // ---------------------------------------------------------------------------
-console.log('\n--- 12. Advisory picklists (D1): a renamed item never blocks a day ---');
+console.log('\n--- 12. Advisory picklist (D1): a renamed product never blocks a day ---');
 
 /** The owner editing his sheet: rename the first-column value of a row. */
 function renameFirstCol(ss, tab, from, to) {
@@ -1281,62 +1440,49 @@ function deleteFirstColRow(ss, tab, value) {
   throw new Error('precondition: ' + tab + ' has no row "' + value + '"');
 }
 
-function suppliesFor(ss, date) {
-  return ss.getSheetByName('DailySupplies').getDataRange().getValues().slice(1)
-    .filter(r => r[0] === date).map(r => [r[1], r[2]]);
-}
-
-test('B2: a day that references a RENAMED supply item still saves', () => {
+test('B2: a day that references a RENAMED stock product still saves', () => {
   const { ctx, ss, token } = freshSetup();
-  // Mama entered the day while the picklist still said "Veggies"...
+  // Mama entered the day while the list still said "Bonito"...
   assert.strictEqual(saveDay(ctx, token, {
     counts: [{ sku: 'box4', sod: 4, eod: 0 }],
-    supplies: [{ item: 'Veggies', amount: 120 }], entryId: 'ren-1'
+    stock: [{ product: 'Bonito', qty: 1 }], entryId: 'ren-1'
   }).ok, true);
   // ...then the owner renamed that row in the sheet.
-  renameFirstCol(ss, 'SupplyItems', 'Veggies', 'Gulay');
+  renameFirstCol(ss, 'StockItems', 'Bonito', 'Bonito Flakes');
 
   const r = saveDay(ctx, token, {
     counts: [{ sku: 'box4', sod: 4, eod: 0, cheeseQty: 1 }],
-    supplies: [{ item: 'Veggies', amount: 150 }], entryId: 'ren-1'
+    stock: [{ product: 'Bonito', qty: 2 }], entryId: 'ren-1'
   });
   assert.strictEqual(r.ok, true,
     'the whole day — sales included — became un-saveable: ' + r.error);
-  assert.strictEqual(r.data.supplies_total, 150);
   assert.strictEqual(r.data.total, 3 * 50 + 60, 'the sales half of the day must be intact');
-  assert.deepStrictEqual(suppliesFor(ss, '2026-07-30'), [['Veggies', 150]],
+  assert.deepStrictEqual(ss.getSheetByName('StockUsage').getDataRange().getValues().slice(1)
+    .filter(x => x[0] === '2026-07-30').map(x => [x[1], x[2]]), [['Bonito', 2]],
     'the name the day was entered with is what gets stored');
-  assert.strictEqual(ss.getSheetByName('SupplyItems').getDataRange().getValues().length - 1, 14,
-    'accepting a name must NOT silently add it to the picklist');
+  assert.strictEqual(ss.getSheetByName('StockItems').getDataRange().getValues().length - 1, 6,
+    'accepting a name must NOT silently add it to the list');
 });
 
 test('B2: a DELETED stock product still saves; names are trimmed', () => {
   const { ctx, ss, token } = freshSetup();
   deleteFirstColRow(ss, 'StockItems', 'Bonito');
   const r = saveDay(ctx, token, {
-    counts: [], stock: [{ product: '  Bonito  ', qty: 250 }],
-    supplies: [{ item: '  Egg  ', amount: 40 }], entryId: 'ren-2'
+    counts: [], stock: [{ product: '  Bonito  ', qty: 2 }], entryId: 'ren-2'
   });
   assert.strictEqual(r.ok, true, r.error);
   assert.deepStrictEqual(ss.getSheetByName('StockUsage').getDataRange().getValues().slice(1)
-    .map(x => [x[1], x[2]]), [['Bonito', 250]], 'stored trimmed, exactly as entered');
-  assert.deepStrictEqual(suppliesFor(ss, '2026-07-30'), [['Egg', 40]]);
+    .map(x => [x[1], x[2]]), [['Bonito', 2]], 'stored trimmed, exactly as entered');
   assert.strictEqual(ss.getSheetByName('StockItems').getDataRange().getValues().length - 1, 5,
-    'the picklist is not extended behind the owner’s back');
+    'the list is not extended behind the owner’s back');
 });
 
 test('B2: trimmed names still collide, and the other checks still bite', () => {
   const { ctx, token } = freshSetup();
   let r = saveDay(ctx, token, {
-    counts: [], supplies: [{ item: 'Egg', amount: 5 }, { item: ' Egg ', amount: 6 }], entryId: 'ren-3'
-  });
-  assert.strictEqual(r.ok, false); assert.match(r.error, /Duplicate supplies rows/);
-  r = saveDay(ctx, token, {
     counts: [], stock: [{ product: 'Bonito', qty: 1 }, { product: ' Bonito ', qty: 2 }], entryId: 'ren-4'
   });
   assert.strictEqual(r.ok, false); assert.match(r.error, /Duplicate stock rows/);
-  r = saveDay(ctx, token, { counts: [], supplies: [{ item: 'Gulay', amount: -1 }], entryId: 'ren-5' });
-  assert.strictEqual(r.ok, false); assert.match(r.error, /amount cannot be negative/);
   r = saveDay(ctx, token, { counts: [], stock: [{ product: 'Wasabi', qty: -1 }], entryId: 'ren-6' });
   assert.strictEqual(r.ok, false); assert.match(r.error, /quantity cannot be negative/);
 });
@@ -1371,20 +1517,20 @@ for (let i = WINDOW_DAYS; i >= 1; i--) IN_WINDOW.push(ymdDaysAgo(i));
 const OUT_OF_WINDOW = ymdDaysAgo(120);  // older than 90 days, so nobody ships it
 
 /** A sheet with 60 days of complete history plus one day outside the window;
- *  every day carries sales, counts, daily supplies, stock usage and an expense. */
+ *  every day carries sales, counts, stock usage, a stocktake and an expense. */
 function historySpreadsheet() {
   const { ctx, ss, token } = freshSetup();
   const dates = [OUT_OF_WINDOW].concat(IN_WINDOW);
   const stamp = '2026-08-01 20:00:00';
-  pushRows(ss, 'DailyLog', dates.map(d => [d, false, 'Mama', 0, 100, 100, 0, '', 'log-' + d, stamp, 0]));
+  pushRows(ss, 'DailyLog', dates.map(d => [d, false, 'Mama', 0, 100, 100, 0, '', 'log-' + d, stamp, 0, 200]));
   pushRows(ss, 'DailyCounts', dates.map(d => [d, 'box4', 2, 0, 2, 0, 2, 100, 'log-' + d, 0, 0, 0]));
-  pushRows(ss, 'DailySupplies', dates.map(d => [d, 'Egg', 10, 'log-' + d, stamp]));
-  pushRows(ss, 'StockUsage', dates.map(d => [d, 'Bonito', 5, 'log-' + d, stamp]));
-  pushRows(ss, 'Expenses', dates.map(d => [d, 'Supplies', 'harina', 50, '', '', 'exp-' + d, stamp]));
+  pushRows(ss, 'StockUsage', dates.map(d => [d, 'Bonito', 1, 'log-' + d, stamp]));
+  pushRows(ss, 'StockCounts', dates.map(d => [d, 'Aonori', 3, 'cnt-' + d, stamp]));
+  pushRows(ss, 'Expenses', dates.map(d => [d, 'Supplies', 'harina', 50, '', '', 'exp-' + d, stamp, '', '']));
   return { ctx, ss, token };
 }
 
-test('B3: days, counts, supplies, stock and expenses all cover the SAME window', () => {
+test('B3: days, counts, stock usage, stocktakes and expenses all cover the SAME window', () => {
   const { ctx, token } = historySpreadsheet();
   const r = post(ctx, { token, action: 'bootstrap', payload: {} });
   assert.strictEqual(r.ok, true, r.error);
@@ -1393,11 +1539,11 @@ test('B3: days, counts, supplies, stock and expenses all cover the SAME window',
     'every day inside the 90-day window must ship, in date order');
   assert.strictEqual(r.data.days.length, WINDOW_DAYS,
     'the old cap was the last 45 ROWS, so the 15 oldest days went missing');
-  ['counts', 'dailySupplies', 'stockUsage', 'expenses'].forEach(k => {
+  ['counts', 'stockUsage', 'stockCounts', 'expenses'].forEach(k => {
     assert.deepStrictEqual(r.data[k].map(x => x.date), IN_WINDOW,
       k + ' covers a different window than days — a cutoff preview would understate a period');
   });
-  ['days', 'counts', 'dailySupplies', 'stockUsage', 'expenses'].forEach(k => {
+  ['days', 'counts', 'stockUsage', 'stockCounts', 'expenses'].forEach(k => {
     assert.ok(r.data[k].every(x => x.date !== OUT_OF_WINDOW),
       k + ' shipped a row older than the 90-day window');
   });
@@ -1413,17 +1559,27 @@ test('B3: the oldest reachable period has its SALES, not just its expenses', () 
   const sales = r.data.days.filter(inOlder);
   assert.strictEqual(sales.length, 15, 'the phone cannot preview a period it was never sent');
   assert.strictEqual(sales.reduce((s, d) => s + d.total, 0), 1500, 'sales for that period');
-  assert.strictEqual(r.data.dailySupplies.filter(inOlder).reduce((s, x) => s + x.amount, 0), 150);
+  assert.strictEqual(sales.reduce((s, d) => s + d.salary, 0), 3000, 'and the wages behind them');
   assert.strictEqual(r.data.expenses.filter(inOlder).reduce((s, x) => s + x.amount, 0), 750);
   assert.strictEqual(r.data.counts.filter(inOlder).length, 15);
   assert.strictEqual(r.data.stockUsage.filter(inOlder).length, 15);
 
-  // What the Cutoff screen would compute for that period, both ways round:
-  // Split = Total - Supplies. With sales missing it read -900 instead of +600.
+  // What the Cutoff screen would compute for that period: Total − everything.
+  // With the sales missing it showed a loss that never happened.
   const total = sales.reduce((s, d) => s + d.total, 0);
-  const supplies = r.data.expenses.filter(inOlder).reduce((s, x) => s + x.amount, 0)
-    + r.data.dailySupplies.filter(inOlder).reduce((s, x) => s + x.amount, 0);
-  assert.strictEqual(total - supplies, 600);
+  const supplies = r.data.expenses.filter(inOlder).reduce((s, x) => s + x.amount, 0);
+  const salary = sales.reduce((s, d) => s + d.salary, 0);
+  assert.strictEqual(total - supplies - salary, -2250);
+});
+
+// On-hand is computed over the WHOLE history, not the shipped window: usage from
+// 120 days ago still counts against stock the owner still has.
+test('B3: on-hand counts history OLDER than the 90-day window', () => {
+  const { ctx, token } = historySpreadsheet();
+  const r = post(ctx, { token, action: 'bootstrap', payload: {} });
+  const bonito = r.data.stockItems.find(x => x.product === 'Bonito');
+  assert.strictEqual(bonito.used_since, 61, 'all 61 usage rows, window or not');
+  assert.strictEqual(bonito.on_hand, -61, 'seeded baseline 0, so it reads honestly negative');
 });
 
 // ---------------------------------------------------------------------------
@@ -1472,7 +1628,7 @@ test('B4: dropped_skus is deduped and snake_case; a sku-less row is just ignored
       { sku: 'box4', sod: 4, eod: 0, gcashQty: 1 }, // 3*50 cash + 1*50 GCash
       { sod: 9, eod: 0 }                            // no sku: nothing to price OR report
     ],
-    supplies: [{ item: 'Egg', amount: 20 }],
+    stock: [{ product: 'Bonito', qty: 1 }],
     entryId: 'drop-2'
   });
   assert.strictEqual(r.ok, true, r.error);
@@ -1480,7 +1636,7 @@ test('B4: dropped_skus is deduped and snake_case; a sku-less row is just ignored
   assert.deepStrictEqual(r.data.lines.map(l => l.sku), ['box4']);
   assert.strictEqual(r.data.total, 200);
   assert.strictEqual(r.data.gcash, 50);
-  assert.strictEqual(r.data.supplies_total, 20, 'the rest of the day saved normally');
+  assert.strictEqual(r.data.salary, 200, 'the rest of the day saved normally');
   assert.ok(Object.prototype.hasOwnProperty.call(r.data, 'dropped_skus'),
     'the client reads dropped_skus');
   assert.ok(!Object.prototype.hasOwnProperty.call(r.data, 'droppedSkus'),
@@ -1504,6 +1660,781 @@ test('B4: dropping never masks a real validation error', () => {
   r = saveDay(ctx, token, { closed: true, counts: [{ sku: 'box10', sod: 1, eod: 0 }], entryId: 'drop-5' });
   assert.strictEqual(r.ok, true, r.error);
   assert.deepStrictEqual(r.data.dropped_skus, []);
+});
+
+// ---------------------------------------------------------------------------
+// 15. Daily salary — a SNAPSHOT per day, so a rate change never rewrites
+// history, and a blank on a pre-v2.3.0 row still costs the current rate.
+// ---------------------------------------------------------------------------
+console.log('\n--- 15. Daily salary: snapshotted per day ---');
+
+/** Read the salary cell of one date straight out of the sheet, by header name. */
+function salaryCellFor(ss, date) {
+  const sh = ss.getSheetByName('DailyLog');
+  const rows = sh.getDataRange().getValues();
+  const col = rows[0].indexOf('salary');
+  const row = rows.slice(1).find(r => r[0] === date);
+  return row[col];
+}
+function setSalaryCell(ss, date, value) {
+  const sh = ss.getSheetByName('DailyLog');
+  const rows = sh.getDataRange().getValues();
+  const col = rows[0].indexOf('salary');
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i][0] === date) { sh.getRange(i + 1, col + 1).setValue(value); return; }
+  }
+  throw new Error('precondition: no DailyLog row for ' + date);
+}
+
+test('saveDay snapshots the CURRENT rate, and a later rate change leaves it alone', () => {
+  const { ctx, ss, token } = freshSetup();
+  let r = saveDay(ctx, token, { date: '2026-07-20', counts: [{ sku: 'box4', sod: 2, eod: 0 }], entryId: 'sal-1' });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.data.salary, 200, 'the seeded daily_salary');
+  assert.strictEqual(salaryCellFor(ss, '2026-07-20'), 200);
+
+  // The owner raises the wage half way through the cutoff.
+  r = post(ctx, { token, action: 'saveSettings', payload: { settings: { daily_salary: 250 } } });
+  assert.strictEqual(r.ok, true, r.error);
+
+  r = saveDay(ctx, token, { date: '2026-07-21', counts: [{ sku: 'box4', sod: 2, eod: 0 }], entryId: 'sal-2' });
+  assert.strictEqual(r.data.salary, 250, 'the new day costs the new rate');
+  assert.strictEqual(salaryCellFor(ss, '2026-07-20'), 200,
+    'the day already saved must NOT be rewritten at the new rate');
+
+  r = post(ctx, { token, action: 'cutoff', payload: { start: '2026-07-16', end: '2026-07-31', dryRun: true } });
+  assert.strictEqual(r.data.figures.salary, 450, '200 at the old rate + 250 at the new one');
+});
+
+test('a blank salary on a pre-v2.3.0 row counts at the CURRENT rate', () => {
+  const { ctx, ss, token } = freshSetup();
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-07-20', counts: [], entryId: 'sal-3' }).ok, true);
+  setSalaryCell(ss, '2026-07-20', ''); // the row as v2.2.0 left it
+
+  let r = post(ctx, { token, action: 'cutoff', payload: { start: '2026-07-16', end: '2026-07-31', dryRun: true } });
+  assert.strictEqual(r.data.figures.salary, 200, 'a blank must never count as ₱0');
+  r = post(ctx, { token, action: 'bootstrap', payload: {} });
+  assert.strictEqual(r.data.days.find(d => d.date === '2026-07-20').salary, 200,
+    'the phone is told the same figure the note will use');
+
+  // Change the rate: a BLANK row follows it (there is no snapshot to honour).
+  assert.strictEqual(post(ctx, { token, action: 'saveSettings', payload: { settings: { daily_salary: 300 } } }).ok, true);
+  r = post(ctx, { token, action: 'cutoff', payload: { start: '2026-07-16', end: '2026-07-31', dryRun: true } });
+  assert.strictEqual(r.data.figures.salary, 300);
+
+  // A pre-v2.3.0 CLOSED day is blank too — and nobody worked, so it is free.
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-07-21', closed: true, counts: [], entryId: 'sal-3b' }).ok, true);
+  setSalaryCell(ss, '2026-07-21', '');
+  r = post(ctx, { token, action: 'cutoff', payload: { start: '2026-07-16', end: '2026-07-31', dryRun: true } });
+  assert.strictEqual(r.data.figures.salary, 300, 'a blank on a CLOSED day must stay 0');
+  r = post(ctx, { token, action: 'bootstrap', payload: {} });
+  assert.strictEqual(r.data.days.find(d => d.date === '2026-07-21').salary, 0);
+});
+
+test('an explicit salary is honoured, including 0 for a half day off', () => {
+  const { ctx, ss, token } = freshSetup();
+  let r = saveDay(ctx, token, { date: '2026-07-20', salary: 100, counts: [], entryId: 'sal-4' });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.data.salary, 100, 'a half day is entered, not derived');
+  r = saveDay(ctx, token, { date: '2026-07-21', salary: 0, counts: [], entryId: 'sal-5' });
+  assert.strictEqual(r.data.salary, 0);
+  assert.strictEqual(salaryCellFor(ss, '2026-07-21'), 0,
+    'a real 0 must be STORED, not left blank to be re-inflated later');
+
+  r = post(ctx, { token, action: 'cutoff', payload: { start: '2026-07-16', end: '2026-07-31', dryRun: true } });
+  assert.strictEqual(r.data.figures.salary, 100, 'the 0 day adds nothing');
+
+  r = saveDay(ctx, token, { date: '2026-07-22', salary: -5, counts: [], entryId: 'sal-6' });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /salary cannot be negative/);
+  r = saveDay(ctx, token, { date: '2026-07-22', salary: 'abc', counts: [], entryId: 'sal-7' });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /must be a number/);
+});
+
+test('a closed day is free, even when the payload insists otherwise', () => {
+  const { ctx, token } = freshSetup();
+  const r = saveDay(ctx, token, { date: '2026-07-20', closed: true, salary: 200, counts: [], entryId: 'sal-8' });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.data.salary, 0);
+  const c = post(ctx, { token, action: 'cutoff', payload: { start: '2026-07-16', end: '2026-07-31', dryRun: true } });
+  assert.strictEqual(c.data.figures.salary, 0);
+  assert.match(c.data.note_text, /\nSalary - \n/, 'a zero Salary blanks like the other categories');
+});
+
+// ---------------------------------------------------------------------------
+// 16. The ENTERED Split (CutoffInputs) — Remaining is the residual now.
+// ---------------------------------------------------------------------------
+console.log('\n--- 16. Split is entered; Remaining is the residual ---');
+
+const SPLIT_PERIOD = { start: '2026-07-16', end: '2026-07-31' };
+
+function splitFixture() {
+  const { ctx, ss, token } = freshSetup();
+  // One day: 4 boxes of Box 4 = 200, all cash. One open day = ₱200 salary.
+  assert.strictEqual(saveDay(ctx, token, {
+    date: '2026-07-20', counts: [{ sku: 'box4', sod: 4, eod: 0 }], entryId: 'sp-day'
+  }).ok, true);
+  return { ctx, ss, token };
+}
+
+test('with nothing entered, the cutoff uses the Settings default (3,000 = 1,500 each)', () => {
+  const { ctx, token } = splitFixture();
+  const r = post(ctx, { token, action: 'cutoff', payload: { start: SPLIT_PERIOD.start, end: SPLIT_PERIOD.end, dryRun: true } });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.data.figures.split, 3000);
+  assert.strictEqual(r.data.figures.per_partner, 1500);
+  assert.strictEqual(r.data.figures.remaining, 200 - 3000 - 200, 'total − split − salary');
+  assert.match(r.data.note_text, /\nSplit - 3,000\(1,500 each\)\n/);
+  assert.match(r.data.note_text, /\nShort - 3,000$/);
+});
+
+test('changing split_default moves the fallback; an entered amount overrides it', () => {
+  const { ctx, ss, token } = splitFixture();
+  assert.strictEqual(post(ctx, { token, action: 'saveSettings', payload: { settings: { split_default: 2000 } } }).ok, true);
+  let r = post(ctx, { token, action: 'cutoff', payload: { start: SPLIT_PERIOD.start, end: SPLIT_PERIOD.end, dryRun: true } });
+  assert.strictEqual(r.data.figures.split, 2000, 'the new default');
+  assert.strictEqual(r.data.figures.per_partner, 1000);
+
+  // The owner enters ₱1,000 for THIS cutoff only.
+  r = post(ctx, {
+    token, action: 'saveCutoffSplit',
+    payload: { start: SPLIT_PERIOD.start, end: SPLIT_PERIOD.end, amount: 1000, entryId: 'split-1' }
+  });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.data.split_amount, 1000);
+  assert.strictEqual(r.data.per_partner, 500);
+
+  r = post(ctx, { token, action: 'cutoff', payload: { start: SPLIT_PERIOD.start, end: SPLIT_PERIOD.end, dryRun: true } });
+  assert.strictEqual(r.data.figures.split, 1000, 'the entered amount wins over the default');
+  assert.strictEqual(r.data.figures.per_partner, 500);
+  assert.strictEqual(r.data.figures.remaining, 200 - 1000 - 200);
+  assert.match(r.data.note_text, /\nSplit - 1,000\(500 each\)\n/);
+  assert.match(r.data.note_text, /\nShort - 1,000$/);
+
+  // Another period is NOT affected — it still takes the default.
+  r = post(ctx, { token, action: 'cutoff', payload: { start: '2026-07-01', end: '2026-07-15', dryRun: true } });
+  assert.strictEqual(r.data.figures.split, 2000);
+
+  // Re-entering the same period upserts one row, and bootstrap ships it.
+  assert.strictEqual(post(ctx, {
+    token, action: 'saveCutoffSplit',
+    payload: { start: SPLIT_PERIOD.start, end: SPLIT_PERIOD.end, amount: 1200, entryId: 'split-2' }
+  }).ok, true);
+  const rows = ss.getSheetByName('CutoffInputs').getDataRange().getValues();
+  assert.strictEqual(rows.length - 1, 1, 'the period is the natural key — one row, not two');
+  assert.strictEqual(rows[1][2], 1200);
+  const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
+  assert.deepStrictEqual(boot.data.cutoffInputs.map(x => [x.start, x.end, x.split_amount]),
+    [[SPLIT_PERIOD.start, SPLIT_PERIOD.end, 1200]]);
+});
+
+test('an entered split of 0 blanks the Split line and is not a missing row', () => {
+  const { ctx, token } = splitFixture();
+  assert.strictEqual(post(ctx, {
+    token, action: 'saveCutoffSplit',
+    payload: { start: SPLIT_PERIOD.start, end: SPLIT_PERIOD.end, amount: 0, entryId: 'split-0' }
+  }).ok, true);
+  const r = post(ctx, { token, action: 'cutoff', payload: { start: SPLIT_PERIOD.start, end: SPLIT_PERIOD.end, dryRun: true } });
+  assert.strictEqual(r.data.figures.split, 0, '0 must NOT fall back to the default');
+  assert.match(r.data.note_text, /\nSplit - \n/);
+  assert.strictEqual(r.data.figures.remaining, 0);
+  assert.match(r.data.note_text, /\nRemaining - 0$/);
+  // A negative split is nonsense and is refused in plain English.
+  const bad = post(ctx, {
+    token, action: 'saveCutoffSplit',
+    payload: { start: SPLIT_PERIOD.start, end: SPLIT_PERIOD.end, amount: -1, entryId: 'split-neg' }
+  });
+  assert.strictEqual(bad.ok, false); assert.match(bad.error, /cannot be negative/);
+});
+
+// ---------------------------------------------------------------------------
+// 17. The stock ledger: on hand is COMPUTED (never stored) from a baseline,
+// deliveries carried on the expense row that paid for them, and usage.
+// ---------------------------------------------------------------------------
+console.log('\n--- 17. Stock on hand: baseline + delivered − used ---');
+
+function onHand(ctx, token, product) {
+  const r = post(ctx, { token, action: 'bootstrap', payload: {} });
+  assert.strictEqual(r.ok, true, r.error);
+  return r.data.stockItems.find(x => x.product === product);
+}
+function useStock(ctx, token, date, product, qty, id) {
+  const r = saveDay(ctx, token, { date: date, counts: [], stock: [{ product: product, qty: qty }], entryId: id });
+  assert.strictEqual(r.ok, true, r.error);
+}
+function deliver(ctx, token, date, product, qty, amount, id, category) {
+  const r = post(ctx, {
+    token, action: 'saveExpense',
+    payload: {
+      date: date, category: category || 'Supplies', item: 'delivery', amount: amount,
+      backlogRef: '', notes: '', stockProduct: product, stockQty: qty, entryId: id
+    }
+  });
+  assert.strictEqual(r.ok, true, r.error);
+  return r;
+}
+
+test('a BLANK opening_date counts the WHOLE history, not just today', () => {
+  const { ctx, token } = freshSetup();
+  // Deliveries and usage from long before anyone thought about stock tracking.
+  deliver(ctx, token, '2026-01-05', 'Takoyaki Sauce', 4, 3200, 'deliv-old');
+  useStock(ctx, token, '2026-02-10', 'Takoyaki Sauce', 1, 'use-old');
+  useStock(ctx, token, '2026-07-30', 'Takoyaki Sauce', 1, 'use-new');
+
+  const it = onHand(ctx, token, 'Takoyaki Sauce');
+  assert.strictEqual(it.baseline_date, '', 'the seeded baseline date must stay blank');
+  assert.strictEqual(it.baseline_qty, 0);
+  assert.strictEqual(it.delivered_since, 4,
+    'a blank baseline date coerced to today would silently drop this delivery');
+  assert.strictEqual(it.used_since, 2);
+  assert.strictEqual(it.on_hand, 2, '0 + 4 delivered − 2 used');
+  assert.strictEqual(it.unit, 'gallon', 'the unit is the thing you open');
+});
+
+test('on hand may be NEGATIVE before the first stocktake, and is shown as-is', () => {
+  const { ctx, token } = freshSetup();
+  useStock(ctx, token, '2026-07-30', 'Bonito', 3, 'use-neg');
+  const it = onHand(ctx, token, 'Bonito');
+  assert.strictEqual(it.on_hand, -3,
+    'clamping to 0 would hide exactly the fact that a count is needed');
+  assert.strictEqual(it.low, false, 'with no reorder point there is no warning to give');
+});
+
+test('a delivery logged as an expense moves on hand, and its money counts once', () => {
+  const { ctx, token } = freshSetup();
+  const before = onHand(ctx, token, 'Takoyaki Flour');
+  assert.strictEqual(before.on_hand, 0);
+
+  deliver(ctx, token, '2026-07-20', 'Takoyaki Flour', 10, 2500, 'deliv-1');
+  const after = onHand(ctx, token, 'Takoyaki Flour');
+  assert.strictEqual(after.delivered_since, 10);
+  assert.strictEqual(after.on_hand, 10);
+
+  // The peso amount is an ordinary Supplies expense — counted ONCE, as always.
+  const cut = post(ctx, { token, action: 'cutoff', payload: { start: '2026-07-16', end: '2026-07-31', dryRun: true } });
+  assert.strictEqual(cut.data.figures.supplies, 2500);
+  // ...and the quantity is not money anywhere.
+  assert.strictEqual(cut.data.figures.total, 0);
+  assert.ok(!Object.prototype.hasOwnProperty.call(cut.data.figures, 'stock'));
+
+  // Octopus deliveries land on their own note line but still move stock.
+  const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
+  const row = boot.data.expenses.find(x => x.entry_id === 'deliv-1');
+  assert.strictEqual(row.stock_product, 'Takoyaki Flour', 'snake_case on the wire');
+  assert.strictEqual(row.stock_qty, 10);
+});
+
+test('a stocktake becomes the new baseline; that day is already inside it', () => {
+  const { ctx, token } = freshSetup();
+  deliver(ctx, token, '2026-07-10', 'Aonori', 8, 800, 'deliv-2');
+  useStock(ctx, token, '2026-07-11', 'Aonori', 2, 'use-a');
+  assert.strictEqual(onHand(ctx, token, 'Aonori').on_hand, 6);
+
+  // He counts on the 12th and finds 5 (one pack spoiled). Same-day activity is
+  // already reflected in an end-of-day count, so it must not be added again.
+  useStock(ctx, token, '2026-07-12', 'Aonori', 1, 'use-b');
+  let r = post(ctx, {
+    token, action: 'saveStockCount',
+    payload: { date: '2026-07-12', product: 'Aonori', qty: 5, entryId: 'count-1' }
+  });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.data.on_hand, 5, 'the count IS the figure, drift absorbed');
+
+  let it = onHand(ctx, token, 'Aonori');
+  assert.strictEqual(it.baseline_date, '2026-07-12');
+  assert.strictEqual(it.baseline_qty, 5);
+  assert.strictEqual(it.delivered_since, 0, 'the 10th is before the baseline');
+  assert.strictEqual(it.used_since, 0, "the 12th's own usage is inside the count");
+  assert.strictEqual(it.on_hand, 5);
+
+  // Life after the count carries on from there.
+  useStock(ctx, token, '2026-07-13', 'Aonori', 2, 'use-c');
+  deliver(ctx, token, '2026-07-14', 'Aonori', 3, 300, 'deliv-3');
+  it = onHand(ctx, token, 'Aonori');
+  assert.deepStrictEqual([it.baseline_qty, it.delivered_since, it.used_since, it.on_hand], [5, 3, 2, 6]);
+
+  // A LATER count wins over the earlier one...
+  assert.strictEqual(post(ctx, {
+    token, action: 'saveStockCount',
+    payload: { date: '2026-07-14', product: 'Aonori', qty: 99, entryId: 'count-2' }
+  }).ok, true);
+  assert.strictEqual(onHand(ctx, token, 'Aonori').on_hand, 99);
+  // ...and a second count on the SAME day replaces it (he recounted).
+  const again = post(ctx, {
+    token, action: 'saveStockCount',
+    payload: { date: '2026-07-14', product: 'Aonori', qty: 7, entryId: 'count-3' }
+  });
+  assert.strictEqual(again.data.on_hand, 7);
+  assert.strictEqual(onHand(ctx, token, 'Aonori').on_hand, 7);
+});
+
+test('a count is upserted by entry_id, and only ever one baseline per replay', () => {
+  const { ctx, ss, token } = freshSetup();
+  const payload = { date: '2026-07-12', product: 'Bonito', qty: 4, entryId: 'count-replay' };
+  const r1 = post(ctx, { token, action: 'saveStockCount', payload });
+  const r2 = post(ctx, { token, action: 'saveStockCount', payload });
+  assert.strictEqual(r1.ok, true, r1.error);
+  assert.deepStrictEqual(r1.data, r2.data, 'a replay must return the same figure');
+  assert.strictEqual(ss.getSheetByName('StockCounts').getDataRange().getValues().length - 1, 1);
+  const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
+  assert.deepStrictEqual(boot.data.stockCounts.map(c => [c.date, c.product, c.counted_qty]),
+    [['2026-07-12', 'Bonito', 4]]);
+});
+
+test('a backdated count still lands on the arithmetic, not on the number typed', () => {
+  const { ctx, token } = freshSetup();
+  deliver(ctx, token, '2026-07-20', 'Togarashi', 6, 600, 'deliv-4');
+  useStock(ctx, token, '2026-07-21', 'Togarashi', 1, 'use-d');
+  // He remembers he counted 2 on the 15th and enters it late.
+  const r = post(ctx, {
+    token, action: 'saveStockCount',
+    payload: { date: '2026-07-15', product: 'Togarashi', qty: 2, entryId: 'count-back' }
+  });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.data.on_hand, 7, '2 counted + 6 delivered − 1 used, not the 2 he typed');
+});
+
+test('the reorder warning fires at or below the threshold, never without one', () => {
+  const { ctx, token } = freshSetup();
+  let r = post(ctx, {
+    token, action: 'saveStockItems',
+    payload: { rows: [{ product: 'Bonito', unit: 'pack', reorderAt: 2, active: true }] }
+  });
+  assert.strictEqual(r.ok, true, r.error);
+  deliver(ctx, token, '2026-07-20', 'Bonito', 5, 500, 'deliv-5');
+  assert.strictEqual(onHand(ctx, token, 'Bonito').low, false, '5 on hand, threshold 2');
+
+  useStock(ctx, token, '2026-07-21', 'Bonito', 3, 'use-e');
+  let it = onHand(ctx, token, 'Bonito');
+  assert.strictEqual(it.on_hand, 2);
+  assert.strictEqual(it.low, true, 'AT the threshold counts as low');
+  assert.strictEqual(it.reorder_at, 2, 'the threshold reaches the phone');
+
+  // A product with no threshold never warns, however low it goes.
+  useStock(ctx, token, '2026-07-22', 'Aonori', 9, 'use-f');
+  assert.strictEqual(onHand(ctx, token, 'Aonori').low, false);
+});
+
+test('deliveries and counts are CHECKED against the product list, unlike usage', () => {
+  const { ctx, token } = freshSetup();
+  // A typo here would credit a product that never shows up anywhere.
+  let r = post(ctx, {
+    token, action: 'saveExpense',
+    payload: { date: '2026-07-20', category: 'Supplies', item: 'x', amount: 100,
+      stockProduct: 'Bonitoo', stockQty: 2, entryId: 'bad-1' }
+  });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /no stock product called "Bonitoo"/);
+  // A quantity with nothing named is meaningless.
+  r = post(ctx, {
+    token, action: 'saveExpense',
+    payload: { date: '2026-07-20', category: 'Supplies', item: 'x', amount: 100,
+      stockQty: 2, entryId: 'bad-2' }
+  });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /Say what arrived/);
+  r = post(ctx, {
+    token, action: 'saveExpense',
+    payload: { date: '2026-07-20', category: 'Supplies', item: 'x', amount: 100,
+      stockProduct: 'Bonito', stockQty: -1, entryId: 'bad-3' }
+  });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /cannot be negative/);
+  // An ordinary expense with neither is completely normal.
+  r = post(ctx, {
+    token, action: 'saveExpense',
+    payload: { date: '2026-07-20', category: 'Other', item: 'load', amount: 100, entryId: 'plain-1' }
+  });
+  assert.strictEqual(r.ok, true, r.error);
+  const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
+  const plain = boot.data.expenses.find(x => x.entry_id === 'plain-1');
+  assert.strictEqual(plain.stock_product, '');
+  assert.strictEqual(plain.stock_qty, 0);
+
+  r = post(ctx, {
+    token, action: 'saveStockCount',
+    payload: { date: '2026-07-20', product: 'Wasabi', qty: 1, entryId: 'bad-4' }
+  });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /no stock product called "Wasabi"/);
+  r = post(ctx, {
+    token, action: 'saveStockCount',
+    payload: { date: '2026-07-20', product: 'Bonito', qty: -1, entryId: 'bad-5' }
+  });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /cannot be negative/);
+});
+
+test('a fractional delivery and a fractional stocktake are refused, like usage', () => {
+  // Whole units is a promise about the whole ledger, not about saveDay. All three
+  // writers feed the same arithmetic, so a 1.5 accepted at any one of them puts
+  // half a gallon on the shelf and contradicts every screen that says otherwise.
+  const { ctx, ss, token } = freshSetup();
+
+  // You receive 2 gallons, never 1.5, and stock_qty is added straight into on hand.
+  let r = post(ctx, {
+    token, action: 'saveExpense',
+    payload: { date: '2026-07-20', category: 'Supplies', item: 'sauce', amount: 1600,
+      stockProduct: 'Takoyaki Sauce', stockQty: 1.5, entryId: 'frac-deliv' }
+  });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /whole unit/, 'the same plain English saveDay already uses');
+  assert.match(r.error, /Takoyaki Sauce/, 'and which product it is about');
+  assert.strictEqual(ss.getSheetByName('Expenses').getDataRange().getValues().length - 1, 0,
+    'and the MONEY must not land either — the quantity rides on that same row');
+
+  // A stocktake BECOMES the baseline, so a 2.5 typed here is not one bad row:
+  // every on-hand figure for that product carries the half until the next count.
+  r = post(ctx, {
+    token, action: 'saveStockCount',
+    payload: { date: '2026-07-20', product: 'Takoyaki Sauce', qty: 2.5, entryId: 'frac-count' }
+  });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /whole unit/);
+  assert.match(r.error, /Takoyaki Sauce/);
+  assert.strictEqual(ss.getSheetByName('StockCounts').getDataRange().getValues().length - 1, 0);
+  assert.strictEqual(onHand(ctx, token, 'Takoyaki Sauce').on_hand, 0,
+    'nothing fractional reached the ledger by either door');
+
+  // Whole numbers still go through, including one written as a string.
+  deliver(ctx, token, '2026-07-20', 'Takoyaki Sauce', '3', 1600, 'ok-deliv');
+  assert.strictEqual(post(ctx, {
+    token, action: 'saveStockCount',
+    payload: { date: '2026-07-21', product: 'Takoyaki Sauce', qty: '2', entryId: 'ok-count' }
+  }).ok, true);
+  assert.strictEqual(onHand(ctx, token, 'Takoyaki Sauce').on_hand, 2, 'the count is the baseline');
+
+  // A negative is still answered in its own words, not the fraction message.
+  r = post(ctx, {
+    token, action: 'saveStockCount',
+    payload: { date: '2026-07-21', product: 'Bonito', qty: -0.5, entryId: 'neg-count' }
+  });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /cannot be negative/);
+  r = post(ctx, {
+    token, action: 'saveExpense',
+    payload: { date: '2026-07-21', category: 'Supplies', item: 'x', amount: 10,
+      stockProduct: 'Bonito', stockQty: -0.5, entryId: 'neg-deliv' }
+  });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /cannot be negative/);
+});
+
+// ---------------------------------------------------------------------------
+// 18. The Maintenance writers: upsert by natural key, touch nothing else, and
+// NEVER the token.
+// ---------------------------------------------------------------------------
+console.log('\n--- 18. savePrices / saveSettings / saveStockItems ---');
+
+function settingsMap(ss) {
+  const out = {};
+  ss.getSheetByName('Settings').getDataRange().getValues().slice(1)
+    .forEach(r => { if (r[0]) out[r[0]] = r[1]; });
+  return out;
+}
+
+test('savePrices edits only price/cheese_price/active, and only the listed skus', () => {
+  const { ctx, ss, token } = freshSetup();
+  const before = ss.getSheetByName('Prices').getDataRange().getValues();
+  const r = post(ctx, {
+    token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box4', price: 55, cheesePrice: 65, active: true }] }
+  });
+  assert.strictEqual(r.ok, true, r.error);
+  const after = ss.getSheetByName('Prices').getDataRange().getValues();
+  assert.strictEqual(after.length, before.length, 'no row appended');
+  assert.deepStrictEqual(after[1], ['box4', 'Box 4', 'box', 4, 55, 65, true],
+    'label, group and size must be left exactly as they were');
+  assert.deepStrictEqual(after[2], before[2], 'box6 was not listed, so it must not change');
+  assert.deepStrictEqual(after[3], before[3]);
+
+  // A sku the sheet does not have is refused, not invented: a price row also
+  // needs a group and a size, and guessing those misprices cheese.
+  const bad = post(ctx, {
+    token, action: 'savePrices',
+    payload: { rows: [{ sku: 'drinks', price: 25, cheesePrice: 0, active: true }] }
+  });
+  assert.strictEqual(bad.ok, false);
+  assert.match(bad.error, /no price called "drinks"/);
+  assert.strictEqual(ss.getSheetByName('Prices').getDataRange().getValues().length, after.length);
+
+  const neg = post(ctx, {
+    token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box6', price: -1, cheesePrice: 80, active: true }] }
+  });
+  assert.strictEqual(neg.ok, false); assert.match(neg.error, /cannot be negative/);
+});
+
+test('an ACTIVE sku must have a price; only a switched-off one may sit at 0', () => {
+  // ₱0 on an item that is still selling is not a price, it is a silent hole:
+  // every future day computes that sku at nothing and no screen says why.
+  const { ctx, ss, token } = freshSetup();
+  const prices = () => ss.getSheetByName('Prices').getDataRange().getValues();
+  const before = prices();
+
+  let r = post(ctx, {
+    token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box6', price: 0, cheesePrice: 80, active: true }] }
+  });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /box6/, 'the message must name the sku');
+  assert.match(r.error, /needs a price/, 'and say plainly what to do about it');
+
+  // A field cleared by accident is the likelier way this happens, and a blank
+  // arrives here as 0 — so it must be refused in exactly the same way.
+  [{ price: '' }, { price: null }, {}].forEach(patch => {
+    const row = Object.assign({ sku: 'box6', cheesePrice: 80, active: true }, patch);
+    const bad = post(ctx, { token, action: 'savePrices', payload: { rows: [row] } });
+    assert.strictEqual(bad.ok, false,
+      'a blank price is a ₱0 price: ' + JSON.stringify(patch));
+    assert.match(bad.error, /box6/);
+  });
+  assert.deepStrictEqual(prices(), before, 'a refused batch writes nothing at all');
+
+  // The whole batch is refused together, so the good row beside it is not applied.
+  r = post(ctx, {
+    token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box4', price: 55, cheesePrice: 65, active: true },
+                      { sku: 'box10', price: 0, cheesePrice: 125, active: true }] }
+  });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /box10/);
+  assert.deepStrictEqual(prices(), before, 'box4 must not be half-applied');
+
+  // Switched OFF it sells nothing, so 0 is legitimate — and it stays saveable.
+  r = post(ctx, {
+    token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box6', price: 0, cheesePrice: 0, active: false }] }
+  });
+  assert.strictEqual(r.ok, true, r.error);
+  const row6 = prices().slice(1).find(x => x[0] === 'box6');
+  assert.deepStrictEqual([row6[4], row6[5], row6[6]], [0, 0, false]);
+  // ...and it is off the phone's list, so nothing can be sold at nothing.
+  const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
+  assert.strictEqual(boot.data.prices.find(p => p.sku === 'box6').active, false);
+
+  // A real price on a selling sku is of course still fine.
+  assert.strictEqual(post(ctx, {
+    token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box4', price: 55, cheesePrice: 65, active: true }] }
+  }).ok, true);
+  assert.strictEqual(prices().slice(1).find(x => x[0] === 'box4')[4], 55);
+});
+
+test('a price edit applies to FUTURE days only — history keeps its snapshot', () => {
+  const { ctx, token } = freshSetup();
+  let r = saveDay(ctx, token, { date: '2026-07-20', counts: [{ sku: 'box4', sod: 2, eod: 0 }], entryId: 'px-1' });
+  assert.strictEqual(r.data.total, 100, '2 x 50 at the old price');
+  assert.strictEqual(post(ctx, {
+    token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box4', price: 60, cheesePrice: 70, active: true }] }
+  }).ok, true);
+
+  const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
+  assert.strictEqual(boot.data.days.find(d => d.date === '2026-07-20').total, 100,
+    'the stored amount is a snapshot: an old day must never be re-priced');
+  assert.strictEqual(boot.data.prices.find(p => p.sku === 'box4').cheese_price, 70,
+    'and the new price reaches the phone as cheese_price, not cheesePrice');
+
+  r = saveDay(ctx, token, { date: '2026-07-21', counts: [{ sku: 'box4', sod: 2, eod: 0 }], entryId: 'px-2' });
+  assert.strictEqual(r.data.total, 120, 'the next day uses the new price');
+});
+
+test('saveSettings writes the whitelist, NEVER the token, and ignores the rest', () => {
+  const { ctx, ss, token } = freshSetup();
+  const before = settingsMap(ss);
+  const r = post(ctx, {
+    token, action: 'saveSettings',
+    payload: { settings: {
+      branch: 'Marikina', daily_salary: 250, split_default: 2500,
+      mama_per_cutoff: 600, electric_per_cutoff: 550, staff: 'Mama, Ate',
+      token: 'hijacked', partners: 'Somebody Else', nonsense: 1
+    } }
+  });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.deepStrictEqual(r.data.saved, ['branch', 'daily_salary', 'electric_per_cutoff',
+    'mama_per_cutoff', 'split_default', 'staff']);
+  assert.deepStrictEqual(r.data.ignored, ['nonsense', 'partners', 'token'],
+    'an unknown key is reported, not written');
+
+  const after = settingsMap(ss);
+  assert.strictEqual(after.token, before.token,
+    'an API that can rewrite its own secret can lock the owner out of his sheet');
+  assert.strictEqual(after.partners, before.partners, 'a key off the whitelist is untouched');
+  assert.strictEqual(after.branch, 'Marikina');
+  assert.strictEqual(after.daily_salary, 250);
+  assert.strictEqual(after.split_default, 2500);
+  assert.strictEqual(after.mama_per_cutoff, 600);
+  assert.strictEqual(after.staff, 'Mama, Ate');
+  assert.strictEqual(ss.getSheetByName('Settings').getDataRange().getValues().length - 1,
+    Object.keys(before).length, 'no duplicate rows appended for keys that exist');
+
+  // The old token still authenticates — proof it was not rotated underneath.
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).ok, true);
+  assert.strictEqual(post(ctx, { token: 'hijacked', action: 'ping', payload: {} }).ok, false);
+
+  // And the new figures are what the next cutoff uses.
+  const cut = post(ctx, { token, action: 'cutoff', payload: { start: '2026-07-16', end: '2026-07-31', dryRun: true } });
+  assert.strictEqual(cut.data.figures.split, 2500);
+  assert.match(cut.data.note_text, /^Marikina: July 16 - 31 Breakdown/);
+});
+
+test('an inherited property name is not a whitelisted setting or a product', () => {
+  // "toString" and "constructor" exist on every plain object, so a lookup that
+  // is not hasOwnProperty-guarded reads them as valid — and then writes them.
+  const { ctx, ss, token } = freshSetup();
+  const before = JSON.stringify(snapshot(ss).Settings);
+  let r = post(ctx, {
+    token, action: 'saveSettings',
+    payload: { settings: { toString: 'x', constructor: 'y', hasOwnProperty: 'z' } }
+  });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.deepStrictEqual(r.data.saved, [], 'nothing on this payload is settable');
+  assert.deepStrictEqual(r.data.ignored, ['constructor', 'hasOwnProperty', 'toString']);
+  assert.strictEqual(JSON.stringify(snapshot(ss).Settings), before, 'the tab must be untouched');
+
+  // Same trap on the product lookups a delivery and a stocktake go through.
+  r = post(ctx, {
+    token, action: 'saveExpense',
+    payload: { date: '2026-07-20', category: 'Supplies', item: 'x', amount: 10,
+      stockProduct: 'toString', stockQty: 1, entryId: 'proto-1' }
+  });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /no stock product called "toString"/);
+  r = post(ctx, {
+    token, action: 'saveStockCount',
+    payload: { date: '2026-07-20', product: 'constructor', qty: 1, entryId: 'proto-2' }
+  });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /no stock product called "constructor"/);
+  // ...and on the price lookup, where it would otherwise price a box at NaN.
+  r = saveDay(ctx, token, { counts: [{ sku: 'toString', sod: 5, eod: 0 }], entryId: 'proto-3' });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.deepStrictEqual(r.data.dropped_skus, ['toString'], 'unpriceable, so dropped and reported');
+  assert.strictEqual(r.data.total, 0, 'never a NaN total');
+});
+
+test('saveSettings rejects nonsense values and appends a key that is missing', () => {
+  const { ctx, ss, token } = freshSetup();
+  let r = post(ctx, { token, action: 'saveSettings', payload: { settings: { daily_salary: -1 } } });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /cannot be negative/);
+  r = post(ctx, { token, action: 'saveSettings', payload: { settings: { split_default: 'lots' } } });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /must be a number/);
+  r = post(ctx, { token, action: 'saveSettings', payload: { settings: { branch: '  ' } } });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /branch name cannot be empty/);
+  r = post(ctx, { token, action: 'saveSettings', payload: {} });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /settings must be an object/);
+  assert.strictEqual(settingsMap(ss).daily_salary, 200, 'a rejected batch changes nothing');
+
+  // A sheet whose Settings tab predates a key gets it appended, once.
+  deleteFirstColRow(ss, 'Settings', 'daily_salary');
+  assert.strictEqual(settingsMap(ss).daily_salary, undefined);
+  assert.strictEqual(post(ctx, { token, action: 'saveSettings', payload: { settings: { daily_salary: 175 } } }).ok, true);
+  assert.strictEqual(settingsMap(ss).daily_salary, 175);
+  assert.strictEqual(post(ctx, { token, action: 'saveSettings', payload: { settings: { daily_salary: 180 } } }).ok, true);
+  const keys = ss.getSheetByName('Settings').getDataRange().getValues().slice(1).map(r2 => r2[0]);
+  assert.strictEqual(keys.filter(k => k === 'daily_salary').length, 1, 'appended once, then updated');
+});
+
+test('saveStockItems edits unit/reorder point/active and keeps the baseline', () => {
+  const { ctx, ss, token } = freshSetup();
+  // The owner typed his first stocktake straight into the sheet: 12 packs as of
+  // the 1st. That baseline is not the phone's to touch.
+  const sh = ss.getSheetByName('StockItems');
+  const rows0 = sh.getDataRange().getValues();
+  const bonitoRow = rows0.findIndex(x => x[0] === 'Bonito') + 1;
+  sh.getRange(bonitoRow, 5).setValue(12);
+  sh.getRange(bonitoRow, 6).setValue('2026-07-01');
+  const before = sh.getDataRange().getValues();
+
+  const r = post(ctx, {
+    token, action: 'saveStockItems',
+    payload: { rows: [{ product: 'Bonito', unit: 'box', reorderAt: 3, active: false }] }
+  });
+  assert.strictEqual(r.ok, true, r.error);
+  const after = ss.getSheetByName('StockItems').getDataRange().getValues();
+  assert.strictEqual(after.length, before.length, 'no row appended for a product that exists');
+  const row = after.slice(1).find(x => x[0] === 'Bonito');
+  assert.deepStrictEqual([row[1], row[2], row[6]], ['box', false, 3]);
+  assert.deepStrictEqual([row[3], row[4], row[5]], [4, 12, '2026-07-01'],
+    'sort, opening_qty and opening_date are not the phone\'s business');
+  assert.deepStrictEqual(after.slice(1).find(x => x[0] === 'Aonori'),
+    before.slice(1).find(x => x[0] === 'Aonori'), 'an unlisted product must not change');
+  // The baseline still stands, and a stocktake still moves it.
+  assert.strictEqual(onHand(ctx, token, 'Bonito').on_hand, 12);
+  assert.strictEqual(post(ctx, {
+    token, action: 'saveStockCount',
+    payload: { date: '2026-07-12', product: 'Bonito', qty: 4, entryId: 'si-count' }
+  }).ok, true);
+  assert.strictEqual(onHand(ctx, token, 'Bonito').on_hand, 4);
+
+  // A brand-new product IS created (it carries no money), after the existing six.
+  assert.strictEqual(post(ctx, {
+    token, action: 'saveStockItems',
+    payload: { rows: [{ product: 'Wasabi', unit: 'tub', reorderAt: '', active: true }] }
+  }).ok, true);
+  const wasabi = ss.getSheetByName('StockItems').getDataRange().getValues().slice(1)
+    .find(x => x[0] === 'Wasabi');
+  assert.deepStrictEqual(wasabi, ['Wasabi', 'tub', true, 7, 0, '', ''],
+    'a new product starts at sort 7 with an empty baseline and no threshold');
+  const neg = post(ctx, {
+    token, action: 'saveStockItems',
+    payload: { rows: [{ product: 'Bonito', unit: 'pack', reorderAt: -2, active: true }] }
+  });
+  assert.strictEqual(neg.ok, false); assert.match(neg.error, /reorder point cannot be negative/);
+});
+
+test('a BLANK reorder point stays blank through a full round trip, never becomes 0', () => {
+  const { ctx, ss, token } = freshSetup();
+  const cells = () => ss.getSheetByName('StockItems').getDataRange().getValues().slice(1)
+    .map(r => [r[0], r[6]]);
+  assert.deepStrictEqual(cells().map(x => x[1]), ['', '', '', '', '', ''],
+    'the six seeded products start with no threshold at all');
+
+  // (1) What the phone is TOLD. A blank cell coerced to 0 is a DIFFERENT fact:
+  // 0 is a real threshold value, and it is what the Maintenance screen then
+  // loads into its input and hands straight back.
+  let items = post(ctx, { token, action: 'bootstrap', payload: {} }).data.stockItems;
+  assert.strictEqual(items.length, 6);
+  items.forEach(it => {
+    assert.strictEqual(it.reorder_at, '', it.product + ': a blank cell must arrive blank');
+    assert.strictEqual(it.low, false, it.product + ': a blank threshold warns about nothing');
+  });
+
+  // (2) The round trip the phone actually makes: the owner changes ONE unit and
+  // the screen saves the whole list back, echoing every reorder point it was
+  // given. A 0 shipped in step 1 is written into six cells he never touched.
+  const echo = items.map(it => ({
+    product: it.product, unit: it.unit, reorderAt: it.reorder_at, active: it.active
+  }));
+  echo.find(x => x.product === 'Japanese Mayo').unit = 'bottle';
+  const r = post(ctx, { token, action: 'saveStockItems', payload: { rows: echo } });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.deepStrictEqual(cells().map(x => x[1]), ['', '', '', '', '', ''],
+    'saving the list back must not write a 0 into every blank cell');
+  assert.strictEqual(cells().length, 6, 'and no row was duplicated');
+
+  // (3) A real threshold still round-trips as a NUMBER, so the sheet can still
+  // tell "no warning wanted" from "warn me at 2".
+  assert.strictEqual(post(ctx, {
+    token, action: 'saveStockItems',
+    payload: { rows: [{ product: 'Bonito', unit: 'pack', reorderAt: 2, active: true }] }
+  }).ok, true);
+  assert.deepStrictEqual(cells(), [['Takoyaki Flour', ''], ['Takoyaki Sauce', ''],
+    ['Japanese Mayo', ''], ['Bonito', 2], ['Aonori', ''], ['Togarashi', '']],
+    'a product that batch never mentioned keeps its blank');
+  items = post(ctx, { token, action: 'bootstrap', payload: {} }).data.stockItems;
+  assert.strictEqual(items.find(x => x.product === 'Bonito').reorder_at, 2);
+  items.forEach(it => assert.strictEqual(it.low, it.product === 'Bonito',
+    'only the product with a threshold can be low (0 on hand, warn at 2)'));
+});
+
+test('every config writer takes the lock and is a no-op for an empty batch', () => {
+  const { ctx, ss, token } = freshSetup();
+  const before = JSON.stringify(snapshot(ss));
+  ['savePrices', 'saveStockItems'].forEach(action => {
+    const r = post(ctx, { token, action, payload: { rows: [] } });
+    assert.strictEqual(r.ok, true, action + ': ' + r.error);
+    assert.strictEqual(r.data.saved, 0);
+  });
+  const r = post(ctx, { token, action: 'saveSettings', payload: { settings: {} } });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.deepStrictEqual(r.data.saved, []);
+  assert.strictEqual(JSON.stringify(snapshot(ss)), before, 'an empty batch must change nothing');
+  // A bad shape is refused rather than silently ignored.
+  ['savePrices', 'saveStockItems'].forEach(action => {
+    const bad = post(ctx, { token, action, payload: { rows: 'nope' } });
+    assert.strictEqual(bad.ok, false); assert.match(bad.error, /rows must be an array/);
+  });
 });
 
 // ---------------------------------------------------------------------------

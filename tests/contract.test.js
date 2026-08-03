@@ -124,14 +124,22 @@ const S_LOADERS   = slab('function readStored(k){', "let state  = sanitizeState(
 const S_UTILS     = slab('const EN_MONTHS  =', 'function computeDay(p){');
 // computeDay, currentPeriod, computeCutoff, buildNote.
 const S_DOMAIN    = slab('function computeDay(p){', 'function invalidateNoteFor(date){');
-// applyLocalDay / applyLocalExpense / reapplyQueue.
+// applyLocalDay / applyLocalExpense / reapplyQueue (queue AND attention).
 const S_APPLIERS  = slab('function invalidateNoteFor(date){', 'function enqueue(action, payload){');
+// The needs-attention list: what did NOT reach the sheet, and what may be said
+// about a date because of it.
+const S_ATTN      = slab('function noteAttention(kind, action, payload, message){', 'function isLegacyGcashPayload(p){');
 // applyServerDay — consumes the saveDay RESPONSE.
 const S_SERVERDAY = slab('function applyServerDay(p, data){', 'async function doBootstrap(){');
 // applyBootstrap (runs every row through the normalizers) + backlogBalance.
 const S_BOOTSTRAP = slab('function applyBootstrap(data){', "let activeTab = 'benta';");
 // The Sales form: reads a stored day back out, and re-emits the request payload.
 const S_FORM      = slab('function loadBentaForm(date){', '// SKU list to render:');
+// The two collapsible Sales cards (wage + stock used) as HTML STRINGS: what is
+// escaped, what is collapsed, and what the head says while it is closed.
+const S_CARDS     = slab('const CHEV =', 'const COLLAPSE_FLAG =');
+// The Maintenance price rule — a sku still being sold must have a real price.
+const S_MAINT     = slab('function priceRowError(pr, m){', 'function saveMaintPrices(){');
 
 function loadClient() {
   const src = `
@@ -141,9 +149,12 @@ ${S_LOADERS}
 ${S_UTILS}
 ${S_DOMAIN}
 ${S_APPLIERS}
+${S_ATTN}
 ${S_SERVERDAY}
 ${S_BOOTSTRAP}
 ${S_FORM}
+${S_CARDS}
+${S_MAINT}
 let state = freshState();
 let queue = [];
 let config = freshConfig();
@@ -158,14 +169,34 @@ function persistQueue(){}
 function persistConfig(){}
 function persistAttention(){}
 function persistDrafts(){}
+// Chrome the extracted slabs call but that has no DOM here.
+function updateStatus(){}
+function toast(){}
 return {
   get state(){ return state; },
   get benta(){ return benta; },
   get queue(){ return queue; },
-  pick, normPrice, normBacklog, normDay, normCount, normExpense,
-  applyBootstrap, applyLocalDay, applyLocalExpense, applyServerDay, backlogBalance,
+  get attention(){ return attention; },
+  set attention(v){ attention = v; },
+  get splitEdits(){ return splitEdits; },
+  pick, normPrice, normBacklog, normDay, normCount, normExpense, normStockItem,
+  applyBootstrap, applyLocalDay, applyLocalExpense, applyLocalStockCount,
+  applyLocalCutoffSplit, applyLocalPrices, applyServerDay, reapplyQueue,
+  backlogBalance,
   loadBentaForm, bentaPayload, computeDay, computeCutoff, buildNote,
-  currentPeriod, num, fmt, activePrices
+  // The stock ledger the phone computes for itself (never stored) and the two
+  // figures the cutoff needs from Settings.
+  stockStatusOf, stockStatusList, qtyWithUnit, daySalary, splitFor, dailySalary,
+  currentPeriod, periodKey, num, fmt, fmtShort, activePrices,
+  // v2.3.1: the Split field's one reading, the note guard, what may be said
+  // about a refused day, the two collapsible cards, and the price rule.
+  splitFieldAmount, liveCutoff, pendingSplit, splitDefault,
+  noteAttention, attentionForDate, dateNotInSheet, daySavedMessage,
+  stockRowSaid, stockCardHTML, wageCardHTML, wageIsCustom, wageSummary,
+  priceRowError,
+  // Live refs so a test can put the client in demo / API / still-queued states.
+  // enqueue() is not in the extracted slabs, so tests push onto q directly.
+  cfg: config, q: queue
 };`;
   // eslint-disable-next-line no-new-func
   return new Function(src)();
@@ -180,13 +211,21 @@ const CONTRACT = {
   'bootstrap.prices[]':    [['cheese_price', 'cheesePrice']],
   'bootstrap.days[]':      [['custom_amount', 'customAmount'], ['custom_gcash', 'customGcash'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
   'bootstrap.counts[]':    [['cheese_qty', 'cheeseQty'], ['regular_qty', 'regularQty'], ['gcash_qty', 'gcashQty'], ['gcash_cheese_qty', 'gcashCheeseQty'], ['gcash_amount', 'gcashAmount'], ['entry_id', 'entryId']],
-  'bootstrap.expenses[]':  [['backlog_ref', 'backlogRef'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
+  'bootstrap.expenses[]':  [['backlog_ref', 'backlogRef'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt'], ['stock_product', 'stockProduct'], ['stock_qty', 'stockQty']],
   'bootstrap.backlogs[]':  [['total_amount', 'totalAmount'], ['start_date', 'startDate']],
-  'bootstrap.dailySupplies[]': [['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
   'bootstrap.stockUsage[]':    [['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
-  'saveDay':               [['supplies_total', 'suppliesTotal']],
+  // v2.3.0 stock ledger. on_hand and the three numbers behind it are COMPUTED
+  // server-side, so a camelCase slip here would show the owner ₱0 of stock.
+  'bootstrap.stockItems[]':    [['on_hand', 'onHand'], ['reorder_at', 'reorderAt'], ['opening_qty', 'openingQty'], ['opening_date', 'openingDate'], ['baseline_qty', 'baselineQty'], ['baseline_date', 'baselineDate'], ['delivered_since', 'deliveredSince'], ['used_since', 'usedSince']],
+  'bootstrap.stockCounts[]':   [['counted_qty', 'countedQty'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
+  'bootstrap.cutoffInputs[]':  [['split_amount', 'splitAmount'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
+  // `supplies_total` is gone with the retired supplies card; dropped_skus is the
+  // saveDay key the phone still has to read.
+  'saveDay':               [['dropped_skus', 'droppedSkus']],
   'saveDay.lines[]':       [['cheese_qty', 'cheeseQty'], ['regular_qty', 'regularQty'], ['gcash_qty', 'gcashQty'], ['gcash_cheese_qty', 'gcashCheeseQty'], ['gcash_amount', 'gcashAmount']],
   'saveExpense':           [['entry_id', 'entryId']],
+  'saveStockCount':        [['entry_id', 'entryId'], ['on_hand', 'onHand']],
+  'saveCutoffSplit':       [['entry_id', 'entryId'], ['split_amount', 'splitAmount'], ['per_partner', 'perPartner']],
   'cutoff':                [['note_text', 'noteText']],
   'cutoff.figures':        [['per_partner', 'perPartner']],
   'bootstrap.lastCutoff':  [['per_partner', 'perPartner'], ['note_text', 'noteText'], ['generated_at', 'generatedAt']]
@@ -216,7 +255,7 @@ function assertPairs(where, sample, pairs) {
 // range CONTAINER keys named in SPEC.md. Everything inside a row must be
 // snake_case, because rows are stored verbatim in state_v1.
 const CAMEL_CONTAINERS = {
-  supplyItems: true, stockItems: true, dailySupplies: true, stockUsage: true, lastCutoff: true
+  stockItems: true, stockUsage: true, stockCounts: true, cutoffInputs: true, lastCutoff: true
 };
 
 /** Walk a whole response tree and fail on ANY camelCase key. This is the guard
@@ -278,28 +317,45 @@ const SAVE_DAY_PAYLOAD = {
   ],
   entryId: 'seam-day-1'
 };
-// Supplies + stock live on a day in the PREVIOUS cutoff (1-15), deliberately
-// outside PERIOD: the point here is that their rows and keys survive the seam.
-// The money rule (cutoff Supplies = Expenses(Supplies) + DailySupplies) is
-// pinned server-side in run-tests.js.
-const SUPPLY_DAY = '2026-07-10';
-const SUPPLY_DAY_PAYLOAD = {
-  date: SUPPLY_DAY, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0,
+// Stock usage lives on a day in the PREVIOUS cutoff (1-15), deliberately outside
+// PERIOD: the point here is that its rows and keys survive the seam. The money
+// rule (cutoff Supplies = Expenses(Supplies) alone) is pinned in run-tests.js.
+// Usage is WHOLE UNITS OPENED — one pack of flour, not 1.5 kg of it.
+const STOCK_DAY = '2026-07-10';
+const STOCK_DAY_PAYLOAD = {
+  date: STOCK_DAY, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0,
   notes: '', counts: [],
+  // What a phone that has not been updated yet still sends. The server must
+  // ignore it rather than resurrecting the retired tab.
   supplies: [{ item: 'Veggies', amount: 120 }, { item: 'Egg', amount: 80 }],
-  stock: [{ product: 'Takoyaki Flour', qty: 1.5 }],
-  entryId: 'seam-supply-1'
+  stock: [{ product: 'Takoyaki Flour', qty: 2 }],
+  entryId: 'seam-stock-1'
 };
 const BACKLOG_PAYLOAD = {
   date: '2026-07-20', category: 'Backlog', item: 'hulog', amount: 700,
   backlogRef: 'Ref', notes: '', entryId: 'seam-exp-1'
+};
+// A delivery: money on the expense row, quantity riding along on it.
+const DELIVERY_PAYLOAD = {
+  date: '2026-07-22', category: 'Supplies', item: 'sako ng harina', amount: 500,
+  backlogRef: '', notes: '', stockProduct: 'Takoyaki Flour', stockQty: 4,
+  entryId: 'seam-deliv-1'
+};
+const COUNT_PAYLOAD = {
+  date: '2026-07-24', product: 'Bonito', qty: 3, entryId: 'seam-count-1'
+};
+const SPLIT_PAYLOAD = {
+  start: PERIOD.start, end: PERIOD.end, amount: 2000, entryId: 'seam-split-1'
 };
 
 const EXPECT = {
   box4Amount: 520, box4Cheese: 2, box4Regular: 8, box4CheeseLine: 120,
   box6Amount: 275,
   total: 1045, gcash: 250, cash: 795, custom: 250, customGcash: 250,
-  suppliesTotal: 200,
+  salary: 200,            // one open day inside PERIOD, at the seeded ₱200
+  supplies: 500,          // the delivery's peso amount, counted once
+  split: 2000, perPartner: 1000,
+  remaining: 1045 - 2000 - 500 - 200 - 700,
   refTotal: 6700, refPaid: 700, refBalance: 6000,
   allBacklogsTotal: 81352, allBacklogsRemaining: 81352 - 700
 };
@@ -308,18 +364,26 @@ function buildFixture() {
   const { ctx, ss, token } = loadServer();
   const saveDay = post(ctx, { token, action: 'saveDay', payload: SAVE_DAY_PAYLOAD });
   assert.strictEqual(saveDay.ok, true, 'saveDay failed: ' + saveDay.error);
-  const supplyDay = post(ctx, { token, action: 'saveDay', payload: SUPPLY_DAY_PAYLOAD });
-  assert.strictEqual(supplyDay.ok, true, 'saveDay (supplies) failed: ' + supplyDay.error);
+  const stockDay = post(ctx, { token, action: 'saveDay', payload: STOCK_DAY_PAYLOAD });
+  assert.strictEqual(stockDay.ok, true, 'saveDay (stock) failed: ' + stockDay.error);
   const saveExpense = post(ctx, { token, action: 'saveExpense', payload: BACKLOG_PAYLOAD });
   assert.strictEqual(saveExpense.ok, true, 'saveExpense failed: ' + saveExpense.error);
+  const delivery = post(ctx, { token, action: 'saveExpense', payload: DELIVERY_PAYLOAD });
+  assert.strictEqual(delivery.ok, true, 'saveExpense (delivery) failed: ' + delivery.error);
+  const stockCount = post(ctx, { token, action: 'saveStockCount', payload: COUNT_PAYLOAD });
+  assert.strictEqual(stockCount.ok, true, 'saveStockCount failed: ' + stockCount.error);
+  const split = post(ctx, { token, action: 'saveCutoffSplit', payload: SPLIT_PAYLOAD });
+  assert.strictEqual(split.ok, true, 'saveCutoffSplit failed: ' + split.error);
   const cutoff = post(ctx, { token, action: 'cutoff', payload: { start: PERIOD.start, end: PERIOD.end, dryRun: false } });
   assert.strictEqual(cutoff.ok, true, 'cutoff failed: ' + cutoff.error);
   const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
   assert.strictEqual(boot.ok, true, 'bootstrap failed: ' + boot.error);
   return {
     ctx, ss, token,
-    saveDay: saveDay.data, supplyDay: supplyDay.data,
-    saveExpense: saveExpense.data, cutoff: cutoff.data, boot: boot.data
+    saveDay: saveDay.data, stockDay: stockDay.data,
+    saveExpense: saveExpense.data, delivery: delivery.data,
+    stockCount: stockCount.data, split: split.data,
+    cutoff: cutoff.data, boot: boot.data
   };
 }
 
@@ -461,26 +525,127 @@ test('the server IGNORES a client-sent gcash and computes it from the buckets', 
   assert.strictEqual(day.custom_gcash, EXPECT.customGcash);
 });
 
-test('supplies and stock rows reach the phone with their own snake_case keys', () => {
-  assert.strictEqual(F.supplyDay.supplies_total, EXPECT.suppliesTotal);
-  const sup = F.boot.dailySupplies.filter(r => r.date === SUPPLY_DAY);
-  assert.deepStrictEqual(sup.map(r => [r.item, r.amount]).sort(),
-    [['Egg', 80], ['Veggies', 120]]);
-  assert.strictEqual(sup.reduce((s, r) => s + r.amount, 0), EXPECT.suppliesTotal);
-  const stock = F.boot.stockUsage.filter(r => r.date === SUPPLY_DAY);
-  assert.deepStrictEqual(stock.map(r => [r.product, r.qty]), [['Takoyaki Flour', 1.5]]);
+test('stock rows reach the phone with their own snake_case keys', () => {
+  const stock = F.boot.stockUsage.filter(r => r.date === STOCK_DAY);
+  assert.deepStrictEqual(stock.map(r => [r.product, r.qty]), [['Takoyaki Flour', 2]]);
   // Stock is never money: it must not appear in the day's total.
-  assert.strictEqual(F.boot.days.find(d => d.date === SUPPLY_DAY).total, 0);
+  assert.strictEqual(F.boot.days.find(d => d.date === STOCK_DAY).total, 0);
+  // The retired supplies path is GONE, and the queued `supplies` array the
+  // fixture still sends changed nothing.
+  assert.strictEqual(F.boot.dailySupplies, undefined, 'a dead collection must not be shipped');
+  assert.strictEqual(F.boot.supplyItems, undefined);
+  assert.ok(!has(F.stockDay, 'supplies_total'));
 });
 
-test('the supplies and stock picklists reach the phone', () => {
-  const items = F.boot.supplyItems.map(r => r.item);
-  assert.ok(items.indexOf('Veggies') !== -1 && items.indexOf('Bag #16') !== -1,
-    'SupplyItems picklist missing: ' + JSON.stringify(items));
+test('the day salary reaches the phone on the save reply and in bootstrap', () => {
+  assert.strictEqual(F.saveDay.salary, EXPECT.salary, 'the snapshot the server stored');
+  assert.strictEqual(F.boot.days.find(d => d.date === DAY).salary, EXPECT.salary,
+    'the phone must be told the same figure the note will use');
+  // Single-word key, so there is no camelCase spelling to drift to — but it must
+  // be a NUMBER, not the "" a blank cell would give.
+  assert.strictEqual(typeof F.boot.days.find(d => d.date === DAY).salary, 'number');
+});
+
+test('the stock list reaches the phone with its unit and a COMPUTED on-hand', () => {
   const products = F.boot.stockItems.map(r => r.product);
-  assert.ok(products.indexOf('Takoyaki Flour') !== -1, 'StockItems picklist missing');
-  assert.strictEqual(F.boot.stockItems.find(r => r.product === 'Takoyaki Flour').unit, 'kg',
-    'the unit is what tells Mama whether to type kilos or grams');
+  assert.ok(products.indexOf('Takoyaki Flour') !== -1, 'the stock list is missing');
+  const flour = F.boot.stockItems.find(r => r.product === 'Takoyaki Flour');
+  assert.strictEqual(flour.unit, 'pack', 'the unit is the thing you OPEN, not a weight');
+  // Seeded baseline 0 with a BLANK date, one delivery of 4, two units opened.
+  assert.strictEqual(flour.baseline_qty, 0);
+  assert.strictEqual(flour.baseline_date, '', 'a blank baseline date must survive the seam');
+  assert.strictEqual(flour.delivered_since, 4);
+  assert.strictEqual(flour.used_since, 2);
+  assert.strictEqual(flour.on_hand, 2, '0 + 4 − 2, computed on the server and shipped');
+  assert.strictEqual(flour.low, false);
+  // A blank THRESHOLD has to survive the seam for the same reason a blank
+  // baseline date does: 0 is a real threshold, and the Maintenance screen hands
+  // back whatever it was given — so a coerced 0 is written into the sheet on the
+  // first save and the owner's untouched cells stop being blank.
+  assert.strictEqual(flour.reorder_at, '', 'a blank reorder point must arrive blank');
+  // The stocktake became Bonito's baseline, and the phone is told the figures
+  // behind it so it can explain them without holding the history.
+  const bonito = F.boot.stockItems.find(r => r.product === 'Bonito');
+  assert.strictEqual(bonito.baseline_date, COUNT_PAYLOAD.date);
+  assert.strictEqual(bonito.baseline_qty, COUNT_PAYLOAD.qty);
+  assert.strictEqual(bonito.on_hand, COUNT_PAYLOAD.qty);
+  assert.strictEqual(F.stockCount.on_hand, COUNT_PAYLOAD.qty);
+  assert.deepStrictEqual(F.boot.stockCounts.map(c => [c.date, c.product, c.counted_qty]),
+    [[COUNT_PAYLOAD.date, COUNT_PAYLOAD.product, COUNT_PAYLOAD.qty]]);
+});
+
+test('the phone computes the SAME on-hand figure the server did', () => {
+  // On hand is computed on both sides and stored on neither. The phone runs the
+  // same arithmetic over its own rows, which is what makes the figure right
+  // offline and in demo mode — so the two must agree to the unit.
+  const app = syncedClient(F.boot);
+  const mine = {};
+  app.stockStatusList().forEach(s => { mine[s.product] = s; });
+  F.boot.stockItems.filter(x => x.active).forEach(server => {
+    const local = mine[server.product];
+    assert.ok(local, 'the phone dropped ' + server.product + ' from its stock list');
+    assert.strictEqual(local.on_hand, server.on_hand,
+      server.product + ': phone says ' + local.on_hand + ', sheet says ' + server.on_hand);
+    assert.strictEqual(local.low, server.low, server.product + ': the low mark disagrees');
+  });
+  // The two products the fixture actually moves, spelled out.
+  assert.strictEqual(mine['Takoyaki Flour'].on_hand, 2, '0 + 4 delivered − 2 opened');
+  assert.strictEqual(mine['Bonito'].on_hand, COUNT_PAYLOAD.qty, 'the stocktake became the baseline');
+  assert.strictEqual(mine['Takoyaki Flour'].unit, 'pack');
+  assert.strictEqual(app.qtyWithUnit(2, 'gallon'), '2 gallons');
+  assert.strictEqual(app.qtyWithUnit(1, 'gallon'), '1 gallon');
+});
+
+test('a delivery then a unit opened leaves the right figure, with no server at all', () => {
+  // Demo mode / a brand-new phone: no bootstrap, so every figure here is the
+  // phone's own arithmetic. This is the owner's own worked example.
+  const app = loadClient();
+  app.applyLocalExpense({ date: '2026-08-01', category: 'Supplies', item: 'sauce',
+    amount: 900, backlogRef: '', notes: '',
+    stockProduct: 'Takoyaki Sauce', stockQty: 2, entryId: 'demo-deliv' });
+  let sauce = app.stockStatusList().find(s => s.product === 'Takoyaki Sauce');
+  assert.strictEqual(sauce.on_hand, 2, 'the delivery did not reach the ledger');
+  app.applyLocalDay({ date: '2026-08-02', closed: false, staff: 'Mama', customAmount: 0,
+    customGcash: 0, notes: '', counts: [],
+    stock: [{ product: 'Takoyaki Sauce', qty: 1 }], entryId: 'demo-day' });
+  sauce = app.stockStatusList().find(s => s.product === 'Takoyaki Sauce');
+  assert.strictEqual(sauce.on_hand, 1, '2 gallons in, 1 opened, so 1 left');
+  assert.strictEqual(app.qtyWithUnit(sauce.on_hand, sauce.unit), '1 gallon');
+  // A stocktake RE-BASELINES: whatever the arithmetic said, the count wins from
+  // that day on. This is what absorbs spoilage and miscounts.
+  app.applyLocalStockCount({ date: '2026-08-03', product: 'Takoyaki Sauce', qty: 5, entryId: 'demo-count' });
+  sauce = app.stockStatusList().find(s => s.product === 'Takoyaki Sauce');
+  assert.strictEqual(sauce.on_hand, 5, 'the count did not become the new baseline');
+  assert.strictEqual(sauce.baseline_date, '2026-08-03');
+  // Replaying the same count (a queue re-send) must not double it up.
+  app.applyLocalStockCount({ date: '2026-08-03', product: 'Takoyaki Sauce', qty: 5, entryId: 'demo-count' });
+  assert.strictEqual(app.stockStatusList().find(s => s.product === 'Takoyaki Sauce').on_hand, 5);
+});
+
+test('on hand may read NEGATIVE on the phone too, never clamped', () => {
+  const app = loadClient();
+  app.applyLocalDay({ date: '2026-08-02', closed: false, staff: 'Mama', customAmount: 0,
+    customGcash: 0, notes: '', counts: [],
+    stock: [{ product: 'Japanese Mayo', qty: 9 }], entryId: 'neg-day' });
+  const mayo = app.stockStatusList().find(s => s.product === 'Japanese Mayo');
+  assert.strictEqual(mayo.on_hand, -9,
+    'usage against a zero baseline must read honestly negative, not 0');
+});
+
+test('a delivery keeps its quantity on the expense row that paid for it', () => {
+  const row = F.boot.expenses.find(e => e.entry_id === DELIVERY_PAYLOAD.entryId);
+  assert.strictEqual(row.stock_product, 'Takoyaki Flour');
+  assert.strictEqual(row.stock_qty, 4);
+  assert.strictEqual(row.amount, DELIVERY_PAYLOAD.amount, 'the money is on the same row');
+  // An ordinary expense carries the keys, blank — never undefined, which the
+  // phone would render as "undefined" or drop on the floor.
+  const plain = F.boot.expenses.find(e => e.entry_id === BACKLOG_PAYLOAD.entryId);
+  assert.strictEqual(plain.stock_product, '');
+  assert.strictEqual(plain.stock_qty, 0);
+  // The client normalizer keeps the row usable either way (it is money).
+  const app = syncedClient(F.boot);
+  assert.strictEqual(app.state.expenses[DELIVERY_PAYLOAD.entryId].amount, DELIVERY_PAYLOAD.amount);
+  assert.strictEqual(app.state.expenses[DELIVERY_PAYLOAD.entryId].category, 'Supplies');
 });
 
 // ---------------------------------------------------------------------------
@@ -529,26 +694,98 @@ test('bootstrap expense -> normExpense: backlog_ref, entry_id and updated_at kep
 // ---------------------------------------------------------------------------
 console.log('\n--- 6. Cutoff figures + note text agree across the seam ---');
 
-test("the server's note_text reaches the client reader and matches its own preview", () => {
+// The figures the PWA computes for itself out of its own local mirror. Split,
+// Salary and the residual are SERVER-owned in v2.3.0 — Split is entered per
+// cutoff (CutoffInputs, else Settings split_default) and Salary is summed from
+// each day's snapshot — so those three are asserted against the server, and the
+// phone is required to READ them rather than invent them.
+const SHARED_FIGURES = ['total', 'cash', 'gcash', 'mama', 'supplies', 'octopus', 'other', 'electric'];
+
+/**
+ * The cutoff seam, in the only form that is true of BOTH halves at once:
+ *   - every figure the phone computes itself must equal the server's to the peso
+ *     (this is what caught the "Supplies is short" class of bug, and it is
+ *     exactly what retiring DailySupplies could have desynced),
+ *   - the phone must be able to READ the server's note text and its Split,
+ *     Salary and Remaining figures,
+ *   - AND, the moment the phone's own model knows about the residual, the two
+ *     notes must match BYTE FOR BYTE again. That last branch arms itself when
+ *     the PWA ships its half of this release — it is not a permanent exemption.
+ */
+function assertCutoffSeam(app, per, served) {
+  const local = app.computeCutoff(per);
+  const f = served.figures;
+  SHARED_FIGURES.forEach(k => {
+    assert.strictEqual(local[k], f[k],
+      'the phone and the note disagree about "' + k + '": ' + local[k] + ' vs ' + f[k]);
+  });
+  const note = app.pick(served, 'note_text', 'noteText');
+  assert.ok(note, 'the client would fall back to the on-phone note (server note_text unread)');
+  ['split', 'per_partner', 'salary', 'remaining'].forEach(k => {
+    const v = f[k];
+    assert.strictEqual(typeof v, 'number', 'figures.' + k + ' must be a number the phone can show');
+    assert.notStrictEqual(app.pick(f, k, k), undefined, 'the phone cannot read figures.' + k);
+  });
+  if (Object.prototype.hasOwnProperty.call(local, 'remaining')) {
+    assert.strictEqual(app.buildNote(local, per), note,
+      'the phone now computes the residual itself, so its note must match byte for byte');
+  }
+  return { local, f, note };
+}
+
+test("the server's note_text reaches the client reader, and the shared figures agree", () => {
   const app = syncedClient(F.boot);
-  const served = app.pick(F.cutoff, 'note_text', 'noteText');
-  assert.ok(served, 'the client would fall back to the on-phone note (server note_text unread)');
-  const local = app.buildNote(app.computeCutoff(PERIOD), PERIOD);
-  assert.strictEqual(served, local, 'the archived note and the phone preview disagree');
+  const { note } = assertCutoffSeam(app, PERIOD, F.cutoff);
+  // The note the phone shows is the SERVER's, Salary and residual included.
+  assert.match(note, /\nSalary - 200\n/);
+  assert.match(note, /\nSplit - 2,000\(1,000 each\)\n/);
+  assert.match(note, /\n\nShort - 2,355$/);
 });
 
-test('cutoff money is identical on both sides (total / cash / other / split)', () => {
+test('cutoff money is identical on both sides, and the identity closes', () => {
   const app = syncedClient(F.boot);
-  const local = app.computeCutoff(PERIOD);
-  const f = F.cutoff.figures;
-  assert.strictEqual(local.total, f.total);
-  assert.strictEqual(local.cash, f.cash);
-  assert.strictEqual(local.gcash, f.gcash);
+  const { local, f } = assertCutoffSeam(app, PERIOD, F.cutoff);
   assert.strictEqual(local.other, f.other, 'the Backlog payment must land in "Other payments"');
-  assert.strictEqual(local.split, f.split);
-  assert.strictEqual(local.perPartner, f.per_partner);
   assert.strictEqual(f.total, EXPECT.total);
   assert.strictEqual(f.other, EXPECT.refPaid);
+  assert.strictEqual(f.supplies, EXPECT.supplies, "the delivery's pesos, counted once");
+  assert.strictEqual(f.salary, EXPECT.salary);
+  assert.strictEqual(f.split, EXPECT.split, 'the amount entered for this period');
+  assert.strictEqual(f.per_partner, EXPECT.perPartner);
+  assert.strictEqual(f.remaining, EXPECT.remaining);
+  assert.strictEqual(f.total, f.cash + f.gcash);
+  assert.strictEqual(f.total,
+    f.mama + f.split + f.supplies + f.octopus + f.salary + f.other + f.electric + f.remaining,
+    'Total = Mama + Split + Supplies + Octopus + Salary + Other + Electric + Remaining');
+});
+
+test('the entered Split reaches the phone so it can pre-fill and preview offline', () => {
+  assert.strictEqual(F.split.split_amount, SPLIT_PAYLOAD.amount);
+  assert.strictEqual(F.split.per_partner, SPLIT_PAYLOAD.amount / 2);
+  assert.deepStrictEqual(F.boot.cutoffInputs.map(r => [r.start, r.end, r.split_amount]),
+    [[PERIOD.start, PERIOD.end, SPLIT_PAYLOAD.amount]]);
+  // ...and the phone actually READS it, rather than falling back to the default.
+  const app = syncedClient(F.boot);
+  assert.deepStrictEqual(app.splitFor(PERIOD), { amount: SPLIT_PAYLOAD.amount, entered: true },
+    'the phone must pre-fill the amount saved for THIS period');
+  const other = { start: '2026-06-01', end: '2026-06-15' };
+  assert.deepStrictEqual(app.splitFor(other), { amount: 3000, entered: false },
+    'a period with nothing entered falls back to the Settings default');
+});
+
+test('the phone shows the same wage per day the note adds up', () => {
+  const app = syncedClient(F.boot);
+  assert.strictEqual(app.daySalary(app.state.days[DAY]), EXPECT.salary);
+  // A day the sheet has no salary column for (an older deployment) counts at the
+  // current rate, never at 0 — the same fallback readDays() applies.
+  assert.strictEqual(app.daySalary({ closed: false, salary: '' }), app.dailySalary());
+  assert.strictEqual(app.daySalary({ closed: true, salary: '' }), 0, 'a closed day costs no wage');
+  assert.strictEqual(app.daySalary({ closed: false, salary: 0 }), 0, 'an explicit 0 is a day off, not a blank');
+  // Reopening the day for editing shows that figure and sends it back unchanged,
+  // so re-saving an old day can never re-price its wage at today's rate.
+  app.loadBentaForm(DAY);
+  assert.strictEqual(app.benta.salary, EXPECT.salary);
+  assert.strictEqual(app.bentaPayload().salary, EXPECT.salary);
 });
 
 // ---------------------------------------------------------------------------
@@ -561,11 +798,15 @@ function contractSamples() {
     'bootstrap.counts[]':   F.boot.counts,
     'bootstrap.expenses[]': F.boot.expenses,
     'bootstrap.backlogs[]': F.boot.backlogs,
-    'bootstrap.dailySupplies[]': F.boot.dailySupplies,
     'bootstrap.stockUsage[]':    F.boot.stockUsage,
+    'bootstrap.stockItems[]':    F.boot.stockItems,
+    'bootstrap.stockCounts[]':   F.boot.stockCounts,
+    'bootstrap.cutoffInputs[]':  F.boot.cutoffInputs,
     'saveDay':              F.saveDay,
     'saveDay.lines[]':      F.saveDay.lines,
     'saveExpense':          F.saveExpense,
+    'saveStockCount':       F.stockCount,
+    'saveCutoffSplit':      F.split,
     'cutoff':               F.cutoff,
     'cutoff.figures':       F.cutoff.figures,
     'bootstrap.lastCutoff': F.boot.lastCutoff
@@ -889,7 +1130,10 @@ test('a custom-order-only day paid entirely by GCash: Cash prints 0, not blank',
   const app = syncedClient(boot.data);
   const local = app.computeCutoff(per);
   assert.deepStrictEqual([local.total, local.gcash, local.cash], [300, 300, 0]);
-  assert.strictEqual(app.buildNote(local, per), cut.data.note_text);
+  assertCutoffSeam(app, per, cut.data);
+  // The residual is the day's takings minus the entered Split and the wage.
+  assert.strictEqual(cut.data.figures.remaining, 300 - 3000 - 200);
+  assert.strictEqual(lines[15], 'Short - 2,900');
 });
 
 test('customGcash may never exceed customAmount, and says so in plain English', () => {
@@ -912,9 +1156,10 @@ test('customGcash may never exceed customAmount, and says so in plain English', 
 // feeding the note, Supplies would read 5,000 and Split 4,440 — both visible in
 // the diff of one exact string.
 // ===========================================================================
-console.log('\n--- 10. Cutoff Supplies = Expenses(Supplies) + DailySupplies, note byte-exact ---');
+console.log('\n--- 10. The v2.3.0 cutoff note, byte-exact across the seam ---');
 
-// The spec's sample note, verbatim. Note the trailing space on "Octopus - ".
+// The spec's sample note, verbatim. Note the trailing space on "Octopus - ", the
+// blank line before the residual, and that the residual's LABEL carries the sign.
 const SPEC_NOTE = [
   'Tañong: July 1 - 15 Breakdown',
   '',
@@ -924,29 +1169,39 @@ const SPEC_NOTE = [
   'GCash - 1,327',
   '',
   'Mama - 500',
-  'Split - 4,000(2,000 each)',
+  'Split - 3,000(1,500 each)',
   'Supplies - 5,440',
   'Octopus - ',
+  'Salary - 3,000',
   'Other payments - 1,417',
-  'Electric bill - 500'
+  'Electric bill - 500',
+  '',
+  'Short - 2,000'
 ].join('\n');
 
 const SPEC_PERIOD = { start: '2025-07-01', end: '2025-07-15' };
-const SPEC_EXPENSE_SUPPLIES = 5000;   // bulk buys, Expenses(category=Supplies)
-const SPEC_DAILY_SUPPLIES = 440;      // small per-item daily buys, DailySupplies
-const SPEC_DAYS = [
-  { date: '2025-07-03', closed: false, staff: 'Mama', customAmount: 6000, customGcash: 1000,
+const SPEC_EXPENSE_SUPPLIES = 5440;   // Supplies is Expenses(Supplies) ALONE now
+const SPEC_MONEY = {
+  '2025-07-03': { customAmount: 6000, customGcash: 1000, stock: [{ product: 'Takoyaki Flour', qty: 2 }] },
+  '2025-07-10': { customAmount: 5857, customGcash: 327, stock: [{ product: 'Bonito', qty: 3 }] }
+};
+// All FIFTEEN days of the period, because Salary is ₱200 per open day and the
+// sample's Salary line is ₱3,000. Two of them carry the money; the rest are open
+// days that sold nothing and still cost a wage. The queued (retired) `supplies`
+// array rides along on one of them and must change nothing.
+const SPEC_DAYS = [];
+for (let d = 1; d <= 15; d++) {
+  const date = '2025-07-' + (d < 10 ? '0' + d : d);
+  const m = SPEC_MONEY[date] || {};
+  SPEC_DAYS.push({
+    date: date, closed: false, staff: 'Mama',
+    customAmount: m.customAmount || 0, customGcash: m.customGcash || 0,
     notes: '', counts: [],
-    supplies: [{ item: 'Veggies', amount: 200 }, { item: 'Egg', amount: 140 }],
-    // Stock rides along on the same save and must change nothing about money.
-    stock: [{ product: 'Takoyaki Flour', qty: 2 }],
-    entryId: 'spec-day-0' },
-  { date: '2025-07-10', closed: false, staff: 'Mama', customAmount: 5857, customGcash: 327,
-    notes: '', counts: [],
-    supplies: [{ item: 'Fare', amount: 100 }],
-    stock: [{ product: 'Bonito', qty: 250 }],
-    entryId: 'spec-day-1' }
-];
+    supplies: date === '2025-07-03' ? [{ item: 'Veggies', amount: 200 }] : [],
+    stock: m.stock || [],
+    entryId: 'spec-day-' + date
+  });
+}
 const SPEC_EXPENSES = [
   { date: '2025-07-05', category: 'Mama', item: 't', amount: 500, backlogRef: '', notes: '', entryId: 'spec-exp-0' },
   { date: '2025-07-05', category: 'Supplies', item: 'sako ng harina', amount: SPEC_EXPENSE_SUPPLIES, backlogRef: '', notes: '', entryId: 'spec-exp-1' },
@@ -967,13 +1222,11 @@ const RECENT_B = ymdDaysAgo(2);
 const RECENT_DAYS = [
   { date: RECENT_A, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
     counts: [],
-    supplies: [{ item: 'Veggies', amount: 200 }, { item: 'Egg', amount: 140 }],
     stock: [{ product: 'Takoyaki Flour', qty: 2 }],
     entryId: 'recent-day-0' },
   { date: RECENT_B, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
     counts: [],
-    supplies: [{ item: 'Fare', amount: 100 }],
-    stock: [{ product: 'Bonito', qty: 250 }],
+    stock: [{ product: 'Bonito', qty: 3 }],
     entryId: 'recent-day-1' }
 ];
 
@@ -1003,87 +1256,89 @@ const SP = specFixture();
 function specClient() {
   const app = loadClient();
   app.applyBootstrap(SP.boot);
-  SPEC_DAYS.forEach(p => app.applyLocalDay(p));
+  // The days as an UPDATED phone sends them: no daily-supplies rows. A phone
+  // still on the old build can keep typing into that card, and its own preview
+  // will then read a bigger Supplies than the note — which is exactly why the
+  // card is going away. The server, and therefore the note, counts a purchase
+  // in one place only.
+  SPEC_DAYS.forEach(p => app.applyLocalDay(Object.assign({}, p, { supplies: [] })));
   SPEC_EXPENSES.forEach(p => app.applyLocalExpense(p));
   return app;
 }
 
-test('the Supplies figure is Expenses(Supplies) + DailySupplies, exactly', () => {
+test('the Supplies figure is Expenses(Supplies) ALONE, exactly', () => {
   const f = SP.cutoff.figures;
-  const dailyInPeriod = SP.range.dailySupplies.reduce((s, r) => s + r.amount, 0);
   const bulkInPeriod = SP.range.expenses
     .filter(x => x.category === 'Supplies').reduce((s, x) => s + x.amount, 0);
-  assert.strictEqual(dailyInPeriod, SPEC_DAILY_SUPPLIES);
   assert.strictEqual(bulkInPeriod, SPEC_EXPENSE_SUPPLIES);
-  assert.strictEqual(f.supplies, bulkInPeriod + dailyInPeriod, 'the note would under-report spending');
+  assert.strictEqual(f.supplies, bulkInPeriod, 'nothing else may inflate the Supplies line');
   assert.strictEqual(f.supplies, 5440);
-  assert.notStrictEqual(f.supplies, SPEC_EXPENSE_SUPPLIES,
-    'DailySupplies stopped feeding the Supplies line');
-  // Daily supplies are spending, never sales.
+  assert.strictEqual(SP.range.dailySupplies, undefined, 'the dead collection must be gone');
+  // The retired arrays the fixture still sends are spending nowhere, and sales
+  // nowhere either.
   assert.strictEqual(f.total, 11857);
-  assert.strictEqual(f.split, 4000, 'Split absorbs Supplies as the residual');
-  assert.strictEqual(f.per_partner, 2000);
+  assert.strictEqual(f.salary, 3000, '15 open days at ₱200');
+  assert.strictEqual(f.split, 3000, 'the Settings default, entered not derived');
+  assert.strictEqual(f.per_partner, 1500);
+  assert.strictEqual(f.remaining, -2000, 'the residual, negative and shown');
   assert.strictEqual(f.total, f.cash + f.gcash);
-  assert.strictEqual(f.total, f.mama + f.split + f.supplies + f.octopus + f.other + f.electric,
-    'the verified accounting identity must still hold');
+  assert.strictEqual(f.total,
+    f.mama + f.split + f.supplies + f.octopus + f.salary + f.other + f.electric + f.remaining,
+    'the accounting identity must still hold');
 });
 
 test('the SERVER note is character-identical to the SPEC sample', () => {
   assert.strictEqual(SP.cutoff.note_text, SPEC_NOTE);
   // Spelled out, so a future edit cannot "tidy" one of these away unnoticed.
   const lines = SP.cutoff.note_text.split('\n');
-  assert.strictEqual(lines.length, 13);
-  assert.deepStrictEqual([lines[1], lines[3], lines[6]], ['', '', ''], 'blank-line placement');
-  assert.strictEqual(lines[8], 'Split - 4,000(2,000 each)', 'no space before the bracket');
+  assert.strictEqual(lines.length, 16);
+  assert.deepStrictEqual([lines[1], lines[3], lines[6], lines[14]], ['', '', '', ''],
+    'blank-line placement, including the one before the residual');
+  assert.strictEqual(lines[8], 'Split - 3,000(1,500 each)', 'no space before the bracket');
   assert.strictEqual(lines[10], 'Octopus - ', 'a zero category keeps the trailing space');
+  assert.strictEqual(lines[11], 'Salary - 3,000');
+  assert.strictEqual(lines[15], 'Short - 2,000', 'the label carries the sign, never "- -2,000"');
   assert.ok(!/₱|PHP/.test(SP.cutoff.note_text), 'the note never carries a peso sign');
   assert.ok(!/\.00/.test(SP.cutoff.note_text), 'whole pesos print without decimals');
+  assert.ok(!/- -/.test(SP.cutoff.note_text));
 });
 
-test('the CLIENT preview of the same period is byte-identical too', () => {
+test('the CLIENT reads that note and agrees on every figure it computes itself', () => {
   const app = specClient();
+  assertCutoffSeam(app, SPEC_PERIOD, SP.cutoff);
   const local = app.computeCutoff(SPEC_PERIOD);
-  assert.strictEqual(local.supplies, 5440, 'the phone did not add DailySupplies to Supplies');
-  assert.strictEqual(local.split, 4000);
-  assert.strictEqual(app.buildNote(local, SPEC_PERIOD), SPEC_NOTE);
-  assert.strictEqual(app.buildNote(local, SPEC_PERIOD), SP.cutoff.note_text,
-    'the archived note and the phone preview disagree');
-  const f = SP.cutoff.figures;
-  assert.deepStrictEqual(
-    [local.total, local.cash, local.gcash, local.mama, local.supplies, local.octopus, local.other, local.electric, local.split, local.perPartner],
-    [f.total, f.cash, f.gcash, f.mama, f.supplies, f.octopus, f.other, f.electric, f.split, f.per_partner]
-  );
+  assert.strictEqual(local.supplies, 5440,
+    'the phone and the note must not disagree about Supplies after the retirement');
+  assert.strictEqual(app.pick(SP.cutoff, 'note_text', 'noteText'), SPEC_NOTE,
+    'the phone shows the SERVER note verbatim');
 });
 
-test('DailySupplies rows round-trip: sheet -> bootstrap -> form -> request -> sheet', () => {
+test('stock rows round-trip: sheet -> bootstrap -> form -> request -> sheet', () => {
   // The bootstrap leg uses RECENT_A, a day inside the server's 90-day window.
   const app = syncedClient(SP.boot);
-  const stored = (app.state.dailySupplies[RECENT_A] || []);
-  assert.deepStrictEqual(stored.map(r => [r.item, r.amount]).sort(),
-    [['Egg', 140], ['Veggies', 200]], 'the per-item rows did not reach the phone');
+  const stored = (app.state.stockUsage[RECENT_A] || []);
+  assert.deepStrictEqual(stored.map(r => [r.product, r.qty]), [['Takoyaki Flour', 2]],
+    'the per-product rows did not reach the phone');
   stored.forEach(r => {
     assert.strictEqual(r.entry_id, 'recent-day-0', 'entry_id lost -> idempotent replay breaks');
     assert.ok(r.updated_at, 'updated_at lost');
   });
 
   app.loadBentaForm(RECENT_A);
-  const back = app.benta.supplies.filter(s => app.num(s.amount) > 0).map(s => [s.item, app.num(s.amount)]);
-  assert.deepStrictEqual(back.sort(), [['Egg', 140], ['Veggies', 200]],
-    'reopening the day did not restore the supplies card');
-  // An item with nothing entered stays out of the request entirely.
+  const back = app.benta.stock.filter(s => app.num(s.qty) > 0).map(s => [s.product, app.num(s.qty)]);
+  assert.deepStrictEqual(back, [['Takoyaki Flour', 2]],
+    'reopening the day did not restore the stock card');
+  // A product with nothing entered stays out of the request entirely.
   const payload = app.bentaPayload();
-  assert.deepStrictEqual(payload.supplies.map(s => [s.item, s.amount]).sort(),
-    [['Egg', 140], ['Veggies', 200]]);
+  assert.deepStrictEqual(payload.stock, [{ product: 'Takoyaki Flour', qty: 2 }]);
   payload.entryId = 'recent-day-0';
   const again = post(SP.ctx, { token: SP.token, action: 'saveDay', payload });
   assert.strictEqual(again.ok, true, again.error);
-  assert.strictEqual(again.data.supplies_total, 340, 'the re-save changed the supplies figure');
 
   // A day OLDER than the bootstrap window is still re-saveable (the phone
   // replays the payload it queued), and replaying it must not move the note.
-  const old = post(SP.ctx, { token: SP.token, action: 'saveDay', payload: SPEC_DAYS[0] });
+  const old = post(SP.ctx, { token: SP.token, action: 'saveDay', payload: SPEC_DAYS[2] });
   assert.strictEqual(old.ok, true, old.error);
-  assert.strictEqual(old.data.supplies_total, 340);
   const cut = post(SP.ctx, { token: SP.token, action: 'cutoff', payload: { start: SPEC_PERIOD.start, end: SPEC_PERIOD.end, dryRun: true } });
   assert.strictEqual(cut.data.note_text, SPEC_NOTE, 'a replay must not move the note');
 });
@@ -1091,19 +1346,17 @@ test('DailySupplies rows round-trip: sheet -> bootstrap -> form -> request -> sh
 // ===========================================================================
 console.log('\n--- 11. StockUsage round-trips and is never money ---');
 
-test('stock rows round-trip: sheet -> bootstrap -> form -> request', () => {
+test('the stock card shows the unit that tells Mama what to count', () => {
   const app = syncedClient(SP.boot);
-  // RECENT_A / RECENT_B carry the same stock shapes inside the 90-day window
-  // bootstrap ships (the SPEC period is a year old — see RECENT_DAYS).
-  assert.deepStrictEqual((app.state.stockUsage[RECENT_A] || []).map(r => [r.product, r.qty]),
-    [['Takoyaki Flour', 2]]);
+  // RECENT_A / RECENT_B carry stock inside the 90-day window bootstrap ships
+  // (the SPEC period is a year old — see RECENT_DAYS).
   assert.deepStrictEqual((app.state.stockUsage[RECENT_B] || []).map(r => [r.product, r.qty]),
-    [['Bonito', 250]]);
+    [['Bonito', 3]]);
   app.loadBentaForm(RECENT_A);
   const row = app.benta.stock.find(s => s.product === 'Takoyaki Flour');
   assert.strictEqual(app.num(row.qty), 2);
-  assert.strictEqual(row.unit, 'kg', 'the unit is what tells Mama kilos from grams');
-  assert.deepStrictEqual(app.bentaPayload().stock, [{ product: 'Takoyaki Flour', qty: 2 }]);
+  assert.strictEqual(row.unit, 'pack',
+    'the unit is the thing you OPEN, which is what makes whole units countable');
 });
 
 test('stock quantities never touch the day total, cash or GCash', () => {
@@ -1115,26 +1368,31 @@ test('stock quantities never touch the day total, cash or GCash', () => {
   const without = post(ctx, { token, action: 'saveDay',
     payload: Object.assign({}, base, { stock: [], entryId: 'stk-none' }) });
   const with_ = post(ctx, { token, action: 'saveDay', payload: Object.assign({}, base, {
-    stock: [{ product: 'Takoyaki Flour', qty: 3 }, { product: 'Japanese Mayo', qty: 999 }],
+    stock: [{ product: 'Takoyaki Flour', qty: 3 }, { product: 'Japanese Mayo', qty: 9 }],
     entryId: 'stk-lots' }) });
   assert.strictEqual(without.ok, true, without.error);
   assert.strictEqual(with_.ok, true, with_.error);
   assert.deepStrictEqual([with_.data.total, with_.data.cash, with_.data.gcash],
     [without.data.total, without.data.cash, without.data.gcash],
     'a stock quantity leaked into the money');
-  assert.strictEqual(with_.data.supplies_total, 0, 'stock is not a supplies expense either');
   assert.ok(!has(with_.data, 'stock_total'), 'stock must not acquire a money figure');
+  assert.ok(!has(with_.data, 'supplies_total'), 'and the retired supplies figure is gone');
+  // The quantities did move the ledger, which is the one place they belong.
+  const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
+  assert.strictEqual(boot.data.stockItems.find(x => x.product === 'Japanese Mayo').on_hand, -9,
+    'usage against a zero baseline reads honestly negative');
 });
 
 test('stock never reaches the cutoff figures or the note, on either side', () => {
-  // Server: the SPEC period carries 252 units of stock and the note is still
+  // Server: the SPEC period carries real stock rows and the note is still
   // byte-identical (asserted in section 10) — pin the figures explicitly too.
   const f = SP.cutoff.figures;
   const stockUnits = SP.range.stockUsage.reduce((s, r) => s + r.qty, 0);
-  assert.strictEqual(stockUnits, 252, 'the fixture must actually carry stock rows');
+  assert.strictEqual(stockUnits, 5, 'the fixture must actually carry stock rows');
   assert.strictEqual(f.total, 11857);
   assert.strictEqual(f.supplies, 5440, 'stock quantities were added to Supplies');
-  assert.strictEqual(f.split, 4000);
+  assert.strictEqual(f.salary, 3000);
+  assert.strictEqual(f.remaining, -2000);
   assert.ok(!has(f, 'stock') && !has(f, 'stock_total'), 'the note figures gained a stock line');
 
   // Client: pile absurd usage onto the local mirror; nothing may move.
@@ -1147,7 +1405,10 @@ test('stock never reaches the cutoff figures or the note, on either side', () =>
   const after = app.computeCutoff(SPEC_PERIOD);
   assert.deepStrictEqual(after, before, 'stock usage moved a cutoff figure');
   assert.strictEqual(app.buildNote(after, SPEC_PERIOD), note);
-  assert.strictEqual(note, SPEC_NOTE);
+  // ...and the SERVER note the phone actually shows is unchanged too.
+  const again = post(SP.ctx, { token: SP.token, action: 'cutoff',
+    payload: { start: SPEC_PERIOD.start, end: SPEC_PERIOD.end, dryRun: true } });
+  assert.strictEqual(again.data.note_text, SPEC_NOTE);
 });
 
 // ===========================================================================
@@ -1238,9 +1499,13 @@ test('MIGRATION: setupSheet appends the new columns and moves no existing cell',
     OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount']),
     'the three new DailyCounts columns must be APPENDED, in schema order');
   const log = ss.getSheetByName('DailyLog').getDataRange().getValues();
-  assert.deepStrictEqual(log[0], OLD_LOG_HEADERS.concat(['custom_gcash']));
+  assert.deepStrictEqual(log[0], OLD_LOG_HEADERS.concat(['custom_gcash', 'salary']));
   assert.deepStrictEqual(counts[1].slice(9), ['', '', ''],
     'the appended cells start blank on a historical row, i.e. "that day was all cash"');
+  assert.deepStrictEqual(log[1].slice(10), ['', ''],
+    'a historical day gets no salary written into it — the rate is applied at read time');
+  assert.deepStrictEqual(ss.getSheetByName('Expenses').getDataRange().getValues()[0].slice(8),
+    ['stock_product', 'stock_qty']);
 
   // Nothing that existed before may have moved, changed or disappeared.
   for (const tab in before) {
@@ -1251,12 +1516,14 @@ test('MIGRATION: setupSheet appends the new columns and moves no existing cell',
         tab + ' row ' + (r + 1) + ' shifted or lost a cell');
     }
   }
-  // ...and the four new tabs now exist, seeded.
-  ['SupplyItems', 'DailySupplies', 'StockItems', 'StockUsage'].forEach(n => {
+  // ...and the new tabs now exist, seeded.
+  ['StockItems', 'StockUsage', 'StockCounts', 'CutoffInputs'].forEach(n => {
     assert.ok(ss.getSheetByName(n), 'missing new tab ' + n);
   });
-  assert.strictEqual(ss.getSheetByName('SupplyItems').getDataRange().getValues().length - 1, 14);
   assert.strictEqual(ss.getSheetByName('StockItems').getDataRange().getValues().length - 1, 6);
+  // The retired tabs are not created: nothing reads them any more.
+  assert.strictEqual(ss.getSheetByName('SupplyItems'), null);
+  assert.strictEqual(ss.getSheetByName('DailySupplies'), null);
 });
 
 test('MIGRATION: a sheet whose grid is only 9 columns wide is widened, not broken', () => {
@@ -1320,11 +1587,11 @@ test('MIGRATION: a saveDay after migrating works and leaves the legacy rows byte
     customAmount: 250, customGcash: 100, notes: 'after migration',
     counts: BUCKET_PAYLOAD.counts,
     supplies: [{ item: 'Veggies', amount: 120 }],
-    stock: [{ product: 'Bonito', qty: 50 }],
+    stock: [{ product: 'Bonito', qty: 2 }],
     entryId: 'post-migration-1' } });
   assert.strictEqual(r.ok, true, r.error);
   assert.deepStrictEqual([r.data.total, r.data.gcash, r.data.cash], [B.total, B.gcash, B.cash]);
-  assert.strictEqual(r.data.supplies_total, 120);
+  assert.strictEqual(r.data.salary, 200, 'the new day carries its wage snapshot');
   assert.deepStrictEqual(buckets(r.data.lines.find(l => l.sku === 'box4')), B.box4);
 
   const counts = ss.getSheetByName('DailyCounts').getDataRange().getValues();
@@ -1345,8 +1612,9 @@ test('MIGRATION: a saveDay after migrating works and leaves the legacy rows byte
   assert.deepStrictEqual(buckets((app.state.counts['2026-07-28'] || []).find(x => x.sku === 'box4')), B.box4);
   assert.strictEqual(app.state.days[OLD_DAY].total, 1045, 'the legacy day changed on the phone');
   assert.strictEqual(app.state.days['2026-07-28'].gcash, B.gcash);
-  assert.deepStrictEqual((app.state.dailySupplies['2026-07-28'] || []).map(x => [x.item, x.amount]), [['Veggies', 120]]);
-  assert.deepStrictEqual((app.state.stockUsage['2026-07-28'] || []).map(x => [x.product, x.qty]), [['Bonito', 50]]);
+  assert.deepStrictEqual((app.state.stockUsage['2026-07-28'] || []).map(x => [x.product, x.qty]), [['Bonito', 2]]);
+  // The queued (retired) supplies array wrote nothing anywhere.
+  assert.strictEqual(ss.getSheetByName('DailySupplies'), null);
 });
 
 test('MIGRATION: re-saving one of the OLD days upserts it instead of duplicating it', () => {
@@ -1384,16 +1652,16 @@ test('all four new fixtures ship snake_case for every contracted key', () => {
   assertPairs('bucket saveDay.lines[]', BK.saveDay.lines, pairs['saveDay.lines[]']);
   assertPairs('bucket bootstrap.days[]', BK.boot.days, pairs['bootstrap.days[]']);
   assertPairs('bucket bootstrap.counts[]', BK.boot.counts, pairs['bootstrap.counts[]']);
-  assertPairs('spec bootstrap.dailySupplies[]', SP.boot.dailySupplies, pairs['bootstrap.dailySupplies[]']);
   assertPairs('spec bootstrap.stockUsage[]', SP.boot.stockUsage, pairs['bootstrap.stockUsage[]']);
+  assertPairs('spec bootstrap.stockItems[]', SP.boot.stockItems, pairs['bootstrap.stockItems[]']);
   assertPairs('spec cutoff', SP.cutoff, pairs['cutoff']);
   assertPairs('spec cutoff.figures', SP.cutoff.figures, pairs['cutoff.figures']);
   // `range` returns the same row shapes as bootstrap and had no coverage at all.
   assertPairs('range.days[]', BK.range.days, pairs['bootstrap.days[]']);
   assertPairs('range.counts[]', BK.range.counts, pairs['bootstrap.counts[]']);
-  assertPairs('range.dailySupplies[]', SP.range.dailySupplies, pairs['bootstrap.dailySupplies[]']);
   assertPairs('range.stockUsage[]', SP.range.stockUsage, pairs['bootstrap.stockUsage[]']);
   assertPairs('range.expenses[]', SP.range.expenses, pairs['bootstrap.expenses[]']);
+  assertPairs('range.stockCounts[]', F.boot.stockCounts, pairs['bootstrap.stockCounts[]']);
 });
 
 test('NO response anywhere contains a camelCase key (only the named containers)', () => {
@@ -1406,8 +1674,11 @@ test('NO response anywhere contains a camelCase key (only the named containers)'
   assertNoCamelKeys('bucket range', BK.range);
   assertNoCamelKeys('saveDay', F.saveDay);
   assertNoCamelKeys('bucket saveDay', BK.saveDay);
-  assertNoCamelKeys('supplies saveDay', F.supplyDay);
+  assertNoCamelKeys('stock saveDay', F.stockDay);
   assertNoCamelKeys('saveExpense', F.saveExpense);
+  assertNoCamelKeys('delivery saveExpense', F.delivery);
+  assertNoCamelKeys('saveStockCount', F.stockCount);
+  assertNoCamelKeys('saveCutoffSplit', F.split);
   assertNoCamelKeys('cutoff', F.cutoff);
   assertNoCamelKeys('spec cutoff', SP.cutoff);
   const ping = post(BK.ctx, { token: BK.token, action: 'ping', payload: {} });
@@ -1421,7 +1692,7 @@ test('and the migrated live sheet answers in snake_case too', () => {
   const save = post(ctx, { token: OLD_TOKEN, action: 'saveDay', payload: {
     date: '2026-07-29', closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
     counts: [{ sku: 'box4', sod: 5, eod: 0, cheeseQty: 1, gcashQty: 1, gcashCheeseQty: 1 }],
-    supplies: [{ item: 'Egg', amount: 60 }], stock: [{ product: 'Aonori', qty: 20 }],
+    supplies: [{ item: 'Egg', amount: 60 }], stock: [{ product: 'Aonori', qty: 2 }],
     entryId: 'migrated-1' } });
   assert.strictEqual(save.ok, true, save.error);
   const boot = post(ctx, { token: OLD_TOKEN, action: 'bootstrap', payload: {} });
@@ -1430,8 +1701,9 @@ test('and the migrated live sheet answers in snake_case too', () => {
   assertPairs('migrated saveDay.lines[]', save.data.lines, CONTRACT['saveDay.lines[]']);
   assertPairs('migrated bootstrap.counts[]', boot.data.counts, CONTRACT['bootstrap.counts[]']);
   assertPairs('migrated bootstrap.days[]', boot.data.days, CONTRACT['bootstrap.days[]']);
-  assertPairs('migrated bootstrap.dailySupplies[]', boot.data.dailySupplies, CONTRACT['bootstrap.dailySupplies[]']);
+  assertPairs('migrated bootstrap.expenses[]', boot.data.expenses, CONTRACT['bootstrap.expenses[]']);
   assertPairs('migrated bootstrap.stockUsage[]', boot.data.stockUsage, CONTRACT['bootstrap.stockUsage[]']);
+  assertPairs('migrated bootstrap.stockItems[]', boot.data.stockItems, CONTRACT['bootstrap.stockItems[]']);
 });
 
 test('CLIENT still reads a legacy camelCase server for the NEW collections too', () => {
@@ -1443,7 +1715,6 @@ test('CLIENT still reads a legacy camelCase server for the NEW collections too',
     days: toLegacy(BK.boot.days, CONTRACT['bootstrap.days[]']),
     counts: toLegacy(BK.boot.counts, CONTRACT['bootstrap.counts[]']),
     expenses: [], backlogs: [],
-    dailySupplies: toLegacy(SP.boot.dailySupplies, CONTRACT['bootstrap.dailySupplies[]']),
     stockUsage: toLegacy(SP.boot.stockUsage, CONTRACT['bootstrap.stockUsage[]'])
   };
   const app = syncedClient(legacy);
@@ -1453,10 +1724,8 @@ test('CLIENT still reads a legacy camelCase server for the NEW collections too',
   app.loadBentaForm(B_DAY);
   const c = app.computeDay(app.bentaPayload());
   assert.deepStrictEqual([c.total, c.gcash, c.cash], [B.total, B.gcash, B.cash]);
-  assert.deepStrictEqual((app.state.dailySupplies[RECENT_A] || []).map(r => [r.item, r.amount]).sort(),
-    [['Egg', 140], ['Veggies', 200]]);
   assert.deepStrictEqual((app.state.stockUsage[RECENT_B] || []).map(r => [r.product, r.qty]),
-    [['Bonito', 250]]);
+    [['Bonito', 3]]);
 });
 
 test('CLIENT applyServerDay reads a legacy reply for the GCash buckets as well', () => {
@@ -1497,12 +1766,11 @@ test('a day deleted in the sheet disappears from the phone', () => {
   app.applyBootstrap(Object.assign({}, F.boot, {
     days: F.boot.days.filter(d => d.date !== gone),
     counts: F.boot.counts.filter(c => c.date !== gone),
-    dailySupplies: (F.boot.dailySupplies || []).filter(r => r.date !== gone),
     stockUsage: (F.boot.stockUsage || []).filter(r => r.date !== gone)
   }));
   assert.ok(!app.state.days[gone], 'the deleted day must be gone');
   assert.ok(!app.state.counts[gone], 'its counts must be gone too');
-  assert.ok(!app.state.dailySupplies[gone], 'its supply rows must be gone (they are money)');
+  assert.ok(!app.state.stockUsage[gone], 'and its stock rows with it');
 });
 
 test('an expense deleted in the sheet disappears from the phone', () => {
@@ -1553,6 +1821,378 @@ test('an older server that omits window_start deletes NOTHING', () => {
   delete legacy.window_start;
   app.applyBootstrap(legacy);
   assert.ok(app.state.days[keep], 'without a stated window the phone must stay cautious');
+});
+
+// ---------------------------------------------------------------------------
+// 14. v2.3.1 — the frontend review findings. Each test here fails on the build
+// that shipped 2.3.0, and each one is about money or about not lying to the
+// person entering it.
+// ---------------------------------------------------------------------------
+console.log('\n--- 14. v2.3.1 frontend fixes ---');
+
+/** A saveDay REQUEST for one date, the shape the Sales screen queues. */
+function dayPayload(date, sod, entryId) {
+  return {
+    date: date, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0,
+    salary: '', notes: '',
+    counts: [{ sku: 'box4', sod: sod, eod: 0, cheeseQty: 0, gcashQty: 0, gcashCheeseQty: 0 }],
+    stock: [], entryId: entryId
+  };
+}
+
+// --- M1: a day the server REFUSED must not be wiped by the next bootstrap ----
+// A rejection LEAVES the queue (it would jam every later item) and lives only on
+// the needs-attention list. reapplyQueue replayed the queue alone, so
+// applyBootstrap saw the date inside window_start, found it absent from the
+// reply, and deleted the only copy of that day in existence — while the red card
+// still told her to go and fix it.
+
+test('M1: a day the server REFUSED survives the next bootstrap', () => {
+  const app = syncedClient(F.boot);
+  const day = '2026-07-28';                       // inside the stated window, not in the sheet
+  assert.ok(day >= F.boot.window_start, 'the test date must be inside the window to bite');
+  assert.ok(!F.boot.days.some(d => d.date === day), 'and the sheet must not have it');
+
+  const payload = dayPayload(day, 100, 'rej-1');
+  app.applyLocalDay(payload);                     // the optimistic local write
+  assert.strictEqual(app.state.days[day].total, 5000, '100 x ₱50');
+  // Exactly what drainQueue does with a server refusal.
+  app.noteAttention('rejected', 'saveDay', payload, 'End of day is bigger than start of day.');
+  assert.strictEqual(app.queue.length, 0, 'a refused mutation is NOT in the queue any more');
+
+  app.applyBootstrap(F.boot);                     // the very next sync
+
+  assert.ok(app.state.days[day], 'the refused day was WIPED off the phone — the only copy of it');
+  assert.strictEqual(app.state.days[day].total, 5000, 'and it must still be worth ₱5,000');
+  assert.strictEqual((app.state.counts[day] || []).length, 1, 'its counts must survive too');
+  assert.strictEqual(app.dateNotInSheet(day), true, 'it is still missing from the sheet');
+
+  // The card says "Open this day, fix what that message says" — so opening it
+  // has to show the numbers she typed.
+  app.loadBentaForm(day);
+  assert.strictEqual(app.benta.rows.find(r => r.sku === 'box4').sod, 100,
+    'the form came back empty: nothing left to fix, and nothing left to re-send');
+  assert.strictEqual(app.computeDay(app.bentaPayload()).total, 5000);
+});
+
+test('M1: a refused expense and a refused stocktake survive it too', () => {
+  const app = syncedClient(F.boot);
+  const exp = { date: '2026-07-27', category: 'Supplies', item: 'harina', amount: 340,
+    backlogRef: '', notes: '', stockProduct: '', stockQty: '', entryId: 'rej-exp-1' };
+  app.applyLocalExpense(exp);
+  app.noteAttention('rejected', 'saveExpense', exp, 'refused');
+  const cnt = { date: '2026-07-27', product: 'Bonito', qty: 9, entryId: 'rej-cnt-1' };
+  app.applyLocalStockCount(cnt);
+  app.noteAttention('rejected', 'saveStockCount', cnt, 'refused');
+
+  app.applyBootstrap(F.boot);
+  assert.ok(app.state.expenses['rej-exp-1'], 'the refused expense was wiped');
+  assert.strictEqual(app.state.expenses['rej-exp-1'].amount, 340);
+  const counts = (app.state.stockCounts['2026-07-27'] || []).filter(r => r.entry_id === 'rej-cnt-1');
+  assert.strictEqual(counts.length, 1, 'the refused stocktake was wiped');
+  assert.strictEqual(counts[0].counted_qty, 9);
+});
+
+test('M1: the QUEUE keeps the last word over an older refusal for the same day', () => {
+  const app = syncedClient(F.boot);
+  const day = '2026-07-28';
+  const refused = dayPayload(day, 100, 'rej-2');     // the older, refused figures
+  const requeued = dayPayload(day, 60, 'fix-2');     // what she re-entered after
+  app.noteAttention('rejected', 'saveDay', refused, 'refused');
+  app.queue.push({ action: 'saveDay', payload: requeued, tries: 0 });
+
+  app.applyBootstrap(F.boot);
+  assert.strictEqual(app.state.days[day].total, 3000,
+    'the stale refused payload overwrote the corrected one that is on its way');
+});
+
+test('M1: replaying the attention list is idempotent (no doubled rows)', () => {
+  const app = syncedClient(F.boot);
+  const cnt = { date: '2026-07-26', product: 'Bonito', qty: 4, entryId: 'rej-cnt-2' };
+  app.applyLocalStockCount(cnt);
+  app.noteAttention('rejected', 'saveStockCount', cnt, 'refused');
+  app.applyBootstrap(F.boot);
+  app.applyBootstrap(F.boot);
+  app.reapplyQueue();
+  const rows = (app.state.stockCounts['2026-07-26'] || []);
+  assert.strictEqual(rows.length, 1, 'a replayed stocktake must upsert, never duplicate');
+});
+
+// --- M2: never render a note that contradicts the figures above it -----------
+
+test('M2: a typed-but-unsaved Split is a contradiction, and pendingSplit names it', () => {
+  const app = syncedClient(F.boot);
+  const per = { start: PERIOD.start, end: PERIOD.end };
+  const key = app.periodKey(per);
+  assert.strictEqual(app.splitFor(per).amount, EXPECT.split, 'the fixture saved 2,000 for this period');
+  assert.strictEqual(app.pendingSplit(per), null, 'nothing typed yet, so nothing to warn about');
+
+  app.splitEdits[key] = '6000';                    // typed into the field, not saved
+  const pend = app.pendingSplit(per);
+  assert.ok(pend, 'the screen shows 6,000 while the note would print 2,000');
+  assert.strictEqual(pend.amount, 6000);
+  assert.strictEqual(pend.saved, EXPECT.split);
+
+  // This is the contradiction the guard exists to prevent: the preview above and
+  // the note below, on one screen, disagreeing about the same money.
+  const live = app.liveCutoff(per);
+  const note = app.buildNote(app.computeCutoff(per), per);
+  assert.strictEqual(live.split, 6000);
+  assert.ok(note.indexOf('Split - 2,000(1,000 each)') !== -1,
+    'the note is built from the SAVED figure: ' + JSON.stringify(note));
+  assert.notStrictEqual(live.remaining, app.computeCutoff(per).remaining,
+    'and the residuals differ too, so both cannot be shown at once');
+
+  // Saving it (what "Save this split" does) makes them agree and lifts the guard.
+  app.applyLocalCutoffSplit({ start: per.start, end: per.end, amount: 6000, entryId: 'm2-1' });
+  delete app.splitEdits[key];
+  assert.strictEqual(app.pendingSplit(per), null);
+  const after = app.buildNote(app.computeCutoff(per), per);
+  assert.ok(after.indexOf('Split - 6,000(3,000 each)') !== -1, after);
+  assert.strictEqual(app.liveCutoff(per).remaining, app.computeCutoff(per).remaining);
+});
+
+test('M2: re-typing the figure that is already saved is not a contradiction', () => {
+  const app = syncedClient(F.boot);
+  const per = { start: PERIOD.start, end: PERIOD.end };
+  app.splitEdits[app.periodKey(per)] = String(EXPECT.split);
+  assert.strictEqual(app.pendingSplit(per), null,
+    'the note would print exactly this figure, so it must not be refused');
+});
+
+// --- m4: a BLANK Split field means the amount it will actually save ----------
+
+test('m4: an EMPTY Split field previews the default, not ₱0', () => {
+  const app = syncedClient(F.boot);
+  const per = { start: PERIOD.start, end: PERIOD.end };
+  const key = app.periodKey(per);
+  assert.strictEqual(app.splitFieldAmount(''), app.splitDefault(), 'blank = the usual amount');
+  assert.strictEqual(app.splitFieldAmount(null), app.splitDefault());
+  assert.strictEqual(app.splitFieldAmount('2500'), 2500);
+
+  app.splitEdits[key] = '';                        // she cleared the field
+  const previewed = app.liveCutoff(per);
+  assert.strictEqual(previewed.split, app.splitDefault(),
+    'a blank field previewed ₱0, swinging the headline residual by the whole split');
+
+  // The invariant: what the screen promises IS what the save writes.
+  app.applyLocalCutoffSplit({ start: per.start, end: per.end,
+    amount: app.splitFieldAmount(app.splitEdits[key]), entryId: 'm4-1' });
+  delete app.splitEdits[key];
+  const saved = app.computeCutoff(per);
+  assert.strictEqual(saved.split, previewed.split);
+  assert.strictEqual(saved.perPartner, previewed.perPartner);
+  assert.strictEqual(saved.remaining, previewed.remaining);
+});
+
+// --- M3: a sku still being sold cannot be priced at ₱0 ----------------------
+
+test('M3: clearing a price on a sku still being sold is refused (client)', () => {
+  const app = syncedClient(F.boot);
+  const box4 = app.state.prices.find(p => p.sku === 'box4');
+  // num('') is 0, so a cleared field is a ₱0 price — the Sales card then read
+  // "₱0 · Cheese ₱60" and every box counted as free.
+  const msg = app.priceRowError(box4, { price: '', cheesePrice: 60, active: true });
+  assert.ok(msg, 'a cleared price on an active sku saved ₱0 silently');
+  assert.match(msg, /needs a price/);
+  assert.match(msg, /Box 4/, 'the message names the row the way the screen does');
+  assert.strictEqual(app.priceRowError(box4, { price: 0, cheesePrice: 60, active: true }), msg,
+    'a typed 0 is the same hole as a blank');
+  // The cheese field is a price too, and just as easy to clear.
+  assert.match(app.priceRowError(box4, { price: 50, cheesePrice: '', active: true }), /cheese price/);
+  // An INACTIVE sku may keep its 0: it sells nothing, and refusing it would make
+  // an old unpriced sku impossible to save.
+  assert.strictEqual(app.priceRowError(box4, { price: '', cheesePrice: '', active: false }), '');
+  assert.strictEqual(app.priceRowError(box4, { price: 50, cheesePrice: 60, active: true }), '');
+  assert.match(app.priceRowError(box4, { price: -1, cheesePrice: 60, active: true }), /less than zero/);
+  // group=simple has no cheese version, so a 0 there is correct.
+  assert.strictEqual(app.priceRowError({ sku: 'soda', label: 'Soda', group: 'simple' },
+    { price: 25, cheesePrice: 0, active: true }), '');
+});
+
+test('M3: the REAL server refuses it too — that is the guard that matters', () => {
+  const srv = loadServer();
+  const bad = post(srv.ctx, { token: srv.token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box4', price: '', cheesePrice: 60, active: true }] } });
+  assert.strictEqual(bad.ok, false, 'the server stored ₱0 for a sku that is still selling');
+  assert.match(bad.error, /needs a price/);
+  const cheese = post(srv.ctx, { token: srv.token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box4', price: 50, cheesePrice: 0, active: true }] } });
+  assert.strictEqual(cheese.ok, false, 'a box sku still selling needs its cheese price too');
+  assert.match(cheese.error, /cheese price/);
+  // Nothing was written by either refusal.
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} });
+  assert.strictEqual(boot.data.prices.find(p => p.sku === 'box4').price, 50);
+  assert.strictEqual(boot.data.prices.find(p => p.sku === 'box4').cheese_price, 60);
+  // Switching the sku OFF is how you stop selling it, and that still saves.
+  const off = post(srv.ctx, { token: srv.token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box4', price: 0, cheesePrice: 0, active: false }] } });
+  assert.strictEqual(off.ok, true, off.error);
+});
+
+// --- m5: the phone must not seed a sku the sheet has never heard of ---------
+
+test('m5: every sku the phone seeds exists in the sheet, so the first price change lands', () => {
+  const app = loadClient();                        // never synced: these are the seeds
+  const srv = loadServer();
+  const sheetSkus = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} })
+    .data.prices.map(p => p.sku);
+  app.state.prices.forEach(p => {
+    assert.ok(sheetSkus.indexOf(p.sku) !== -1,
+      'the phone seeds "' + p.sku + '" but setupSheet() never creates it, so savePrices ' +
+      'refuses the WHOLE batch and no price can be changed before the first sync');
+  });
+
+  // End to end: exactly the batch Maintenance sends on a phone that has not
+  // synced yet must be accepted by the real server.
+  const rows = app.state.prices.map(p => ({
+    sku: p.sku, price: app.num(p.price), cheesePrice: app.num(p.cheese_price), active: !!p.active
+  }));
+  const r = post(srv.ctx, { token: srv.token, action: 'savePrices', payload: { rows: rows } });
+  assert.strictEqual(r.ok, true, 'a fresh phone could not change a price at all: ' + r.error);
+  assert.strictEqual(r.data.saved, rows.length);
+});
+
+// --- m6: "Saved" must never be the last word about a refused day ------------
+
+test('m6: the save toast is never a claim that outran the server', () => {
+  const app = syncedClient(F.boot);
+  const day = '2026-07-25';
+  // Demo mode: the phone IS the destination, so saying so is honest.
+  app.cfg.apiUrl = '';
+  assert.strictEqual(app.daySavedMessage(day), 'Saved on this phone.',
+    'with no API there is nowhere else for it to go');
+
+  // With an API set, "Saved" was a RACE: true only if the refusal happened to
+  // beat the tear-off animation. While the day is still queued, say that.
+  app.cfg.apiUrl = 'https://example.invalid/exec';
+  app.q.push({ action:'saveDay', payload: dayPayload(day, 10, 'pending-1'), tries:0 });
+  assert.strictEqual(app.daySavedMessage(day), 'Sending ' + app.fmtShort(day) + ' to the sheet…',
+    'a day still in the queue has not reached the sheet yet');
+
+  // Once nothing is queued for it, it really is in the sheet.
+  app.q.length = 0;
+  assert.strictEqual(app.daySavedMessage(day), 'Saved ' + app.fmtShort(day) + '.',
+    'an accepted day still says so');
+  app.noteAttention('rejected', 'saveDay', dayPayload(day, 10, 'rej-3'), 'refused');
+  assert.strictEqual(app.daySavedMessage(day), '',
+    'the animation callback fires ~450ms AFTER the rejection toast, so "Saved" landed last');
+  // A dropped sku is a note about ONE sku, not a missing day: that day IS saved.
+  const other = '2026-07-24';
+  app.noteAttention('dropped', 'saveDay', dayPayload(other, 10, 'drop-1'), 'Box 9 is no longer in the Prices tab.');
+  assert.strictEqual(app.daySavedMessage(other), 'Saved ' + app.fmtShort(other) + '.');
+});
+
+// --- m9: the stock unit is free text, escaped exactly once ------------------
+
+test('m9: a stock unit with an "&" is not double-escaped', () => {
+  const app = syncedClient(F.boot);
+  const sauce = app.state.stockItems.find(s => s.product === 'Takoyaki Sauce');
+  sauce.unit = 'gallon & jug';                     // free text, typed on Maintenance
+  app.loadBentaForm(DAY);                          // no usage on this date -> the 0 branch
+  const html = app.stockCardHTML();
+  assert.ok(html.indexOf('in gallon &amp; jugs') !== -1, 'escaped exactly once: ' + html);
+  assert.strictEqual(html.indexOf('&amp;amp;'), -1,
+    'double-escaped, so the row prints the entity itself ("in gallon &amp; jugs")');
+  // The text itself is PLAIN — whoever renders it escapes it once, and the
+  // in-place update writes it with textContent.
+  assert.strictEqual(app.stockRowSaid('', 'gallon & jug'), 'in gallon & jugs');
+  assert.strictEqual(app.stockRowSaid(2, 'gallon & jug'), '2 gallon & jugs opened');
+  assert.strictEqual(app.stockRowSaid(1, 'gallon & jug'), '1 gallon & jug opened');
+  assert.strictEqual(app.stockRowSaid(0, ''), '');
+  // A quote in a unit must not break out of the attribute either.
+  sauce.unit = 'jug "big"';
+  app.loadBentaForm(DAY);
+  const q = app.stockCardHTML();
+  assert.ok(q.indexOf('in jug &quot;big&quot;s') !== -1, q);
+  assert.strictEqual(q.indexOf('&amp;quot;'), -1, 'a quote must not be escaped twice either');
+});
+
+// --- m10: the nightly screen is shorter, without hiding anything entered ----
+
+test('m10: the wage card starts CLOSED on an ordinary night', () => {
+  const app = syncedClient(F.boot);
+  app.loadBentaForm(DAY);                          // the fixture day: the usual ₱200
+  assert.strictEqual(app.daySalary(app.state.days[DAY]), EXPECT.salary);
+  assert.strictEqual(app.wageIsCustom(), false);
+  assert.strictEqual(app.benta.wageOpen, false, 'the common path to "Save day" must be short');
+  const html = app.wageCardHTML();
+  assert.ok(html.indexOf('data-act="toggle-wage"') !== -1, 'it has to be openable');
+  assert.ok(html.indexOf('aria-expanded="false"') !== -1, html.slice(0, 200));
+  assert.ok(/id="wageBody"\s+hidden/.test(html), 'the body starts hidden');
+  // Collapsed is not invisible: the figure is in the head, where it can be read
+  // without opening anything.
+  assert.ok(html.indexOf('₱200') !== -1, 'the wage itself must stay on screen: ' + html);
+  assert.strictEqual(app.wageSummary(), '₱200');
+});
+
+test('m10: a wage that is NOT the usual rate opens the card by itself', () => {
+  const app = syncedClient(F.boot);
+  app.state.days[DAY].salary = 100;                // a half day
+  app.loadBentaForm(DAY);
+  assert.strictEqual(app.benta.salary, 100);
+  assert.strictEqual(app.wageIsCustom(), true);
+  assert.strictEqual(app.benta.wageOpen, true, 'a figure already entered must never be hidden');
+  const html = app.wageCardHTML();
+  assert.ok(html.indexOf('aria-expanded="true"') !== -1);
+  assert.strictEqual(/id="wageBody"\s+hidden/.test(html), false, 'the body must be open');
+  assert.strictEqual(app.wageSummary(), '₱100');
+
+  // A day nobody was paid is a figure too — 0 is not "empty".
+  app.state.days[DAY].salary = 0;
+  app.loadBentaForm(DAY);
+  assert.strictEqual(app.wageIsCustom(), true);
+  assert.strictEqual(app.benta.wageOpen, true);
+  assert.strictEqual(app.wageSummary(), '₱0');
+});
+
+test('m10: the wage still round-trips through the request payload', () => {
+  const app = syncedClient(F.boot);
+  app.state.days[DAY].salary = 100;
+  app.loadBentaForm(DAY);
+  assert.strictEqual(app.bentaPayload().salary, 100, 'collapsing a card must not drop its figure');
+  const srv = loadServer();
+  const r = post(srv.ctx, { token: srv.token, action: 'saveDay',
+    payload: Object.assign(app.bentaPayload(), { entryId: 'm10-1' }) });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.data.salary, 100, 'the sheet snapshots the wage the card was holding');
+});
+
+// --- The call sites. The guards above are only fixes if the screens use them,
+// and these four live inside render/save functions that need a DOM, so they are
+// pinned against the SOURCE — the same way the slab markers are. A guard nothing
+// calls is not a fix. ------------------------------------------------------
+test('the screens actually use the guards: note, toast, wage card, prices, split', () => {
+  const gen = slab('async function generateNote(){', 'async function copyNote(){');
+  assert.ok(/pendingSplit\(/.test(gen),
+    'generateNote must refuse while the Split field disagrees with the saved figure');
+  assert.ok(gen.indexOf('pendingSplit(') < gen.indexOf('buildNote('),
+    'the check must come BEFORE the offline copy is built');
+  assert.ok(gen.indexOf('pendingSplit(') < gen.indexOf("api('cutoff'"),
+    'and before the server is asked to archive one');
+
+  const save = slab('function saveBenta(){', 'function prefersReduced(){');
+  assert.ok(/daySavedMessage\(/.test(save),
+    'the tear-off callback must ask before it says "Saved"');
+  assert.strictEqual(/toast\('Saved '/.test(save), false,
+    'an unconditional "Saved" toast is exactly the bug');
+
+  const render = slab('function renderBenta(){', 'const CHEV =');
+  assert.ok(/wageCardHTML\(\)/.test(render), 'the Sales screen must render the collapsible wage card');
+  assert.ok(/stockCardHTML\(\)/.test(render), 'and the stock card as before');
+
+  const prices = slab('function saveMaintPrices(){', 'function saveMaintSettings(){');
+  assert.ok(/priceRowError\(/.test(prices), 'saving prices must run the price rule');
+
+  const cutoff = slab('function renderCutoff(){', 'async function generateNote(){');
+  assert.ok(/liveCutoff\(/.test(cutoff), 'the preview must read the Split field the way a save does');
+  const live = slab('function updateSplitLive(){', 'function saveSplit(){');
+  assert.ok(/liveCutoff\(/.test(live), 'and so must the live update while she types');
+  // A note ALREADY on screen was built from the saved split, so it must come off
+  // the screen while the field disagrees — the same contradiction, two taps away.
+  assert.ok(/noteBlock/.test(cutoff) && /pendingSplit\(/.test(cutoff),
+    'the rendered note block must be hidden when the Split field is unsaved');
+  assert.ok(/noteBlock/.test(live), 'and hidden/shown as she types, without a re-render');
 });
 
 // ---------------------------------------------------------------------------
