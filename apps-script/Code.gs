@@ -47,7 +47,7 @@
  * mismatched key silently arrives as undefined and turns into 0 money.
  */
 
-var VERSION = '2.1.1';
+var VERSION = '2.2.0';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------

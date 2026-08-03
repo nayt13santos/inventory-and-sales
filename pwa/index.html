@@ -188,6 +188,12 @@ select.input{ appearance:auto; }
 /* Steppers — giant +/− buttons, and a number field wide enough to read and
    tap (48px+ of usable width on a 375px phone, where two sit side by side). */
 .stepper{ display:grid; grid-template-columns:48px minmax(0,1fr) 48px; gap:4px; align-items:center; }
+/* Compact variant for the payment rows, where the stepper sits beside a label
+   instead of filling a column. Fixed width so the row cannot overflow and clip
+   its own label — full 48px touch targets kept. */
+.stepper.sm{ grid-template-columns:48px 56px 48px; }
+.stepper.sm .step-btn{ height:48px; }
+.stepper.sm .step-val{ height:48px; font-size:20px; }
 .step-btn{
   width:48px; height:52px; border-radius:14px; cursor:pointer;
   border:1.5px solid var(--line); background:var(--bg);
@@ -216,12 +222,27 @@ select.input{ appearance:auto; }
   font-size:14px; color:var(--muted); font-variant-numeric:tabular-nums; }
 .saved-hint{ color:var(--ok); font-weight:600; font-size:15px; margin:-6px 0 14px; }
 
-/* The three entered buckets (Cheese / GCash / GCash cheese) + the derived
-   plain-cash remainder, which is shown but never typed. */
-.buckets{ margin-top:12px; padding-top:12px; border-top:1px dashed var(--line); }
-.count-cell.gc > label{ color:var(--gcash); }
+/* Sold splits two ways at once — variant and payment — so the boxes are grouped
+   by HOW it was paid, and each row says WHICH variant. Position carries the
+   meaning; no label has to hide half of it. Plain regular cash is the derived
+   remainder: shown, never typed. */
+.buckets{ margin-top:14px; padding-top:12px; border-top:1px dashed var(--line); }
+.pay-intro{ font-weight:700; margin-bottom:10px; }
+.pay-group + .pay-group{ margin-top:12px; }
+.pay-head{
+  font-size:13px; font-weight:700; letter-spacing:.06em; text-transform:uppercase;
+  color:var(--muted); padding-bottom:6px; border-bottom:1px solid var(--line); margin-bottom:8px;
+}
+.pay-head.gc{ color:var(--gcash); }
+.pay-row{ display:flex; align-items:center; gap:12px; min-height:56px; }
+.pay-row + .pay-row{ margin-top:6px; }
+.pay-what{ flex:1; min-width:0; font-size:16px; }
+.pay-row.gc .pay-what{ color:var(--ink); }
+.pay-row .stepper{ flex:none; }
+.pay-note{ flex:none; font-size:13px; color:var(--muted); }
 .derived{
-  display:flex; align-items:center; justify-content:center; height:52px;
+  display:flex; align-items:center; justify-content:center;
+  min-width:56px; height:48px; padding:0 10px;
   border-radius:12px; background:var(--soft);
   font-family:var(--display); font-weight:800; font-size:22px; color:var(--deep);
   font-variant-numeric:tabular-nums;
@@ -435,7 +456,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.1.1';
+const APP_VERSION = '2.2.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -1850,23 +1871,40 @@ function skuSplitText(pr, row){
   const gcashCheese = isBox ? clampQty(row.gcashCheese, sold) : 0;
   const regular = Math.max(0, sold - cheese - gcash - gcashCheese);
   const amount = (regular + gcash) * price + (cheese + gcashCheese) * cheesePrice;
-  const parts = [];
-  if (regular) parts.push(regular + ' regular × ' + peso(price));
-  if (cheese) parts.push(cheese + ' cheese × ' + peso(cheesePrice));
-  if (gcash) parts.push(gcash + ' GCash × ' + peso(price));
-  if (gcashCheese) parts.push(gcashCheese + ' GCash cheese × ' + peso(cheesePrice));
-  return (parts.length ? parts.join('  +  ') + '  =  ' : '') + peso(amount);
+  // Read in the same two groups the steppers are arranged in, and show each
+  // group's peso subtotal — those are exactly the Cash and GCash figures on the
+  // receipt, so this line explains where the receipt's split comes from.
+  const cashAmt  = regular * price + cheese * cheesePrice;
+  const gcashAmt = gcash * price + gcashCheese * cheesePrice;
+  const side = (reg, ch) => {
+    const bits = [];
+    if (reg) bits.push(reg + ' regular');
+    if (ch) bits.push(ch + ' cheese');
+    return bits.join(' + ');
+  };
+  const groups = [];
+  if (cashAmt) groups.push('Cash: ' + side(regular, cheese) + ' = ' + peso(cashAmt));
+  if (gcashAmt) groups.push('GCash: ' + side(gcash, gcashCheese) + ' = ' + peso(gcashAmt));
+  if (!groups.length) return peso(amount);
+  return groups.join('  ·  ') + (groups.length > 1 ? '  ·  Total ' + peso(amount) : '');
 }
 
 // The row fields a stepper may write. A whitelist rather than free indexing,
 // so a sku or a stray data attribute can never reach the prototype.
 const ROW_FIELDS = { sod:'sod', eod:'eod', cheese:'cheese', gcash:'gcash', gcashCheese:'gcashCheese' };
 // The three ENTERED buckets, with the label each one shows.
+// Labels name BOTH dimensions — variant and payment — because a bare "Cheese"
+// or "GCash" is ambiguous on its own and read as a riddle in the first cut of
+// this screen. These strings are what a toast, an error and a screen reader say.
 const BUCKETS = [
-  { field:'cheese',      label:'Cheese',       gcash:false, boxOnly:true },
-  { field:'gcash',       label:'GCash',        gcash:true,  boxOnly:false },
-  { field:'gcashCheese', label:'GCash cheese', gcash:true,  boxOnly:true }
+  { field:'cheese',      label:'Cheese paid in cash',  gcash:false, boxOnly:true },
+  { field:'gcash',       label:'Regular paid by GCash', gcash:true,  boxOnly:false },
+  { field:'gcashCheese', label:'Cheese paid by GCash',  gcash:true,  boxOnly:true }
 ];
+function fieldLabel(field){
+  const b = BUCKETS.find(x => x.field === field);
+  return b ? b.label : field;
+}
 /** How many of `sold` are still unlabelled, ignoring one bucket. `isBox` is
  *  passed through because a group=simple sku has no cheese buckets at all —
  *  same rule computeDay applies, so the figures cannot disagree. */
@@ -1896,7 +1934,7 @@ function isBoxSku(sku){
 // escaped, or the tag breaks apart and the steppers stop working.
 function stepperHTML(sku, field, value, label, small){
   const s = esc(sku);
-  return '<div class="stepper" data-sku="' + s + '" data-field="' + field + '">' +
+  return '<div class="stepper' + (small ? ' sm' : '') + '" data-sku="' + s + '" data-field="' + field + '">' +
     '<button type="button" class="step-btn" data-act="step" data-dir="-1" aria-label="Subtract one: ' + esc(label) + '">−</button>' +
     '<input class="step-val" id="in-' + s + '-' + field + '" inputmode="numeric" autocomplete="off" value="' + value + '" aria-label="' + esc(label) + '">' +
     '<button type="button" class="step-btn" data-act="step" data-dir="1" aria-label="Add one: ' + esc(label) + '">+</button>' +
@@ -2049,21 +2087,28 @@ function renderBenta(){
       const sold = Math.max(0, num(row.sod) - num(row.eod));
       const isBox = pr.group === 'box';
       const sk = esc(pr.sku);   // sku is sheet data — escape it everywhere it enters markup
-      // The three entered buckets, then the derived remainder. A group=simple
-      // sku has no cheese version, so it only gets the GCash bucket.
-      let buckets = '';
-      for (const b of BUCKETS){
-        if (b.boxOnly && !isBox) continue;
-        buckets += '<div class="count-cell' + (b.gcash ? ' gc' : '') + '">' +
-          '<label for="in-' + sk + '-' + b.field + '">' + b.label + '</label>' +
-          stepperHTML(pr.sku, b.field, num(row[b.field]), b.label + ', ' + pr.label) +
+      // Payment and variant are two separate questions, so the old flat list of
+      // "Cheese / GCash / GCash cheese" read as a riddle: "Cheese" silently
+      // meant cheese paid in CASH and "GCash" silently meant REGULAR paid by
+      // GCash. Grouping by payment method and letting the row say the variant
+      // makes every box mean exactly what its two labels say.
+      const payRow = (label, inner, gc) =>
+        '<div class="pay-row' + (gc ? ' gc' : '') + '">' +
+          '<span class="pay-what">' + label + '</span>' + inner +
         '</div>';
-      }
-      // Not a <label for>: the remainder is derived, so there is no input to
-      // label — and a label pointing at a div would be inert markup.
-      buckets += '<div class="count-cell"><div class="cell-label">Regular (cash)</div>' +
+      const stepFor = (field) =>
+        stepperHTML(pr.sku, field, num(row[field]), fieldLabel(field) + ', ' + pr.label, true);
+
+      let buckets = '<div class="pay-group"><div class="pay-head">Paid in cash</div>';
+      // The remainder is derived, so there is nothing to <label for>.
+      buckets += payRow('Regular',
         '<div class="derived" id="reg-' + sk + '" aria-label="Regular boxes paid in cash, ' + esc(pr.label) + '">' +
-          rowRegular(row, isBox) + '</div></div>';
+          rowRegular(row, isBox) + '</div><span class="pay-note">the rest</span>', false);
+      if (isBox) buckets += payRow('Cheese', stepFor('cheese'), false);
+      buckets += '</div><div class="pay-group"><div class="pay-head gc">Paid by GCash</div>';
+      buckets += payRow('Regular', stepFor('gcash'), true);
+      if (isBox) buckets += payRow('Cheese', stepFor('gcashCheese'), true);
+      buckets += '</div>';
       h += '<div class="card sku-card" data-skucard="' + sk + '">' +
         '<div class="sku-head"><strong>' + esc(pr.label) + '</strong>' +
           '<span class="sku-price">' + (pr.missing ? 'Not in the Prices tab'
@@ -2080,7 +2125,9 @@ function renderBenta(){
         '<div class="sold-row">' +
           '<div class="sold-badge" id="soldbadge-' + sk + '">Sold: <b id="sold-' + sk + '">' + sold + '</b></div>' +
         '</div>' +
-        '<div class="count-grid buckets">' + buckets + '</div>' +
+        '<div class="buckets">' +
+          '<div class="pay-intro">How were they paid?</div>' + buckets +
+        '</div>' +
         // Every bucket is a SUBSET of what sold — a dearer filling, or a
         // different way of paying — so raising one only moves a box from one
         // bucket to another. Spelling all four out per row stops a stepper
@@ -2256,7 +2303,8 @@ function updateReceipt(){
     for (const l of c.lines){
       if (l.regular_qty > 0){ any = true; h += rLine(l.label + ' ×' + l.regular_qty, l.regular_qty * l.price); }
       if (l.cheese_qty > 0){ any = true; h += rLine(l.label + ' cheese ×' + l.cheese_qty, l.cheese_qty * l.cheese_price); }
-      if (l.gcash_qty > 0){ any = true; h += rLine(l.label + ' GCash ×' + l.gcash_qty, l.gcash_qty * l.price); }
+      // "GCash" alone would repeat the old ambiguity — say which variant.
+      if (l.gcash_qty > 0){ any = true; h += rLine(l.label + ' GCash regular ×' + l.gcash_qty, l.gcash_qty * l.price); }
       if (l.gcash_cheese_qty > 0){ any = true; h += rLine(l.label + ' GCash cheese ×' + l.gcash_cheese_qty, l.gcash_cheese_qty * l.cheese_price); }
     }
     if (c.custom > 0){ any = true; h += rLine('Custom order', c.custom); }
