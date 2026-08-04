@@ -74,16 +74,24 @@ button{ font:inherit; color:inherit; }
 /* Sticky day total — the figure to check against the cash in the tin while
    counting. It mirrors the receipt strip, which stays the signature element. */
 .day-strip{
-  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  display:flex; align-items:center; justify-content:space-between; gap:4px 10px;
   padding:6px 16px 7px; background:var(--bg); border-bottom:1px solid var(--line);
   font-variant-numeric:tabular-nums;
+  /* Cash + GCash + the tin can outrun 375px once the figures are four digits.
+     Wrapping keeps every figure readable; the page itself must never scroll
+     sideways for a bar that is only there to be glanced at. */
+  flex-wrap:wrap;
 }
 .day-strip .ds-total{ display:flex; align-items:baseline; gap:8px; min-width:0; }
 .day-strip .ds-lbl{ font-family:var(--display); font-weight:700; font-size:12px; letter-spacing:.1em; color:var(--muted); }
 .day-strip .ds-amt{ font-family:var(--display); font-weight:800; font-size:23px; line-height:1.1; }
-.day-strip .ds-sub{ display:flex; gap:10px; font-size:13px; color:var(--muted); white-space:nowrap; }
+.day-strip .ds-sub{ display:flex; flex-wrap:wrap; justify-content:flex-end; gap:2px 10px; font-size:13px; color:var(--muted); }
+.day-strip .ds-sub > span{ white-space:nowrap; }
 .day-strip .ds-sub b{ font-family:var(--display); font-size:15px; color:var(--ink); }
 .day-strip .ds-sub .gc b{ color:var(--gcash); }
+/* The cash tin — Cash plus the money kept out of the cutoff. Shown only on a night
+   that has some, so it never restates Cash. */
+.day-strip .ds-sub .tin b{ color:var(--deep); }
 
 /* Needs-attention card — work that is NOT in the Google Sheet. */
 .attn-card{ border:1.5px solid var(--alert); }
@@ -222,6 +230,17 @@ select.input{ appearance:auto; }
   font-size:14px; color:var(--muted); font-variant-numeric:tabular-nums; }
 .saved-hint{ color:var(--ok); font-weight:600; font-size:15px; margin:-6px 0 14px; }
 
+/* Kept OUT of the cutoff (nori). Sold and counted like anything else, so it must
+   look ordinary — one quiet badge and one short line, never a warning colour:
+   nothing is wrong, this money is simply the owner's own to settle. */
+.badge-excl{
+  flex:none; font-family:var(--display); font-weight:700; font-size:12px;
+  background:var(--soft); color:var(--deep); border-radius:8px; padding:3px 8px;
+  text-transform:uppercase; letter-spacing:.04em; white-space:nowrap;
+}
+.excl-note{ margin-top:12px; padding-top:10px; border-top:1px dashed var(--line);
+  font-size:14px; color:var(--muted); }
+
 /* Sold splits two ways at once — variant and payment — so the boxes are grouped
    by HOW it was paid, and each row says WHICH variant. Position carries the
    meaning; no label has to hide half of it. Plain regular cash is the derived
@@ -336,6 +355,11 @@ select.input{ appearance:auto; }
 .r-total .amt{ font-size:42px; line-height:1.1; }
 .r-sub{ display:flex; justify-content:space-between; font-size:16px; padding:2px 0; }
 .r-sub.gcash .r-amt{ color:var(--gcash); font-weight:700; }
+/* Money that is NOT in the TOTAL above it, printed below the totals with the one
+   line that makes the tin add up. Dashed rule so the eye sees it is outside. */
+.r-excl{ margin-top:8px; padding-top:8px; border-top:2px dashed var(--line); }
+.r-sub.excl .r-amt{ color:var(--deep); font-weight:700; }
+.r-tin{ font-size:13px; color:var(--muted); padding-top:4px; }
 .r-empty{ text-align:center; color:var(--muted); font-size:15px; padding:8px 0 12px; }
 .r-closed{ text-align:center; font-family:var(--display); font-weight:800; font-size:22px; color:var(--alert); padding:10px 0 14px; letter-spacing:.06em; }
 .r-tear{
@@ -372,6 +396,11 @@ select.input{ appearance:auto; }
 .gx-name{ font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .gx-ref{ font-size:13px; color:var(--muted); }
 .gx-amt{ font-family:var(--display); font-weight:800; font-size:18px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+
+/* Cutoff — the excluded block. Dashed, so it reads as being OUTSIDE the cards
+   above it: nothing in it is part of the cutoff or of the note. */
+.excl-card{ border:1.5px dashed var(--line); }
+.excl-card .co-row .v{ color:var(--deep); }
 
 /* Cutoff */
 .period-nav{ display:flex; align-items:center; justify-content:space-between; gap:8px; }
@@ -509,7 +538,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.3.1';
+const APP_VERSION = '2.4.1';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -559,16 +588,23 @@ function freshState(){
     settings:{ branch:'Tañong', mama_per_cutoff:500, electric_per_cutoff:500,
       partners:'Nayt, Partner', staff:'Mama',
       daily_salary:DEFAULT_DAILY_SALARY, split_default:DEFAULT_SPLIT },
-    // EXACTLY the three skus setupSheet() seeds into the Prices tab, and nothing
-    // else. A seeded sku the sheet does not have is not harmless: Maintenance
-    // sends every sku in this list, and the server refuses a price row it has no
-    // group and size for — so ONE phantom row made the whole batch refusable and
-    // no price could be changed before the first bootstrap. (Owner sells takoyaki
-    // only. A new product is a sheet job: add the Prices row, then sync.)
+    // EXACTLY the skus setupSheet() seeds into the Prices tab, and nothing else.
+    // A seeded sku the sheet does not have is not harmless: Maintenance sends
+    // every sku in this list, and the server refuses a price row it has no group
+    // and size for — so ONE phantom row made the whole batch refusable and no
+    // price could be changed before the first bootstrap. (Owner sells takoyaki
+    // and nori. A new product is a sheet job: add the Prices row, then sync.)
+    //
+    // `in_cutoff` FALSE means "sell it, count it, but keep its money out of every
+    // cutoff figure" — nori is the owner's own line of business and he settles
+    // that money himself. A row with NO in_cutoff at all counts IN (see
+    // inCutoffFlag): that is what a pre-v2.4.0 sheet, and every blank cell in it,
+    // has to mean.
     prices:[
-      { sku:'box4',   label:'Box 4',  group:'box', size:4,  price:50,  cheese_price:60,  active:true },
-      { sku:'box6',   label:'Box 6',  group:'box', size:6,  price:65,  cheese_price:80,  active:true },
-      { sku:'box10',  label:'Box 10', group:'box', size:10, price:105, cheese_price:125, active:true }
+      { sku:'box4',   label:'Box 4',  group:'box', size:4,  price:50,  cheese_price:60,  active:true, in_cutoff:true },
+      { sku:'box6',   label:'Box 6',  group:'box', size:6,  price:65,  cheese_price:80,  active:true, in_cutoff:true },
+      { sku:'box10',  label:'Box 10', group:'box', size:10, price:105, cheese_price:125, active:true, in_cutoff:true },
+      { sku:'nori',   label:'Nori',   group:'simple', size:'', price:25, cheese_price:'', active:true, in_cutoff:false }
     ],
     stockItems:  SEED_STOCK_ITEMS.map((p, i) => ({
       product:p[0], unit:p[1], active:true, sort:i+1,
@@ -615,6 +651,49 @@ function pick(o, snake, camel){
   return (v === undefined || v === null || v === '') ? o[camel] : v;
 }
 
+/**
+ * The `in_cutoff` flag, and the ONE reader in this file whose BLANK means TRUE.
+ *
+ * THIS IS NOT truthy() AND MUST NEVER BE REPLACED BY IT. truthy('') is false; a
+ * blank in_cutoff has to be TRUE, because:
+ *   - the sheet migration APPENDS the column, so every price row already on the
+ *     owner's live sheet has an EMPTY cell in it,
+ *   - a sheet not migrated yet has no such column at all (the row arrives with
+ *     no key), and
+ *   - a state_v1 written by an older build of this app has no key either.
+ * If any of those read FALSE, box4/box6/box10 would silently drop out of the
+ * cutoff: the day's total, the preview and the note would all collapse to almost
+ * nothing while every figure still looked like a perfectly good number.
+ *
+ * So the default is IN, and only an explicitly false-y value takes a sku out. An
+ * unrecognised value counts IN too: the flag's job is to remove ONE sku the owner
+ * set up on purpose, never to quietly remove money nobody asked it to.
+ * Mirrors asCutoffFlag() in Code.gs exactly.
+ */
+function inCutoffFlag(v){
+  if (v === true) return true;
+  if (v === false) return false;
+  const s = txt(v).trim().toLowerCase();
+  if (s === '') return true;                 // blank / missing key => counts IN
+  return !(s === 'false' || s === '0' || s === 'no' || s === 'n' || s === 'off');
+}
+
+/**
+ * The `in_cutoff` SNAPSHOT on one COUNT row, kept exactly as it arrived: `true`,
+ * `false`, or `''` for "this row has no snapshot".
+ *
+ * It is NOT resolved here, and that is the whole point. A count row's flag is a
+ * fact about the night it was saved (v2.4.1), so an explicit value must survive
+ * untouched — while a BLANK has to stay blank until something can answer it, which
+ * is `countInCutoff()` reading the sku's current flag at USE time. Resolving a
+ * blank in here would mean reading `state.prices` from inside a normalizer, which
+ * also runs while `state` is still being built — the same reason a day's `salary`
+ * is stored raw and resolved by `daySalary()`.
+ */
+function rawCutoffFlag(v){
+  return (v == null || v === '' || typeof v === 'object') ? '' : inCutoffFlag(v);
+}
+
 function normPrice(p){
   if (!isObj(p) || !txt(p.sku)) return null;
   const cheese = pick(p, 'cheese_price', 'cheesePrice');
@@ -625,7 +704,12 @@ function normPrice(p){
     size: (p.size == null || typeof p.size === 'object') ? '' : p.size,
     price: num(p.price),
     cheese_price: (cheese === '' || cheese == null) ? '' : num(cheese),
-    active: truthy(p.active)
+    active: truthy(p.active),
+    // FALSE = sold and counted as usual, but its money stays OUT of every cutoff
+    // figure. Read with inCutoffFlag, NOT truthy: a blank or missing value is
+    // TRUE. `pick` hands a real `false` straight through, so an excluded sku
+    // survives even from a legacy camelCase server.
+    in_cutoff: inCutoffFlag(pick(p, 'in_cutoff', 'inCutoff'))
   };
 }
 function normBacklog(b){
@@ -661,6 +745,11 @@ function normDay(r, key){
     // A pre-v2.1.0 sheet has no custom_gcash column, so it reads 0 — which is
     // exactly right for those days: nothing of the custom order was GCash.
     custom_gcash: num(pick(r, 'custom_gcash', 'customGcash')),
+    // That day's money from in_cutoff=FALSE skus. It sits BESIDE the day's money
+    // and is NEVER inside total / cash / gcash — the receipt prints it below them,
+    // because the cash tin holds Cash PLUS this. A pre-v2.4.0 row has no column at
+    // all and reads 0, which is exactly right: there was no excluded sku to sell.
+    excluded_total: num(pick(r, 'excluded_total', 'excludedTotal')),
     notes: txt(r.notes),
     entry_id: txt(pick(r, 'entry_id', 'entryId')),
     updated_at: txt(pick(r, 'updated_at', 'updatedAt'))
@@ -681,7 +770,13 @@ function normCount(c, key){
     regular_qty: num(pick(c, 'regular_qty', 'regularQty')),
     amount: num(c.amount),
     gcash_amount: num(pick(c, 'gcash_amount', 'gcashAmount')),
-    entry_id: txt(pick(c, 'entry_id', 'entryId'))
+    entry_id: txt(pick(c, 'entry_id', 'entryId')),
+    // Whether THIS row's money counted, as decided the night it was saved
+    // (v2.4.1). Kept raw — '' when the row predates the column — because a blank
+    // is answered by the sku's current flag at read time (countInCutoff), and
+    // because only a snapshot can stop a later tick of "counts in the cutoff"
+    // restating a fortnight that has already been sent.
+    in_cutoff: rawCutoffFlag(pick(c, 'in_cutoff', 'inCutoff'))
   };
 }
 // StockItems — the stock picklist AND the ledger settings behind each product.
@@ -1121,6 +1216,44 @@ function uuid(){
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function truthy(v){ return v === true || v === 1 || v === 'TRUE' || v === 'true' || v === '1'; }
 function activePrices(){ return asArr(state.prices).filter(p => isObj(p) && truthy(p.active)); }
+/** Whether a sku's money COUNTS toward the cutoff. A sku this phone has no price
+ *  row for counts IN — the same default a blank cell has, because the flag exists
+ *  to remove one sku on purpose, never to drop money by accident. */
+function skuInCutoff(sku){
+  const pr = asArr(state.prices).find(p => isObj(p) && p.sku === txt(sku));
+  return pr ? inCutoffFlag(pr.in_cutoff) : true;
+}
+/**
+ * Whether ONE SAVED COUNT ROW's money counted — read off the row's own snapshot,
+ * never off the Prices tab as it stands today. Mirrors countCutoffFlag() in
+ * Code.gs, and it is the only thing history may be classified by.
+ *
+ * Classifying saved rows by the LIVE flag let one tick in Maintenance restate a
+ * fortnight that had already been sent, in both directions: tick nori back ON and
+ * the ₱300 that `total` never contained dropped out of the excluded block too, so
+ * it existed nowhere on the screen; tick a counted sku OFF and money that IS
+ * inside `total` also appeared under "not part of this cutoff", i.e. twice, in two
+ * contradictory ways. The owner reconciles his tin against these figures.
+ *
+ * A BLANK snapshot means there is none — the row was written before v2.4.1, or by
+ * a server whose sheet has no such column — so it falls back to the sku's current
+ * flag, which is the best answer such a row can give. A sku this phone has no
+ * price row for counts IN, the same default a blank Prices cell gets.
+ */
+function countInCutoff(row){
+  const r = asObj(row);
+  if (r.in_cutoff === '' || r.in_cutoff == null) return skuInCutoff(r.sku);
+  return inCutoffFlag(r.in_cutoff);
+}
+/** group=box for a sku still on the form (a deactivated sku keeps its group).
+ *  A sku that is no longer in Prices at all counts as a box, so its cheese
+ *  buckets render and validate instead of becoming an unfixable complaint.
+ *  Lives here beside skuInCutoff: the form, the validator and the renderer all
+ *  have to answer these two questions the same way. */
+function isBoxSku(sku){
+  const pr = asArr(state.prices).find(p => isObj(p) && p.sku === txt(sku));
+  return pr ? pr.group === 'box' : true;
+}
 function activeStockItems(){ return asArr(state.stockItems).filter(s => isObj(s) && truthy(s.active)); }
 function staffList(){ return txt(asObj(state.settings).staff || 'Mama').split(',').map(s => s.trim()).filter(Boolean); }
 /** The current daily wage and the default split, from Settings. A blank or
@@ -1156,9 +1289,14 @@ function splitDefault(){
 // The server REJECTS buckets that add up to more than sold; here they are
 // clamped instead, so a half-typed row still renders a sensible receipt while
 // validateBenta() shows the same complaint inline and blocks the save.
+//
+// ONLY in_cutoff skus reach total/gcash (v2.4.0), exactly as apiSaveDay does it.
+// An excluded sku (nori) is counted like anything else and its money is summed
+// into `excluded`, which goes nowhere near total, cash or gcash — so it reaches no
+// cutoff figure and no line of the note. The receipt prints it BELOW the totals.
 function computeDay(p){
   const lines = [];
-  let sum = 0, gsum = 0;
+  let sum = 0, gsum = 0, xsum = 0;
   if (!p.closed){
     for (const c of asArr(p.counts)){
       const pr = asArr(state.prices).find(x => isObj(x) && x.sku === c.sku);
@@ -1167,11 +1305,21 @@ function computeDay(p){
       const eod = Math.max(0, num(c.eod));
       const sold = Math.max(0, sod - eod);
       const isBox = pr.group === 'box';
+      const inCutoff = inCutoffFlag(pr.in_cutoff);
       const price = num(pr.price), cheesePrice = num(pr.cheese_price);
-      // group=simple has no cheese version at all, so both cheese buckets are 0.
-      const cheese = isBox ? clampQty(c.cheeseQty, sold) : 0;
-      const gcashQty = clampQty(c.gcashQty, sold);
-      const gcashCheese = isBox ? clampQty(c.gcashCheeseQty, sold) : 0;
+      // An EXCLUDED sku has NO variant and NO payment split at all — not cheese,
+      // not GCash, not GCash cheese — so ALL THREE buckets are 0 here, exactly as
+      // apiSaveDay refuses all three (v2.4.1). Guarding gcashQty alone was not
+      // enough: a cheese count on an excluded sku was priced at the CHEESE price
+      // into `excluded`, so the receipt showed money the sheet would never store.
+      // Its card has no bucket stepper of any kind, so a figure here can only come
+      // from a stale draft or a hand-edited sheet row; bentaPayload sends the same
+      // 0s, and validateBenta refuses a non-zero one in the server's own words
+      // rather than letting the money change quietly.
+      // (group=simple has no cheese version either, hence `isBox` too.)
+      const cheese = (isBox && inCutoff) ? clampQty(c.cheeseQty, sold) : 0;
+      const gcashQty = inCutoff ? clampQty(c.gcashQty, sold) : 0;
+      const gcashCheese = (isBox && inCutoff) ? clampQty(c.gcashCheeseQty, sold) : 0;
       const regular = Math.max(0, sold - cheese - gcashQty - gcashCheese);
       const amount = (regular + gcashQty) * price + (cheese + gcashCheese) * cheesePrice;
       const gcashAmount = gcashQty * price + gcashCheese * cheesePrice;
@@ -1179,9 +1327,13 @@ function computeDay(p){
         sku:c.sku, label:pr.label, sod, eod, sold,
         cheese_qty:cheese, gcash_qty:gcashQty, gcash_cheese_qty:gcashCheese, regular_qty:regular,
         amount: r2(amount), gcash_amount: r2(gcashAmount),
-        price, cheese_price:cheesePrice, group:pr.group
+        price, cheese_price:cheesePrice, group:pr.group,
+        // Did this line's money COUNT? Carried on the line so the receipt can print
+        // an excluded sku apart instead of leaving the totals looking wrong.
+        in_cutoff: inCutoff
       });
-      sum += amount; gsum += gcashAmount;
+      if (inCutoff){ sum += amount; gsum += gcashAmount; }
+      else xsum += amount;
     }
   }
   const custom = p.closed ? 0 : Math.max(0, num(p.customAmount));
@@ -1192,10 +1344,36 @@ function computeDay(p){
   // Cash = Total − GCash still holds; GCash is now derived from what was
   // actually entered instead of read off the GCash app.
   const gcash = r2(gsum + customGcash);
-  return { lines, total, gcash, cash: r2(total - gcash), custom, customGcash };
+  return {
+    lines, total, gcash, cash: r2(total - gcash), custom, customGcash,
+    // Kept apart, never added in. `excluded` is the sum of `excludedLines`, so
+    // whatever the receipt prints below the totals always adds up to itself.
+    excluded: r2(xsum),
+    excludedLines: lines.filter(l => !l.in_cutoff)
+  };
 }
 /** A bucket quantity as entered: never negative, never more than sold. */
 function clampQty(v, sold){ return Math.min(Math.max(0, num(v)), Math.max(0, num(sold))); }
+
+/**
+ * The excluded lines worth PRINTING tonight — and on an ordinary night, none.
+ *
+ * `computeDay` returns a line for every sku on the form, so `excludedLines` is
+ * never empty once nori is in the Prices tab: the receipt printed "Nori ×0 — not
+ * in the total ₱0" and then the tautology "Cash in the tin: ₱825 + ₱0 Nori = ₱825"
+ * on EVERY ordinary night. This screen is used nightly and noise on it is a real
+ * cost, so the block appears only when there is excluded money to explain.
+ *
+ * ONE rule, read by both the receipt and the sticky day strip, so the two can
+ * never disagree about whether the tin needs mentioning.
+ */
+function excludedTonight(c){
+  return asArr(asObj(c).excludedLines).filter(l => r2(num(asObj(l).amount)) !== 0);
+}
+/** What is actually in the cash tin: the day's Cash PLUS the excluded money that
+ *  shares it. Only shown when excludedTonight() has something in it — otherwise it
+ *  would just restate Cash. */
+function tinTotal(c){ return r2(num(asObj(c).cash) + num(asObj(c).excluded)); }
 
 function currentPeriod(ds){
   const p = d2parts(ds);
@@ -1240,6 +1418,72 @@ function splitFor(per){
     return { amount: Math.max(0, r2(row.split_amount)), entered: true };
   }
   return { amount: splitDefault(), entered: false };
+}
+
+/**
+ * The period's money from in_cutoff=FALSE skus, per sku and in total — the same
+ * block apiCutoff returns as `excluded` / `excluded_lines`.
+ *
+ * DISPLAY ONLY. Nothing here may reach a cutoff figure or the note; it exists
+ * because the owner asked to SEE the excluded total per cutoff while keeping it
+ * out of everything ("just show the total per cutoff, and I'll exclude it on my
+ * own").
+ *
+ *   qty    = Σ sold    over the period's count rows for that sku
+ *   amount = Σ amount   the money SNAPSHOTTED on those rows when each day was
+ *                       saved, so a later price edit cannot rewrite what a past
+ *                       day earned
+ *
+ * WHICH ROWS ARE EXCLUDED IS ALSO A SNAPSHOT (v2.4.1): each row carries the flag
+ * that decided its money the night it was saved, and countInCutoff() — never the
+ * live Prices flag — is what classifies it here. Classifying saved money by the
+ * current flag let one tick in Maintenance restate a fortnight already sent, in
+ * both directions (see countInCutoff). A row with a blank snapshot falls back to
+ * the sku's current flag, which is all a row written before v2.4.1 can tell us.
+ *
+ * A count row with no snapshot and no price row on this phone counts IN, exactly as
+ * before. But an explicit FALSE snapshot on a sku that has since left the Prices
+ * tab IS still excluded money and is still listed — after the priced skus, under
+ * its sku as its own label — because `total` must always equal the lines printed
+ * beneath it. Skus are listed in Prices order so the block reads the same every
+ * time, and a sku with nothing sold is left out rather than printed as a zero
+ * line — identical to excludedForPeriod() in Code.gs.
+ */
+function excludedForPeriod(per){
+  const agg = Object.create(null);
+  const orphans = [];
+  const byDate = asObj(state.counts);
+  for (const d in byDate){
+    if (!inPeriod(d, per)) continue;
+    for (const r of asArr(byDate[d])){
+      const c = asObj(r);
+      const sku = txt(c.sku);
+      if (!sku || countInCutoff(c)) continue;
+      if (!agg[sku]){
+        agg[sku] = { qty:0, amount:0 };
+        if (!asArr(state.prices).some(p => isObj(p) && txt(p.sku) === sku)) orphans.push(sku);
+      }
+      agg[sku].qty += num(c.sold);
+      agg[sku].amount += num(c.amount);
+    }
+  }
+  const lines = [];
+  let total = 0;
+  const emitted = Object.create(null);
+  const emit = (sku, label) => {
+    if (emitted[sku]) return;
+    const a = agg[sku];
+    if (!a || (a.qty === 0 && a.amount === 0)) return;
+    emitted[sku] = true;
+    lines.push({ sku, label, qty:r2(a.qty), amount:r2(a.amount) });
+    total += a.amount;
+  };
+  for (const pr of asArr(state.prices)){
+    if (!isObj(pr)) continue;
+    emit(txt(pr.sku), txt(pr.label) || txt(pr.sku));
+  }
+  for (const sku of orphans) emit(sku, sku);
+  return { lines, total: r2(total) };
 }
 
 function computeCutoff(per){
@@ -1289,11 +1533,17 @@ function computeCutoff(per){
   // cutoff) and is never clamped — a clamp would hide exactly the fortnight
   // the owner most needs to see.
   const remaining = r2(total - mama - split - supplies - octopus - salary - other - electric);
+  // --- Excluded skus (nori): DISPLAY ONLY, and deliberately computed AFTER the
+  // residual so it is obvious that nothing above can depend on it. It enters no
+  // figure here and buildNote() never reads it — the note the owner sends his
+  // partner does not change by a single byte.
+  const x = excludedForPeriod(per);
   return {
     total, cash, gcash, daysWithSales, openDays,
     mama, supplies, octopus, electric, other, salary,
     split, perPartner: r2(split / 2), splitEntered: sp.entered,
-    remaining
+    remaining,
+    excluded: x.total, excludedLines: x.lines
   };
 }
 
@@ -1521,12 +1771,20 @@ function applyLocalDay(p){
       : ((p.salary === '' || p.salary == null) ? dailySalary() : Math.max(0, num(p.salary))),
     gcash:c.gcash, total:c.total, cash:c.cash,
     custom_amount:c.custom, custom_gcash:c.customGcash,
+    // The day's money from excluded skus, stored BESIDE the day's money exactly as
+    // the sheet stores it — never inside total, cash or gcash.
+    excluded_total:c.excluded,
     notes:p.notes || '', entry_id:p.entryId, updated_at:stamp
   };
   state.counts[p.date] = c.lines.map(l => ({
     date:p.date, sku:l.sku, sod:l.sod, eod:l.eod, sold:l.sold,
     cheese_qty:l.cheese_qty, regular_qty:l.regular_qty, amount:l.amount, entry_id:p.entryId,
-    gcash_qty:l.gcash_qty, gcash_cheese_qty:l.gcash_cheese_qty, gcash_amount:l.gcash_amount
+    gcash_qty:l.gcash_qty, gcash_cheese_qty:l.gcash_cheese_qty, gcash_amount:l.gcash_amount,
+    // The flag SNAPSHOTTED beside the money it decided, exactly as the sheet stores
+    // it (v2.4.1). Whether this line's money counted is a fact about THIS day,
+    // settled when it was saved — so a later tick of "counts in the cutoff" cannot
+    // restate a cutoff this phone has already shown.
+    in_cutoff: l.in_cutoff
   }));
   // The server rewrites the whole date block and writes only non-zero rows —
   // mirror that exactly, or a zeroed product would linger on this phone alone.
@@ -1588,6 +1846,13 @@ function applyLocalPrices(p){
     pr.price = Math.max(0, num(row.price));
     pr.cheese_price = Math.max(0, num(row.cheesePrice));
     pr.active = !!row.active;
+    // `inCutoff` is applied ONLY when the payload explicitly carries it — the same
+    // rule apiSavePrices enforces. A batch queued by an older build says nothing
+    // about the flag, and defaulting it would take every takoyaki sku out of the
+    // cutoff the moment that batch replayed.
+    if (!(row.inCutoff === null || row.inCutoff === undefined || row.inCutoff === '')){
+      pr.in_cutoff = inCutoffFlag(row.inCutoff);
+    }
   }
 }
 function applyLocalSettings(p){
@@ -1921,6 +2186,11 @@ function applyServerDay(p, data){
   // will use rather than its own guess at the rate. Same guard: an older
   // deployment sends no salary, and 0 would read as "a day off".
   if (data.salary != null && data.salary !== '') day.salary = num(data.salary);
+  // The day's excluded money, as the sheet stored it. Guarded like the others: an
+  // older deployment sends no such key, and reading it as 0 would wipe a figure the
+  // phone worked out correctly for itself.
+  const excl = pick(data, 'excluded_total', 'excludedTotal');
+  if (excl != null && excl !== '') day.excluded_total = num(excl);
   if (Array.isArray(data.lines)){
     const rows = asArr(asObj(state.counts)[p.date]);
     for (const l of data.lines){
@@ -1935,6 +2205,13 @@ function applyServerDay(p, data){
         if (pick(l, 'gcash_qty', 'gcashQty') != null) r.gcash_qty = num(pick(l, 'gcash_qty', 'gcashQty'));
         if (pick(l, 'gcash_cheese_qty', 'gcashCheeseQty') != null) r.gcash_cheese_qty = num(pick(l, 'gcash_cheese_qty', 'gcashCheeseQty'));
         if (pick(l, 'gcash_amount', 'gcashAmount') != null) r.gcash_amount = num(pick(l, 'gcash_amount', 'gcashAmount'));
+        // The server's own snapshot of whether this line's money counted, which is
+        // what the sheet now stores on the row. Guarded like the rest: a deployment
+        // too old to send it leaves the phone's own snapshot in place, and that is
+        // the right answer — not a blank that would hand the classification back to
+        // a live flag that may since have been flipped.
+        const snap = pick(l, 'in_cutoff', 'inCutoff');
+        if (snap != null) r.in_cutoff = inCutoffFlag(snap);
       }
     }
   }
@@ -2374,10 +2651,26 @@ function bentaPayload(){
     notes: benta.notes,
     // REQUEST keys are camelCase. `gcash` is deliberately NOT sent: the server
     // computes it from these buckets and ignores a typed figure.
-    counts: closed ? [] : asArr(benta.rows).map(r => ({
-      sku:r.sku, sod:num(r.sod), eod:num(r.eod),
-      cheeseQty:num(r.cheese), gcashQty:num(r.gcash), gcashCheeseQty:num(r.gcashCheese)
-    })),
+    // Exactly the buckets computeDay used for the receipt she just read.
+    // A group=simple sku has no cheese version, and an EXCLUDED sku has no variant
+    // or payment split AT ALL — the server refuses every one of the three on it
+    // (v2.4.1), naming the item, and none of them has a stepper on the card. So a
+    // figure in one of those can only come from a stale draft or a hand-edited sheet
+    // row, and sending it would refuse the whole day while the receipt had already
+    // (correctly) ignored it. Send what was shown — and validateBenta stops the save
+    // and quotes the server, so nothing is dropped behind her back either.
+    counts: closed ? [] : asArr(benta.rows).map(r => {
+      const inCut = skuInCutoff(r.sku);
+      // Cheese needs BOTH: only a box has a cheese version, and an excluded sku is
+      // one plain quantity at one price whatever its group says.
+      const cheeseSent = inCut && isBoxSku(r.sku);
+      return {
+        sku:r.sku, sod:num(r.sod), eod:num(r.eod),
+        cheeseQty: cheeseSent ? num(r.cheese) : 0,
+        gcashQty: inCut ? num(r.gcash) : 0,
+        gcashCheeseQty: cheeseSent ? num(r.gcashCheese) : 0
+      };
+    }),
     // Only what was actually opened travels: the server writes non-zero rows
     // only, and a 0 for a product that has since left the sheet's list would be
     // rejected as unknown for no reason.
@@ -2403,7 +2696,9 @@ function bentaSkuList(){
     // stepper appears while a loaded cheese count still fails validation, and
     // the day can never be saved again. It cannot be priced, so the server
     // drops it (and says so); the card says that too.
-    list.push(pr || { sku:r.sku, label:skuLabel(r.sku), group:'box', size:'', price:0, cheese_price:'', active:false, missing:true });
+    // in_cutoff true on the placeholder for the same reason a blank cell is true:
+    // a sku nobody can look up must never lose its money silently.
+    list.push(pr || { sku:r.sku, label:skuLabel(r.sku), group:'box', size:'', price:0, cheese_price:'', active:false, in_cutoff:true, missing:true });
   }
   return list;
 }
@@ -2418,6 +2713,11 @@ function skuSplitText(pr, row){
   if (!sold) return 'Enter the start and end counts to see the total.';
   const isBox = pr.group === 'box';
   const price = num(pr.price), cheesePrice = num(pr.cheese_price);
+  // An EXCLUDED sku has no cheese and no payment split, so there is one figure to
+  // show — and the line says out loud that it is not in the day's total.
+  if (!inCutoffFlag(pr.in_cutoff)){
+    return sold + ' × ' + peso(price) + ' = ' + peso(r2(sold * price)) + '  ·  not in the day’s total';
+  }
   const cheese = isBox ? clampQty(row.cheese, sold) : 0;
   const gcash = clampQty(row.gcash, sold);
   const gcashCheese = isBox ? clampQty(row.gcashCheese, sold) : 0;
@@ -2474,14 +2774,6 @@ function rowRegular(row, isBox){
   const sold = Math.max(0, num(row.sod) - num(row.eod));
   return bucketRoom(row, sold, null, isBox);
 }
-/** group=box for a sku still on the form (a deactivated sku keeps its group).
- *  A sku that is no longer in Prices at all counts as a box, so its cheese
- *  buckets render and validate instead of becoming an unfixable complaint. */
-function isBoxSku(sku){
-  const pr = asArr(state.prices).find(p => isObj(p) && p.sku === sku);
-  return pr ? pr.group === 'box' : true;
-}
-
 // Every place it lands in markup — attributes and ids alike — must be
 // escaped, or the tag breaks apart and the steppers stop working.
 function stepperHTML(sku, field, value, label, small){
@@ -2665,6 +2957,17 @@ function renderBenta(){
       if (!row){ row = { sku:pr.sku, sod:0, eod:0, cheese:0, gcash:0, gcashCheese:0 }; benta.rows.push(row); }
       const sold = Math.max(0, num(row.sod) - num(row.eod));
       const isBox = pr.group === 'box';
+      // A sku kept OUT of the cutoff is counted exactly like the others, so its
+      // card looks ordinary — start count, end count, sold — with one badge and one
+      // short line saying where its money goes. It has no payment split at all, so
+      // no bucket steppers appear on it.
+      const inCut = inCutoffFlag(pr.in_cutoff);
+      // An excluded sku is ALWAYS a plain quantity card: one price, no cheese, no
+      // buckets — whatever its `group` says. A sheet hand-edited into box + excluded
+      // is a state the server refuses outright, so showing a cheese price here (and
+      // then dropping the counts) would be the phone agreeing with a sheet the save
+      // will reject. It renders plain and validateBenta quotes the server inline.
+      const showCheese = isBox && inCut;
       const sk = esc(pr.sku);   // sku is sheet data — escape it everywhere it enters markup
       // Payment and variant are two separate questions, so the old flat list of
       // "Cheese / GCash / GCash cheese" read as a riddle: "Cheese" silently
@@ -2690,8 +2993,9 @@ function renderBenta(){
       buckets += '</div>';
       h += '<div class="card sku-card" data-skucard="' + sk + '">' +
         '<div class="sku-head"><strong>' + esc(pr.label) + '</strong>' +
+          (inCut ? '' : '<span class="badge-excl">Not in the cutoff</span>') +
           '<span class="sku-price">' + (pr.missing ? 'Not in the Prices tab'
-            : peso(pr.price) + (isBox ? ' · Cheese ' + peso(pr.cheese_price) : '') +
+            : peso(pr.price) + (showCheese ? ' · Cheese ' + peso(pr.cheese_price) : '') +
               (truthy(pr.active) ? '' : ' · no longer active')) + '</span></div>' +
         // It cannot be priced any more, so the server drops these counts when
         // the day is saved. Say so here rather than letting it surprise her.
@@ -2704,9 +3008,13 @@ function renderBenta(){
         '<div class="sold-row">' +
           '<div class="sold-badge" id="soldbadge-' + sk + '">Sold: <b id="sold-' + sk + '">' + sold + '</b></div>' +
         '</div>' +
-        '<div class="buckets">' +
-          '<div class="pay-intro">How were they paid?</div>' + buckets +
-        '</div>' +
+        // No payment split on an excluded sku — its money is one plain amount that
+        // never joins the day's Cash or GCash. One short line says so.
+        (inCut
+          ? '<div class="buckets">' +
+              '<div class="pay-intro">How were they paid?</div>' + buckets +
+            '</div>'
+          : '<p class="excl-note">Count it as usual — its money is kept separate.</p>') +
         // Every bucket is a SUBSET of what sold — a dearer filling, or a
         // different way of paying — so raising one only moves a box from one
         // bucket to another. Spelling all four out per row stops a stepper
@@ -2929,6 +3237,9 @@ function updateReceipt(){
     // same way the cards do and the GCash total below can be traced back.
     let any = false;
     for (const l of c.lines){
+      // An EXCLUDED sku's money is NOT in the TOTAL below, so it must not sit among
+      // the lines that add up to it. It gets its own line under the totals.
+      if (!l.in_cutoff) continue;
       if (l.regular_qty > 0){ any = true; h += rLine(l.label + ' ×' + l.regular_qty, l.regular_qty * l.price); }
       if (l.cheese_qty > 0){ any = true; h += rLine(l.label + ' cheese ×' + l.cheese_qty, l.cheese_qty * l.cheese_price); }
       // "GCash" alone would repeat the old ambiguity — say which variant.
@@ -2941,6 +3252,27 @@ function updateReceipt(){
       '<div class="r-total"><span class="lbl">TOTAL</span><span class="amt">' + peso(c.total) + '</span></div>' +
       '<div class="r-sub gcash"><span>GCash</span><span class="r-amt">' + peso(c.gcash) + '</span></div>' +
       '<div class="r-sub"><span>Cash</span><span class="r-amt">' + peso(c.cash) + '</span></div>';
+    // Money that is kept OUT of the cutoff, BELOW the totals and never added into
+    // them. The tin line is not decoration: the nori cash sits in the same tin, so
+    // without it the tin can never appear to reconcile and that reads as a bug.
+    //
+    // ONLY when there IS excluded money tonight (v2.4.1). There is a nori line in
+    // `excludedLines` on every single night, so this block used to print a dead
+    // "Nori ×0 — not in the total ₱0" and the tautology "Cash in the tin: ₱825 +
+    // ₱0 Nori = ₱825" on every ordinary night — noise on the one screen that is
+    // read daily. Nothing excluded sold, nothing shown.
+    const xl = excludedTonight(c);
+    if (xl.length){
+      h += '<div class="r-excl">';
+      for (const l of xl){
+        h += '<div class="r-sub excl"><span>' + esc(l.label + ' ×' + l.sold) + ' — not in the total</span>' +
+          '<span class="r-amt">' + peso(l.amount) + '</span></div>';
+      }
+      const what = xl.length === 1 ? txt(xl[0].label) : 'kept out';
+      h += '<div class="r-tin">Cash in the tin: ' + peso(c.cash) + ' + ' + peso(c.excluded) +
+        ' ' + esc(what) + ' = <b>' + peso(tinTotal(c)) + '</b></div>' +
+      '</div>';
+    }
   }
   el.innerHTML = h;
 }
@@ -2963,13 +3295,69 @@ function updateDayStrip(c){
     return;
   }
   const d = isObj(c) ? c : computeDay(bentaPayload());
+  // The TIN, and only on a night with excluded money in it (v2.4.1). The tin holds
+  // Cash PLUS that money, and the strip exists precisely because the receipt is
+  // several screens down — so this is where the figure she counts against actually
+  // gets read. Same rule as the receipt (excludedTonight), so the two cannot
+  // disagree, and nothing at all on an ordinary night.
+  const tin = excludedTonight(d).length
+    ? '<span class="tin">Tin <b>' + peso(tinTotal(d)) + '</b></span>' : '';
   strip.innerHTML =
     '<div class="ds-total"><span class="ds-lbl">TOTAL</span><span class="ds-amt">' + peso(d.total) + '</span></div>' +
     '<div class="ds-sub"><span>Cash <b>' + peso(d.cash) + '</b></span>' +
-      '<span class="gc">GCash <b>' + peso(d.gcash) + '</b></span></div>';
+      '<span class="gc">GCash <b>' + peso(d.gcash) + '</b></span>' + tin + '</div>';
 }
 
 function isWhole(v){ const n = num(v); return isFinite(n) && Math.floor(n) === n; }
+
+/**
+ * What the SERVER would refuse about an EXCLUDED sku's row — in its own words — or
+ * '' when there is nothing wrong. Both rules it mirrors are in apiSaveDay, checked
+ * in this order.
+ *
+ * This is the one place the phone complains about a figure that has no stepper to
+ * fix it, and that is deliberate. Everywhere else such a complaint is a day that
+ * can never be saved again, so the cheese count on a `simple` sku is silently sent
+ * as 0. Here the 0 would CHANGE MONEY she has already read: the only way a bucket
+ * can hold anything on an excluded sku is that the sku used to count in the cutoff
+ * (or was hand-edited in the sheet), and quietly zeroing it would move that money
+ * out of the day's GCash with nothing anywhere saying so. So it is refused, with
+ * the item named and the toggle to change named — and the way out is one tap away
+ * on the Maintenance screen, which is where the flag lives on a phone.
+ */
+function excludedRowError(sku, row){
+  const label = skuLabel(sku);
+  const r = asObj(row);
+  // MIRROR THE SERVER'S GUARD ORDER, not just its wording. apiSaveDay checks
+  // "has no cheese version" BEFORE the excluded-sku check, so on a simple sku
+  // (nori — the shipped shape) a cheese count comes back in those words. Saying
+  // something different here would mean the phone and the sheet explain the same
+  // refusal two ways, which is the kind of mismatch that makes a real message
+  // look untrustworthy.
+  if (!isBoxSku(sku) && num(r.cheese) !== 0){
+    return label + ' has no cheese version, so its cheese counts must be 0.';
+  }
+  const held = [];
+  if (num(r.cheese) !== 0) held.push('cheese');
+  if (num(r.gcash) !== 0) held.push('GCash');
+  if (num(r.gcashCheese) !== 0) held.push('GCash cheese');
+  if (held.length){
+    return label + ' is kept out of the cutoff, so its money is not split into cash and GCash: its ' +
+      listPhrase(held) + ' count' + (held.length > 1 ? 's' : '') +
+      ' must be 0. Its total is shown on its own line.';
+  }
+  // An excluded sku must be `group=simple`: one plain quantity at one price. A box
+  // kept out of the cutoff is a sheet that contradicts the app — savePrices refuses
+  // to create it, and saveDay refuses to save a day against one made by hand — so
+  // say the same thing here instead of queueing a day that cannot land.
+  if (isBoxSku(sku)){
+    return label + ' is kept out of the cutoff, but it is still set up as a box with a cheese ' +
+      'version. An item kept out must be a simple item: one price, no cheese and no GCash. ' +
+      'Turn “Counts in the cutoff” back on for it in Maintenance, or change its group to simple ' +
+      'in the Prices tab of the sheet.';
+  }
+  return '';
+}
 
 /* Every rule apiSaveDay() enforces is mirrored here, in the same order and with
    the same plain-English wording, so the phone never queues work the server will
@@ -2981,15 +3369,22 @@ function validateBenta(){
   if (benta.closed) return errs;   // a closed day sends nothing to validate
 
   for (const r of asArr(benta.rows)){
-    const pr = asArr(state.prices).find(p => isObj(p) && p.sku === r.sku);
-    const label = txt(pr && pr.label) || r.sku;
     // A sku that has left the Prices tab counts as a box here, exactly as it
     // renders: otherwise a loaded cheese count produces a complaint with no
     // stepper to fix it, and the day can never be saved again.
     const isBox = isBoxSku(r.sku);
+    const inCut = skuInCutoff(r.sku);
     const key = 'sku:' + r.sku;
     const sod = num(r.sod), eod = num(r.eod);
-    const cheese = num(r.cheese), gcash = num(r.gcash), gcashCheese = num(r.gcashCheese);
+    // The buckets AS SENT (see bentaPayload): a group=simple sku has no cheese
+    // version and an excluded sku has no bucket at all, so those figures are not
+    // sent and there is no stepper for them. Validating a number that is neither
+    // shown, nor sent, nor fixable is how a day becomes permanently un-saveable.
+    // (The ONE exception is a non-zero bucket on an EXCLUDED sku, which is not a
+    // figure to ignore but money about to change — see excludedRowError below.)
+    const cheese = (isBox && inCut) ? num(r.cheese) : 0;
+    const gcash = inCut ? num(r.gcash) : 0;
+    const gcashCheese = (isBox && inCut) ? num(r.gcashCheese) : 0;
     const sold = sod - eod;
     if (!isWhole(sod) || !isWhole(eod) || !isWhole(cheese) || !isWhole(gcash) || !isWhole(gcashCheese)){
       errs[key] = 'Use whole numbers only — half a box cannot be sold.';
@@ -2999,8 +3394,10 @@ function validateBenta(){
       errs[key] = 'End of day is bigger than start of day. Please check.';
     } else if (cheese < 0 || gcash < 0 || gcashCheese < 0){
       errs[key] = 'The cheese and GCash counts cannot be less than zero.';
-    } else if (!isBox && (cheese > 0 || gcashCheese > 0)){
-      errs[key] = label + ' has no cheese version, so leave the cheese counts at 0.';
+    // (There is no "this has no cheese version" complaint any more: on a
+    // group=simple sku the cheese figures above are 0 by construction, because
+    // nothing on the card can set them and the payload does not carry them.
+    // The server still enforces the rule, which is where it belongs.)
     } else if (sold === 0 && (cheese > 0 || gcash > 0 || gcashCheese > 0)){
       // Nothing sold yet, so there is nothing to split. Blaming the buckets
       // ("can only go up to 0") points at the wrong field entirely.
@@ -3008,6 +3405,14 @@ function validateBenta(){
     } else if (cheese + gcash + gcashCheese > sold){
       errs[key] = 'Cheese (' + cheese + ') + GCash (' + gcash + ') + GCash cheese (' + gcashCheese +
         ') adds up to ' + (cheese + gcash + gcashCheese) + ', but only ' + sold + ' were sold. Lower one of them.';
+    }
+    // The two excluded-sku rules the server enforces, in the server's own words.
+    // Checked last so an ordinary counting mistake is still reported first, but
+    // never skipped: the server refuses the whole day over either of them, so a
+    // phone that stayed quiet would queue work that cannot land.
+    if (!errs[key] && !inCut){
+      const bad = excludedRowError(r.sku, r);
+      if (bad) errs[key] = bad;
     }
   }
 
@@ -3537,7 +3942,31 @@ function renderCutoff(){
     '</div>';
   }
 
+  // BELOW the note, and outside it in every sense: the money this cutoff does not
+  // count. Nothing above depends on it and the note does not mention it.
+  h += excludedBlockHTML(f);
+
   $('panel-cutoff').innerHTML = h;
+}
+
+/** The period's EXCLUDED money — nori, and anything else the owner keeps out of
+ *  the cutoff. Its own block, below the note, labelled so it cannot be mistaken
+ *  for part of either: it is in NO figure above it and in NO line of the note.
+ *  Nothing sold, nothing shown — a block of zeroes would only be noise. */
+function excludedBlockHTML(f){
+  const lines = asArr(asObj(f).excludedLines);
+  if (!lines.length) return '';
+  let h = '<div class="section-title">Not part of this cutoff</div>' +
+    '<div class="card excl-card">' +
+    '<p class="hint" style="margin-bottom:10px;">This money is NOT in the figures above and NOT in the note. ' +
+      'It is sold and counted, and you settle it yourself.</p>';
+  for (const l of lines){
+    h += '<div class="co-row"><span>' + esc(txt(l.label) || txt(l.sku)) + ' × ' + num(l.qty) +
+      '</span><span class="v">' + peso(l.amount) + '</span></div>';
+  }
+  h += '<div class="sum-row"><span>Total kept out</span><b>' + peso(asObj(f).excluded) + '</b></div>' +
+  '</div>';
+  return h;
 }
 
 async function generateNote(){
@@ -3896,7 +4325,7 @@ function saveStockCountNow(product){
    list without opening the sheet on a phone. Every save goes through the offline
    queue like any other mutation. The API token is never shown or sent here. ---- */
 let maintOpen = false;
-let maintPrices = null;   // sku -> { price, cheesePrice, active }
+let maintPrices = null;   // sku -> { price, cheesePrice, active, inCutoff }
 let maintConst = null;    // the six settings, as typed
 let maintStock = null;    // product -> { unit, reorderAt, active }
 
@@ -3906,7 +4335,8 @@ function maintLoad(){
   maintPrices = {};
   for (const p of asArr(state.prices)){
     if (!isObj(p) || !txt(p.sku)) continue;
-    maintPrices[p.sku] = { price: num(p.price), cheesePrice: num(p.cheese_price), active: truthy(p.active) };
+    maintPrices[p.sku] = { price: num(p.price), cheesePrice: num(p.cheese_price),
+      active: truthy(p.active), inCutoff: inCutoffFlag(p.in_cutoff) };
   }
   const st = asObj(state.settings);
   maintConst = {
@@ -3932,7 +4362,8 @@ function maintTopUp(){
     if (!isObj(p) || !txt(p.sku)) continue;
     keepP[p.sku] = true;
     if (!maintPrices[p.sku]){
-      maintPrices[p.sku] = { price: num(p.price), cheesePrice: num(p.cheese_price), active: truthy(p.active) };
+      maintPrices[p.sku] = { price: num(p.price), cheesePrice: num(p.cheese_price),
+        active: truthy(p.active), inCutoff: inCutoffFlag(p.in_cutoff) };
     }
   }
   for (const sku in maintPrices) if (!keepP[sku]) delete maintPrices[sku];
@@ -3958,20 +4389,31 @@ function maintenanceHTML(){
   // Prices
   h += '<div class="card">' +
     '<p class="mt-name">Prices</p>' +
-    '<p class="hint">A price change counts for the days you save from now on. Days already saved keep the prices they were sold at — nothing in the past ever changes.</p>';
+    '<p class="hint">A price change counts for the days you save from now on. Days already saved keep the prices they were sold at — nothing in the past ever changes.</p>' +
+    '<p class="hint" style="margin-top:6px;">Turn “Counts in the cutoff” off for something you keep separate, like nori. ' +
+      'It is still sold and counted every night; its money is just shown on its own and stays out of the cutoff and the note.</p>';
   for (const p of asArr(state.prices)){
     if (!isObj(p) || !txt(p.sku)) continue;
-    const m = maintPrices[p.sku] || { price:0, cheesePrice:0, active:false };
+    const m = maintPrices[p.sku] || { price:0, cheesePrice:0, active:false, inCutoff:true };
     const sk = esc(p.sku);
+    const isBox = p.group === 'box';
     h += '<div class="mt-row"><div class="mt-name">' + esc(p.label || p.sku) + '</div>' +
-      '<div class="mt-grid">' +
-        '<div class="mt-cell"><label for="mp-' + sk + '">Price (₱)</label>' +
-          '<input class="input money" id="mp-' + sk + '" data-mprice="' + sk + '" inputmode="decimal" autocomplete="off" value="' + esc(m.price) + '"></div>' +
-        '<div class="mt-cell"><label for="mc-' + sk + '">Cheese price (₱)</label>' +
-          '<input class="input money" id="mc-' + sk + '" data-mcheese="' + sk + '" inputmode="decimal" autocomplete="off" value="' + esc(m.cheesePrice) + '"></div>' +
-      '</div>' +
+      // Only a box sku HAS a cheese version. Showing the field on a simple sku
+      // (nori) invites a figure into a cell that must stay at 0 — and it is the one
+      // price the server does not guard for a simple sku.
+      (isBox
+        ? '<div class="mt-grid">' +
+            '<div class="mt-cell"><label for="mp-' + sk + '">Price (₱)</label>' +
+              '<input class="input money" id="mp-' + sk + '" data-mprice="' + sk + '" inputmode="decimal" autocomplete="off" value="' + esc(m.price) + '"></div>' +
+            '<div class="mt-cell"><label for="mc-' + sk + '">Cheese price (₱)</label>' +
+              '<input class="input money" id="mc-' + sk + '" data-mcheese="' + sk + '" inputmode="decimal" autocomplete="off" value="' + esc(m.cheesePrice) + '"></div>' +
+          '</div>'
+        : '<div class="mt-cell"><label for="mp-' + sk + '">Price (₱)</label>' +
+            '<input class="input money" id="mp-' + sk + '" data-mprice="' + sk + '" inputmode="decimal" autocomplete="off" value="' + esc(m.price) + '"></div>') +
       '<label class="mt-toggle" for="ma-' + sk + '"><input type="checkbox" id="ma-' + sk + '" data-mactive="' + sk + '"' +
         (m.active ? ' checked' : '') + '><span>Still selling this</span></label>' +
+      '<label class="mt-toggle" for="mx-' + sk + '"><input type="checkbox" id="mx-' + sk + '" data-mcutoff="' + sk + '"' +
+        (m.inCutoff ? ' checked' : '') + '><span>Counts in the cutoff</span></label>' +
     '</div>';
   }
   h += '<p class="err" id="err-maint-prices" hidden></p>' +
@@ -4037,16 +4479,35 @@ function maintenanceHTML(){
 function priceRowError(pr, m){
   const label = txt(asObj(pr).label) || txt(asObj(pr).sku);
   const price = num(asObj(m).price), cheese = num(asObj(m).cheesePrice);
+  const isBox = asObj(pr).group === 'box';
   if (price < 0 || cheese < 0) return 'A price cannot be less than zero.';
-  if (!asObj(m).active) return '';
-  if (!(price > 0)){
-    return label + ' is still being sold, so it needs a price. At ₱0 every box would ' +
-      'count as free. Type a price, or turn “Still selling this” off.';
+  if (asObj(m).active){
+    if (!(price > 0)){
+      return label + ' is still being sold, so it needs a price. At ₱0 every box would ' +
+        'count as free. Type a price, or turn “Still selling this” off.';
+    }
+    // Only a box sku has a cheese version at all; group=simple keeps its 0.
+    if (isBox && !(cheese > 0)){
+      return label + ' is still being sold, so it needs a cheese price too. At ₱0 every ' +
+        'cheese box would count as free. Type a price, or turn “Still selling this” off.';
+    }
   }
-  // Only a box sku has a cheese version at all; group=simple keeps its 0.
-  if (asObj(pr).group === 'box' && !(cheese > 0)){
-    return label + ' is still being sold, so it needs a cheese price too. At ₱0 every ' +
-      'cheese box would count as free. Type a price, or turn “Still selling this” off.';
+  // Keeping money out of the cutoff means ONE plain quantity at ONE price: no cheese
+  // variant and no cash/GCash split. A box sku cannot be that, so apiSavePrices
+  // REFUSES the batch — and this refusal has to happen before the toggle is applied
+  // locally, or the phone starts hiding that sku's cheese steppers (and zeroing its
+  // cheese counts) while the sheet still has it counting in the cutoff with a cheese
+  // price. Checked whether or not the sku is still being sold, exactly as the server
+  // checks it: an inactive box cannot be kept out of the cutoff either.
+  // Only an EXPLICIT false is refused, and for the same reason the server only
+  // WRITES an explicit value: a row that says nothing about the flag (an older
+  // build's queued batch) means "leave it exactly as it is", so treating a missing
+  // field as false would refuse every ordinary price edit ever queued.
+  const flagGiven = !(asObj(m).inCutoff === null || asObj(m).inCutoff === undefined || asObj(m).inCutoff === '');
+  if (flagGiven && !inCutoffFlag(asObj(m).inCutoff) && isBox){
+    return label + ' is a box with a cheese version, so it cannot be kept out of the cutoff. ' +
+      'An item kept out is a simple item: one price and no cheese. Leave “Counts in the cutoff” ' +
+      'on for it, or change its group to simple in the Prices tab of the sheet.';
   }
   return '';
 }
@@ -4058,7 +4519,11 @@ function saveMaintPrices(){
     const m = maintPrices[sku];
     const bad = priceRowError(asArr(state.prices).find(p => isObj(p) && p.sku === sku) || { sku }, m);
     if (bad){ setErr('err-maint-prices', bad); return; }
-    rows.push({ sku, price: r2(m.price), cheesePrice: r2(m.cheesePrice), active: !!m.active });
+    // `inCutoff` travels because this screen KNOWS the flag — it is showing the
+    // toggle. (The server writes that cell only when a payload carries it, so a
+    // batch queued by an older build still leaves every flag exactly as it is.)
+    rows.push({ sku, price: r2(m.price), cheesePrice: r2(m.cheesePrice),
+      active: !!m.active, inCutoff: !!m.inCutoff });
   }
   setErr('err-maint-prices', '');
   const payload = { rows, entryId: uuid() };
@@ -4297,6 +4762,7 @@ document.addEventListener('change', (ev) => {
   // Checkboxes and selects report through `change` on every phone, so the
   // maintenance toggles and the two pickers are wired here rather than on input.
   if (ds.mactive != null){ if (maintPrices[ds.mactive]) maintPrices[ds.mactive].active = ev.target.checked; return; }
+  if (ds.mcutoff != null){ if (maintPrices[ds.mcutoff]) maintPrices[ds.mcutoff].inCutoff = ev.target.checked; return; }
   if (ds.mstockactive != null){ if (maintStock[ds.mstockactive]) maintStock[ds.mstockactive].active = ev.target.checked; return; }
   if (id === 'gxStockProduct'){
     gx.stockProduct = ev.target.value;

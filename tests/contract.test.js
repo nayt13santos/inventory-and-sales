@@ -140,6 +140,9 @@ const S_FORM      = slab('function loadBentaForm(date){', '// SKU list to render
 const S_CARDS     = slab('const CHEV =', 'const COLLAPSE_FLAG =');
 // The Maintenance price rule — a sku still being sold must have a real price.
 const S_MAINT     = slab('function priceRowError(pr, m){', 'function saveMaintPrices(){');
+// validateBenta + excludedRowError: every rule apiSaveDay enforces, mirrored on the
+// phone so it never queues a day the server will refuse.
+const S_VALIDATE  = slab('function isWhole(v){', "/** 'sku:box4' -> 'err-sku-box4'");
 
 function loadClient() {
   const src = `
@@ -155,6 +158,7 @@ ${S_BOOTSTRAP}
 ${S_FORM}
 ${S_CARDS}
 ${S_MAINT}
+${S_VALIDATE}
 let state = freshState();
 let queue = [];
 let config = freshConfig();
@@ -194,6 +198,14 @@ return {
   noteAttention, attentionForDate, dateNotInSheet, daySavedMessage,
   stockRowSaid, stockCardHTML, wageCardHTML, wageIsCustom, wageSummary,
   priceRowError,
+  // v2.4.0: the flag whose BLANK means TRUE, the per-sku lookup the screens read,
+  // and the period's excluded block (display only).
+  inCutoffFlag, skuInCutoff, excludedForPeriod,
+  // v2.4.1: the count row's own SNAPSHOT (raw, then resolved at read time), the one
+  // rule the receipt and the day strip both read for "is there excluded money
+  // tonight", the tin, and the day validator with its excluded-sku refusals.
+  rawCutoffFlag, countInCutoff, excludedTonight, tinTotal,
+  validateBenta, excludedRowError, isBoxSku,
   // Live refs so a test can put the client in demo / API / still-queued states.
   // enqueue() is not in the extracted slabs, so tests push onto q directly.
   cfg: config, q: queue
@@ -208,9 +220,16 @@ return {
 // never come back. Section 7 asserts both halves of every pair.
 // ---------------------------------------------------------------------------
 const CONTRACT = {
-  'bootstrap.prices[]':    [['cheese_price', 'cheesePrice']],
-  'bootstrap.days[]':      [['custom_amount', 'customAmount'], ['custom_gcash', 'customGcash'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
-  'bootstrap.counts[]':    [['cheese_qty', 'cheeseQty'], ['regular_qty', 'regularQty'], ['gcash_qty', 'gcashQty'], ['gcash_cheese_qty', 'gcashCheeseQty'], ['gcash_amount', 'gcashAmount'], ['entry_id', 'entryId']],
+  // in_cutoff (v2.4.0): FALSE means "sold and counted, but its money stays out
+  // of every cutoff figure". A camelCase slip here would arrive as undefined —
+  // and the phone's fallback for an unknown flag has to be "counts in", so the
+  // owner's excluded sku would quietly rejoin the note.
+  'bootstrap.prices[]':    [['cheese_price', 'cheesePrice'], ['in_cutoff', 'inCutoff']],
+  'bootstrap.days[]':      [['custom_amount', 'customAmount'], ['custom_gcash', 'customGcash'], ['excluded_total', 'excludedTotal'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
+  // in_cutoff on a COUNT row is the v2.4.1 snapshot: what the flag said when that
+  // day was saved. History is classified by it, so a camelCase slip would make
+  // every row look unsnapshotted and hand the classification back to the live flag.
+  'bootstrap.counts[]':    [['cheese_qty', 'cheeseQty'], ['regular_qty', 'regularQty'], ['gcash_qty', 'gcashQty'], ['gcash_cheese_qty', 'gcashCheeseQty'], ['gcash_amount', 'gcashAmount'], ['entry_id', 'entryId'], ['in_cutoff', 'inCutoff']],
   'bootstrap.expenses[]':  [['backlog_ref', 'backlogRef'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt'], ['stock_product', 'stockProduct'], ['stock_qty', 'stockQty']],
   'bootstrap.backlogs[]':  [['total_amount', 'totalAmount'], ['start_date', 'startDate']],
   'bootstrap.stockUsage[]':    [['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
@@ -220,14 +239,19 @@ const CONTRACT = {
   'bootstrap.stockCounts[]':   [['counted_qty', 'countedQty'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
   'bootstrap.cutoffInputs[]':  [['split_amount', 'splitAmount'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
   // `supplies_total` is gone with the retired supplies card; dropped_skus is the
-  // saveDay key the phone still has to read.
-  'saveDay':               [['dropped_skus', 'droppedSkus']],
-  'saveDay.lines[]':       [['cheese_qty', 'cheeseQty'], ['regular_qty', 'regularQty'], ['gcash_qty', 'gcashQty'], ['gcash_cheese_qty', 'gcashCheeseQty'], ['gcash_amount', 'gcashAmount']],
+  // saveDay key the phone still has to read. excluded_total is the day's money
+  // from excluded skus — the receipt prints it BELOW the totals, and the cash tin
+  // only reconciles as Cash + excluded_total, so a misread key is a tin that
+  // never balances.
+  'saveDay':               [['dropped_skus', 'droppedSkus'], ['excluded_total', 'excludedTotal']],
+  'saveDay.lines[]':       [['cheese_qty', 'cheeseQty'], ['regular_qty', 'regularQty'], ['gcash_qty', 'gcashQty'], ['gcash_cheese_qty', 'gcashCheeseQty'], ['gcash_amount', 'gcashAmount'], ['in_cutoff', 'inCutoff']],
   'saveExpense':           [['entry_id', 'entryId']],
   'saveStockCount':        [['entry_id', 'entryId'], ['on_hand', 'onHand']],
   'saveCutoffSplit':       [['entry_id', 'entryId'], ['split_amount', 'splitAmount'], ['per_partner', 'perPartner']],
   'cutoff':                [['note_text', 'noteText']],
-  'cutoff.figures':        [['per_partner', 'perPartner']],
+  // excluded_lines is the DISPLAY-ONLY block under the note. It enters no other
+  // figure, but the Cutoff screen has to be able to read it.
+  'cutoff.figures':        [['per_partner', 'perPartner'], ['excluded_lines', 'excludedLines']],
   'bootstrap.lastCutoff':  [['per_partner', 'perPartner'], ['note_text', 'noteText'], ['generated_at', 'generatedAt']]
 };
 
@@ -1496,14 +1520,23 @@ test('MIGRATION: setupSheet appends the new columns and moves no existing cell',
 
   const counts = ss.getSheetByName('DailyCounts').getDataRange().getValues();
   assert.deepStrictEqual(counts[0],
-    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount']),
-    'the three new DailyCounts columns must be APPENDED, in schema order');
+    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff']),
+    'the four new DailyCounts columns must be APPENDED, in schema order');
   const log = ss.getSheetByName('DailyLog').getDataRange().getValues();
-  assert.deepStrictEqual(log[0], OLD_LOG_HEADERS.concat(['custom_gcash', 'salary']));
-  assert.deepStrictEqual(counts[1].slice(9), ['', '', ''],
-    'the appended cells start blank on a historical row, i.e. "that day was all cash"');
-  assert.deepStrictEqual(log[1].slice(10), ['', ''],
+  assert.deepStrictEqual(log[0],
+    OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total']));
+  assert.deepStrictEqual(counts[1].slice(9), ['', '', '', ''],
+    'the appended cells start blank on a historical row: "that day was all cash", ' +
+    'and an in_cutoff with no snapshot, which falls back to the sku flag');
+  assert.deepStrictEqual(log[1].slice(10), ['', '', ''],
     'a historical day gets no salary written into it — the rate is applied at read time');
+  // The one appended column whose BLANK means TRUE. Asserted here, at the
+  // migration itself, because this is the moment every live price row gets one.
+  const priceRows = ss.getSheetByName('Prices').getDataRange().getValues();
+  assert.deepStrictEqual(priceRows[0], ['sku', 'label', 'group', 'size', 'price',
+    'cheese_price', 'active', 'in_cutoff']);
+  assert.deepStrictEqual(priceRows.slice(1, 4).map(r => r[7]), ['', '', ''],
+    'box4/box6/box10 keep a BLANK in_cutoff — and a blank must read TRUE');
   assert.deepStrictEqual(ss.getSheetByName('Expenses').getDataRange().getValues()[0].slice(8),
     ['stock_product', 'stock_qty']);
 
@@ -1533,9 +1566,9 @@ test('MIGRATION: a sheet whose grid is only 9 columns wide is widened, not broke
   const ctx = loadOn(ss);
   assert.strictEqual(ctx.setupSheet(), OLD_TOKEN);
   const counts = ss.getSheetByName('DailyCounts');
-  assert.ok(counts.getMaxColumns() >= 12, 'the grid was not widened');
+  assert.ok(counts.getMaxColumns() >= 13, 'the grid was not widened');
   assert.deepStrictEqual(counts.getDataRange().getValues()[0],
-    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount']));
+    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff']));
   assert.deepStrictEqual(counts.getDataRange().getValues()[1].slice(0, 9), OLD_COUNT_ROWS[0]);
   const boot = post(ctx, { token: OLD_TOKEN, action: 'bootstrap', payload: {} });
   assert.strictEqual(boot.ok, true, boot.error);
@@ -1602,9 +1635,9 @@ test('MIGRATION: a saveDay after migrating works and leaves the legacy rows byte
     assert.deepStrictEqual(ss.getSheetByName('DailyLog').getDataRange().getValues()[i + 1].slice(0, 10), old,
       'legacy DailyLog row ' + (i + 1) + ' changed');
   });
-  // The new columns were written in their REAL positions (10-12), not guessed.
+  // The new columns were written in their REAL positions (10-13), not guessed.
   assert.deepStrictEqual(counts.slice(1).find(x => x[0] === '2026-07-28' && x[1] === 'box4'),
-    ['2026-07-28', 'box4', 10, 0, 10, 2, 5, 530, 'post-migration-1', 2, 1, 160]);
+    ['2026-07-28', 'box4', 10, 0, 10, 2, 5, 530, 'post-migration-1', 2, 1, 160, true]);
 
   // And the phone reads the mixed-vintage sheet correctly in one bootstrap.
   const boot = post(ctx, { token: OLD_TOKEN, action: 'bootstrap', payload: {} });
@@ -2193,6 +2226,712 @@ test('the screens actually use the guards: note, toast, wage card, prices, split
   assert.ok(/noteBlock/.test(cutoff) && /pendingSplit\(/.test(cutoff),
     'the rendered note block must be hidden when the Split field is unsaved');
   assert.ok(/noteBlock/.test(live), 'and hidden/shown as she types, without a re-render');
+});
+
+// ===========================================================================
+// 15. v2.4.0 — an EXCLUDED sku across the seam.
+//
+// nori is sold and counted like anything else, and its money must be invisible
+// to every cutoff figure and to the note the owner sends his partner. The note
+// is the artefact that matters here, so it is asserted BYTE FOR BYTE on both
+// sides of the seam with nori sales present.
+//
+// The phone's own arithmetic is part of this test on purpose: computeCutoff sums
+// the DAY ROWS the server stored, so an excluded sku is already absent from the
+// phone's figures without the phone knowing the flag exists — which is what
+// makes shipping this backend before the screens safe rather than merely
+// tolerable.
+// ===========================================================================
+console.log('\n--- 15. Excluded skus (in_cutoff) across the seam ---');
+
+const N_DAY_A = '2026-07-26';
+const N_DAY_B = '2026-07-27';
+const N_EXPENSE = { date: N_DAY_A, category: 'Supplies', item: 'harina', amount: 300, backlogRef: '', notes: '', entryId: 'nori-exp-1' };
+// box4: 10 sold, 2 of them by GCash -> 500, of which 100 GCash.  nori 12 -> 300.
+// box6:  4 sold, all cash            -> 260.                     nori  4 -> 100.
+const N_EXPECT = { total: 760, gcash: 100, cash: 660, excluded: 400, salary: 400 };
+
+function noriDay(date, sku, sod, gcashQty, noriSod, entryId) {
+  const counts = [{ sku: sku, sod: sod, eod: 0, cheeseQty: 0, gcashQty: gcashQty, gcashCheeseQty: 0 }];
+  if (noriSod > 0) counts.push({ sku: 'nori', sod: noriSod, eod: 0, cheeseQty: 0, gcashQty: 0, gcashCheeseQty: 0 });
+  return { date: date, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '', counts: counts, entryId: entryId };
+}
+
+/** The same fortnight twice: with nori sold, and with none sold at all. */
+function noriFixture(withNori) {
+  const { ctx, ss, token } = loadServer();
+  const dayA = post(ctx, { token, action: 'saveDay', payload: noriDay(N_DAY_A, 'box4', 10, 2, withNori ? 12 : 0, 'nori-day-a') });
+  assert.strictEqual(dayA.ok, true, 'saveDay A failed: ' + dayA.error);
+  const dayB = post(ctx, { token, action: 'saveDay', payload: noriDay(N_DAY_B, 'box6', 4, 0, withNori ? 4 : 0, 'nori-day-b') });
+  assert.strictEqual(dayB.ok, true, 'saveDay B failed: ' + dayB.error);
+  const exp = post(ctx, { token, action: 'saveExpense', payload: N_EXPENSE });
+  assert.strictEqual(exp.ok, true, 'saveExpense failed: ' + exp.error);
+  const cutoff = post(ctx, { token, action: 'cutoff', payload: { start: PERIOD.start, end: PERIOD.end, dryRun: false } });
+  assert.strictEqual(cutoff.ok, true, 'cutoff failed: ' + cutoff.error);
+  const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
+  assert.strictEqual(boot.ok, true, 'bootstrap failed: ' + boot.error);
+  return { ctx, ss, token, dayA: dayA.data, dayB: dayB.data, cutoff: cutoff.data, boot: boot.data };
+}
+const NF = noriFixture(true);
+const NF_NONE = noriFixture(false);
+
+test('the excluded keys cross the seam in snake_case, or the money renders as 0', () => {
+  assertPairs('bootstrap.prices[]', NF.boot.prices, CONTRACT['bootstrap.prices[]']);
+  assertPairs('bootstrap.days[]', NF.boot.days, CONTRACT['bootstrap.days[]']);
+  assertPairs('saveDay', NF.dayA, CONTRACT['saveDay']);
+  assertPairs('saveDay.lines[]', NF.dayA.lines, CONTRACT['saveDay.lines[]']);
+  assertPairs('cutoff.figures', NF.cutoff.figures, CONTRACT['cutoff.figures']);
+  assertNoCamelKeys('saveDay(nori)', NF.dayA);
+  assertNoCamelKeys('cutoff(nori)', NF.cutoff);
+  assertNoCamelKeys('bootstrap(nori)', NF.boot);
+  // The flag itself, on the row the phone stores.
+  const flag = sku => NF.boot.prices.find(p => p.sku === sku).in_cutoff;
+  assert.strictEqual(flag('box4'), true);
+  assert.strictEqual(flag('nori'), false, 'the phone must be able to see which sku is excluded');
+});
+
+test("the day rows the phone receives keep nori's money BESIDE the day's, never in it", () => {
+  const a = NF.boot.days.find(d => d.date === N_DAY_A);
+  assert.strictEqual(a.total, 500, 'the boxes only');
+  assert.strictEqual(a.gcash, 100);
+  assert.strictEqual(a.cash, 400);
+  assert.strictEqual(a.excluded_total, 300, 'nori, stored apart');
+  assert.strictEqual(a.total, a.cash + a.gcash, 'Cash = Total - GCash still holds');
+  // The count row still exists in full — nori IS counted, it just is not banked.
+  const nori = (NF.boot.counts || []).find(c => c.date === N_DAY_A && c.sku === 'nori');
+  assert.ok(nori, 'nori must still be counted like any other sku');
+  assert.strictEqual(nori.sold, 12);
+  assert.strictEqual(nori.amount, 300, 'with its own snapshotted money on the row');
+  assert.strictEqual(nori.gcash_amount, 0);
+  // ...and the save reply said the same thing, per line.
+  assert.strictEqual(NF.dayA.excluded_total, 300);
+  assert.strictEqual(NF.dayA.lines.find(l => l.sku === 'nori').in_cutoff, false);
+  assert.strictEqual(NF.dayA.lines.find(l => l.sku === 'box4').in_cutoff, true);
+});
+
+test('the phone and the note agree with nori sold, and both notes are byte-identical', () => {
+  const app = syncedClient(NF.boot);
+  // The full cutoff seam: every figure the phone computes itself must equal the
+  // server's, and (because the phone computes the residual) its own note must
+  // match the server's byte for byte.
+  const { local, f, note } = assertCutoffSeam(app, PERIOD, NF.cutoff);
+  assert.strictEqual(f.total, N_EXPECT.total);
+  assert.strictEqual(f.gcash, N_EXPECT.gcash);
+  assert.strictEqual(f.cash, N_EXPECT.cash);
+  assert.strictEqual(f.salary, N_EXPECT.salary);
+  assert.strictEqual(local.total, f.total, 'nori is absent from the phone\'s figures too');
+  // The excluded block is there to be SHOWN, and is in nothing else.
+  assert.strictEqual(f.excluded, N_EXPECT.excluded);
+  assert.deepStrictEqual(f.excluded_lines, [{ sku: 'nori', label: 'Nori', qty: 16, amount: 400 }]);
+  assert.strictEqual(f.total, f.cash + f.gcash);
+  assert.strictEqual(f.total,
+    f.mama + f.split + f.supplies + f.octopus + f.salary + f.other + f.electric + f.remaining,
+    'Total = Mama + Split + Supplies + Octopus + Salary + Other + Electric + Remaining');
+  assert.ok(!/nori/i.test(note), 'the note must not name an excluded sku');
+
+  // And the decisive comparison: the SAME fortnight with no nori sold at all
+  // produces the same note, from both sides.
+  const clean = syncedClient(NF_NONE.boot);
+  assert.strictEqual(NF.cutoff.note_text, NF_NONE.cutoff.note_text,
+    'the note the partner receives must be byte-identical with nori sales present');
+  assert.strictEqual(app.buildNote(local, PERIOD), clean.buildNote(clean.computeCutoff(PERIOD), PERIOD),
+    "and so must the phone's own offline copy of it");
+  assert.strictEqual(NF_NONE.cutoff.figures.excluded, 0);
+  assert.deepStrictEqual(NF_NONE.cutoff.figures.excluded_lines, []);
+});
+
+test('the phone computes the SAME split the server does: nori out of total, kept apart', () => {
+  // v2.4.0 frontend: computeDay reads in_cutoff and mirrors apiSaveDay exactly, so
+  // the receipt shows the figure the sheet will store instead of being corrected
+  // afterwards. (Before the screens shipped, the phone counted nori and the save
+  // reply put it right; now the two agree before anything is sent.)
+  const app = syncedClient(NF.boot);
+  const payload = noriDay(N_DAY_A, 'box4', 10, 2, 12, 'nori-day-a');
+  const c = app.computeDay(payload);
+  assert.strictEqual(c.total, 500, 'the boxes only — nori is not in the day total');
+  assert.strictEqual(c.gcash, 100);
+  assert.strictEqual(c.cash, 400);
+  assert.strictEqual(c.excluded, 300, '12 nori at 25, kept apart');
+  assert.strictEqual(c.total, c.cash + c.gcash, 'Cash = Total − GCash still holds');
+  // Line by line, and the server's own reply for the same day agrees to the peso.
+  assert.strictEqual(c.lines.find(l => l.sku === 'box4').in_cutoff, true);
+  assert.strictEqual(c.lines.find(l => l.sku === 'nori').in_cutoff, false);
+  assert.deepStrictEqual(c.excludedLines.map(l => [l.sku, l.sold, l.amount]), [['nori', 12, 300]]);
+  assert.strictEqual(c.excluded, c.excludedLines.reduce((s, l) => s + l.amount, 0),
+    'the excluded lines must add up to the excluded total, or the receipt lies');
+  assert.strictEqual(c.total, NF.dayA.total, 'phone vs server total');
+  assert.strictEqual(c.cash, NF.dayA.cash);
+  assert.strictEqual(c.gcash, NF.dayA.gcash);
+  assert.strictEqual(c.excluded, NF.dayA.excluded_total, 'phone vs server excluded_total');
+
+  // The optimistic local write stores it the way the sheet does — beside the day's
+  // money, never inside it — and the server reply lands on the same figures.
+  app.applyLocalDay(payload);
+  assert.strictEqual(app.state.days[N_DAY_A].total, 500);
+  assert.strictEqual(app.state.days[N_DAY_A].excluded_total, 300);
+  app.applyServerDay(payload, NF.dayA);
+  assert.strictEqual(app.state.days[N_DAY_A].total, 500,
+    'the server reply is authoritative and says the same thing');
+  assert.strictEqual(app.state.days[N_DAY_A].gcash, 100);
+  assert.strictEqual(app.state.days[N_DAY_A].cash, 400);
+  assert.strictEqual(app.state.days[N_DAY_A].excluded_total, 300);
+  // nori IS counted: its count row survives in full, with its own money on it.
+  const row = (app.state.counts[N_DAY_A] || []).find(r => r.sku === 'nori');
+  assert.strictEqual(row.sold, 12);
+  assert.strictEqual(row.amount, 300);
+  // ...and the period the phone previews is right.
+  assert.strictEqual(app.computeCutoff(PERIOD).total, N_EXPECT.total);
+});
+
+// THE most dangerous line of this release. Every price row on the owner's live
+// sheet gets an EMPTY in_cutoff cell at migration, and a state_v1 written by the
+// old build has no key at all. If either read FALSE, every takoyaki sku would
+// drop out of the cutoff and the note would collapse — with every figure still
+// looking like a perfectly good number.
+test('a BLANK in_cutoff reads TRUE on the phone too, and only an explicit false is out', () => {
+  const app = loadClient();
+  [undefined, null, '', '   ', 'TRUE', 'true', true, 1, 'yes', 'maybe', 'nori'].forEach(v => {
+    assert.strictEqual(app.inCutoffFlag(v), true,
+      JSON.stringify(v) + ' must count IN — losing money silently is the worse failure');
+  });
+  [false, 'FALSE', 'false', 'False', '0', 'no', 'n', 'off'].forEach(v => {
+    assert.strictEqual(app.inCutoffFlag(v), false, JSON.stringify(v) + ' must be OUT');
+  });
+  // Through the normalizer, which is what every stored and every bootstrapped row
+  // goes through.
+  assert.strictEqual(app.normPrice({ sku:'box4', price:50 }).in_cutoff, true,
+    'a row with NO in_cutoff key (the old build, or an unmigrated sheet) counts IN');
+  assert.strictEqual(app.normPrice({ sku:'box4', price:50, in_cutoff:'' }).in_cutoff, true,
+    'a BLANK cell counts IN — this is the migration case, on every existing row');
+  assert.strictEqual(app.normPrice({ sku:'nori', price:25, in_cutoff:false }).in_cutoff, false);
+  assert.strictEqual(app.normPrice({ sku:'nori', price:25, in_cutoff:'FALSE' }).in_cutoff, false,
+    'the sheet writes booleans as FALSE text through the API too');
+  // A legacy camelCase server must not lose the flag either.
+  assert.strictEqual(app.normPrice({ sku:'nori', price:25, inCutoff:false }).in_cutoff, false);
+
+  // A phone whose sheet has never heard of in_cutoff: every sku counts IN, so the
+  // day, the preview and the note are exactly what they were before this release.
+  const noFlag = { prices: NF.boot.prices.map(p => {
+    const o = Object.assign({}, p); delete o.in_cutoff; return o;
+  }) };
+  const legacy = syncedClient(noFlag);
+  legacy.state.prices.forEach(p => assert.strictEqual(p.in_cutoff, true, p.sku + ' fell out of the cutoff'));
+  const payload = noriDay(N_DAY_A, 'box4', 10, 2, 12, 'nori-day-a');
+  assert.strictEqual(legacy.computeDay(payload).total, 800,
+    'with no flag anywhere, nori counts IN (500 + 300) — nothing is dropped');
+  assert.strictEqual(legacy.computeDay(payload).excluded, 0);
+});
+
+test('the seeded phone knows nori, so demo mode and the first price save both work', () => {
+  const app = loadClient();                        // never synced: these are the seeds
+  const nori = app.state.prices.find(p => p.sku === 'nori');
+  assert.ok(nori, 'demo mode must be able to sell nori on day one');
+  assert.strictEqual(app.num(nori.price), 25);
+  assert.strictEqual(nori.group, 'simple', 'start/end counts, one price, no cheese');
+  assert.strictEqual(nori.in_cutoff, false);
+  assert.strictEqual(app.skuInCutoff('nori'), false);
+  assert.strictEqual(app.skuInCutoff('box4'), true);
+  assert.strictEqual(app.skuInCutoff('who-knows'), true, 'an unknown sku counts IN');
+  // A brand-new phone computes the excluded money for itself, with no server.
+  app.applyLocalDay(noriDay('2026-07-26', 'box4', 10, 0, 3, 'demo-nori'));
+  const day = app.state.days['2026-07-26'];
+  assert.strictEqual(day.total, 500, 'Box 4 sold 10 at 50');
+  assert.strictEqual(day.cash, 500, 'the nori money is NOT in Cash');
+  assert.strictEqual(day.excluded_total, 75, '3 nori at 25');
+});
+
+test('the phone never sends a GCash count on an excluded sku, so the day always saves', () => {
+  // The server REFUSES a GCash count on an excluded sku (its money is not in Total,
+  // so banking it as GCash would break Total = Cash + GCash). The card shows no
+  // GCash stepper, so a stale draft is the only way a figure can get there — and it
+  // must not make the day un-saveable with no field to fix it.
+  const app = syncedClient(NF.boot);
+  app.loadBentaForm(N_DAY_A);
+  const nori = app.benta.rows.find(r => r.sku === 'nori');
+  assert.ok(nori, 'nori must be on the Sales form like any other sku');
+  assert.strictEqual(nori.sod, 12, 'and it reloads the counts that were saved');
+  nori.gcash = 4;                                  // a draft from a hand-edited row
+  nori.cheese = 2;                                 // and nori has no cheese version
+  const payload = app.bentaPayload();
+  const sent = payload.counts.find(c => c.sku === 'nori');
+  assert.strictEqual(sent.gcashQty, 0, 'the payload must carry the 0 the server demands');
+  assert.strictEqual(sent.cheeseQty, 0, 'and no cheese count on a sku that has no cheese');
+  assert.strictEqual(sent.gcashCheeseQty, 0);
+  assert.strictEqual(app.computeDay(payload).excluded, 300,
+    'and the money it shows must be the whole nori amount, unsplit');
+  // Neither figure has a stepper on the card, so neither may raise a complaint she
+  // has no field to answer — that is a day that can never be saved again.
+  const box4 = payload.counts.find(c => c.sku === 'box4');
+  assert.strictEqual(box4.gcashQty, 2, 'a normal sku still sends its real buckets');
+  // The real server takes it.
+  const r = post(NF.ctx, { token: NF.token, action: 'saveDay',
+    payload: Object.assign(payload, { entryId: 'nori-day-a' }) });
+  assert.strictEqual(r.ok, true, 'the phone queued a day the server refuses: ' + r.error);
+  assert.strictEqual(r.data.excluded_total, 300);
+  assert.strictEqual(r.data.total, 500);
+});
+
+test('the Cutoff screen block matches the server: excluded apart, note untouched', () => {
+  const app = syncedClient(NF.boot);
+  const local = app.computeCutoff(PERIOD);
+  const f = NF.cutoff.figures;
+  assert.strictEqual(local.excluded, f.excluded, 'the phone and the sheet must agree: ' +
+    local.excluded + ' vs ' + f.excluded);
+  assert.deepStrictEqual(local.excludedLines, f.excluded_lines,
+    'the block under the note is the same block the server computed');
+  assert.strictEqual(local.excluded, local.excludedLines.reduce((s, l) => s + l.amount, 0));
+  // And it is in NOTHING else: the identity still closes with nori nowhere in it.
+  assert.strictEqual(local.total, f.total);
+  assert.strictEqual(local.total, local.cash + local.gcash);
+  assert.strictEqual(local.total, app.num(local.mama) + local.split + local.supplies +
+    local.octopus + local.salary + local.other + local.electric + local.remaining,
+    'Total = Mama + Split + Supplies + Octopus + Salary + Other + Electric + Remaining');
+  assert.notStrictEqual(local.excluded, 0, 'and that identity closed while money WAS excluded');
+  // The note is the artefact that must not move by a byte.
+  const note = app.buildNote(local, PERIOD);
+  assert.strictEqual(note, NF.cutoff.note_text, 'the phone note must equal the server note');
+  assert.ok(!/nori/i.test(note), 'the note must not name an excluded sku');
+  const clean = syncedClient(NF_NONE.boot);
+  assert.strictEqual(note, clean.buildNote(clean.computeCutoff(PERIOD), PERIOD),
+    'and it must be identical to the same fortnight with no nori sold at all');
+  // Nothing sold, nothing to show.
+  assert.strictEqual(clean.computeCutoff(PERIOD).excluded, 0);
+  assert.deepStrictEqual(clean.computeCutoff(PERIOD).excludedLines, []);
+  // A count row with NO snapshot whose sku the phone cannot look up counts IN, so it
+  // never appears in this block by accident...
+  const orphan = syncedClient(NF.boot);
+  orphan.state.prices = orphan.state.prices.filter(p => p.sku !== 'nori');
+  orphan.state.counts[N_DAY_A].forEach(r => { r.in_cutoff = ''; });
+  orphan.state.counts[N_DAY_B].forEach(r => { r.in_cutoff = ''; });
+  assert.deepStrictEqual(orphan.excludedForPeriod(PERIOD).lines, [],
+    'a sku with no price row and no snapshot must not be silently excluded');
+  // ...but an explicit FALSE snapshot on such a row IS excluded money that is in no
+  // total, so it is still shown — under its sku as its own label, exactly as the
+  // server lists it (v2.4.1). Dropping it would leave `excluded` unequal to the lines
+  // printed beneath it, and money the owner keeps out visible nowhere at all.
+  const gone = syncedClient(NF.boot);
+  gone.state.prices = gone.state.prices.filter(p => p.sku !== 'nori');
+  const orphanBlock = gone.excludedForPeriod(PERIOD);
+  assert.deepStrictEqual(orphanBlock.lines, [{ sku: 'nori', label: 'nori', qty: 16, amount: 400 }],
+    'excluded money whose price row has gone must still be listed');
+  assert.strictEqual(orphanBlock.total, orphanBlock.lines.reduce((s, l) => s + l.amount, 0),
+    'the total must always equal the lines printed beneath it');
+});
+
+// The guards above are only fixes if the screens use them, and these live inside
+// render functions that need a DOM — so they are pinned against the SOURCE, the
+// same way the slab markers are.
+test('the screens show nori apart: card badge, receipt line, tin, cutoff block, toggle', () => {
+  const render = slab('function renderBenta(){', 'const CHEV =');
+  assert.ok(/inCutoffFlag\(pr\.in_cutoff\)/.test(render),
+    'the Sales card must read the flag off the price row');
+  assert.ok(/badge-excl/.test(render), 'an excluded sku must be visibly marked on its card');
+  assert.ok(/excl-note/.test(render), 'and say in one short line where its money goes');
+  assert.ok(/inCut \?/.test(render), 'no payment buckets on a sku with no payment split');
+
+  const receipt = slab('function updateReceipt(){', 'function rLine(label, amt){');
+  assert.ok(/if \(!l\.in_cutoff\) continue;/.test(receipt),
+    'an excluded sku must NOT sit among the lines that add up to the TOTAL');
+  assert.ok(receipt.indexOf('excludedLines') > receipt.indexOf('>Cash<'),
+    'its own line comes BELOW Total / GCash / Cash');
+  assert.ok(/Cash in the tin/.test(receipt),
+    'the tin holds Cash PLUS this money — without that line it can never reconcile');
+
+  const cutoff = slab('function renderCutoff(){', 'async function generateNote(){');
+  assert.ok(/excludedBlockHTML\(f\)/.test(cutoff), 'the Cutoff screen must render the block');
+  assert.ok(cutoff.indexOf('excludedBlockHTML(f)') > cutoff.indexOf('notePre'),
+    'and it must come BELOW the note');
+  assert.ok(/Not part of this cutoff/.test(cutoff) && /NOT in the note/.test(cutoff),
+    'labelled so it cannot be mistaken for part of the cutoff or the note');
+  const noteFn = slab('function buildNote(f, per){', '/* ------------------------------------------------------------\n   STOCK ON HAND');
+  assert.strictEqual(/exclu/i.test(noteFn), false,
+    'buildNote must not read the excluded figures at all — the note does not change');
+
+  const maint = slab('function maintenanceHTML(){', 'function priceRowError(pr, m){');
+  assert.ok(/data-mcutoff/.test(maint), 'Maintenance must offer the per-sku cutoff toggle');
+  assert.ok(/Counts in the cutoff/.test(maint), 'in words the owner can read');
+  const savePrices = slab('function saveMaintPrices(){', 'function saveMaintSettings(){');
+  assert.ok(/inCutoff/.test(savePrices), 'and send it — this screen knows the flag');
+});
+
+test('Maintenance can retune nori and switch the flag, and the server agrees', () => {
+  const app = syncedClient(NF.boot);
+  // Exactly the batch saveMaintPrices() builds out of the fields on screen.
+  const rows = app.state.prices.map(p => ({
+    sku: p.sku, price: app.num(p.price), cheesePrice: app.num(p.cheese_price),
+    active: !!p.active, inCutoff: p.in_cutoff !== false
+  }));
+  const nori = rows.find(r => r.sku === 'nori');
+  assert.strictEqual(nori.inCutoff, false, 'the toggle starts off for nori');
+  nori.price = 30;                                  // nori's price is editable
+  const r = post(NF.ctx, { token: NF.token, action: 'savePrices', payload: { rows } });
+  assert.strictEqual(r.ok, true, 'the batch the screen sends must be accepted: ' + r.error);
+  const boot = post(NF.ctx, { token: NF.token, action: 'bootstrap', payload: {} });
+  const after = boot.data.prices.find(p => p.sku === 'nori');
+  assert.strictEqual(after.price, 30, 'nori is priced like any other item');
+  assert.strictEqual(after.in_cutoff, false, 'and it stayed out of the cutoff');
+  boot.data.prices.filter(p => p.sku !== 'nori').forEach(p => assert.strictEqual(p.in_cutoff, true,
+    'one ordinary price save must never take a takoyaki sku out of the cutoff'));
+  // The local applier honours the same rule the server does: a payload that says
+  // nothing about the flag leaves it exactly as it is.
+  const old = syncedClient(NF.boot);
+  old.applyLocalPrices({ rows: [{ sku:'nori', price:30, cheesePrice:0, active:true }] });
+  assert.strictEqual(old.state.prices.find(p => p.sku === 'nori').in_cutoff, false,
+    'a batch queued before v2.4.0 must not switch a flag it has never heard of');
+  old.applyLocalPrices({ rows: [{ sku:'nori', price:30, cheesePrice:0, active:true, inCutoff:true }] });
+  assert.strictEqual(old.state.prices.find(p => p.sku === 'nori').in_cutoff, true,
+    'an explicit value is applied');
+});
+
+// v2.4.1. Whether a line's money counted is a fact about the NIGHT IT WAS SAVED,
+// so the flag is snapshotted onto the count row and travels with it. Ticking
+// "counts in the cutoff" is an ordinary thing to do in Maintenance, and it must
+// not restate a fortnight that has already been sent — on either side of the seam.
+test('the in_cutoff SNAPSHOT crosses the seam, and a later flip restates nothing', () => {
+  const SNAP = noriFixture(true);          // its own server: nori sold on two days
+  // Every count row the phone receives says whether ITS OWN money counted.
+  const rowOf = (date, sku) => SNAP.boot.counts.find(c => c.date === date && c.sku === sku);
+  assert.strictEqual(rowOf(N_DAY_A, 'nori').in_cutoff, false,
+    'the snapshot must reach the phone, or history is classified by a live flag again');
+  assert.strictEqual(rowOf(N_DAY_A, 'box4').in_cutoff, true);
+  assertPairs('bootstrap.counts[]', SNAP.boot.counts, CONTRACT['bootstrap.counts[]']);
+  assertNoCamelKeys('bootstrap(snapshot)', SNAP.boot.counts);
+
+  // The owner ticks nori back into the cutoff, a fortnight after the fact.
+  const flip = post(SNAP.ctx, { token: SNAP.token, action: 'savePrices',
+    payload: { rows: [{ sku: 'nori', price: 25, cheesePrice: 0, active: true, inCutoff: true }] } });
+  assert.strictEqual(flip.ok, true, flip.error);
+  const after = post(SNAP.ctx, { token: SNAP.token, action: 'cutoff',
+    payload: { start: PERIOD.start, end: PERIOD.end, dryRun: true } });
+  assert.strictEqual(after.ok, true, after.error);
+  assert.deepStrictEqual(after.data.figures, SNAP.cutoff.figures,
+    'a flag flip may not move one figure of a fortnight that is already saved');
+  assert.strictEqual(after.data.note_text, SNAP.cutoff.note_text,
+    'and the note his partner already has must regenerate byte for byte');
+  assert.strictEqual(after.data.figures.excluded, N_EXPECT.excluded,
+    'the ₱400 was in no total, so dropping it from the block loses it everywhere');
+
+  // ...and a phone that re-bootstraps afterwards is told the same money it was
+  // told before: the day rows, and therefore every figure it computes off them.
+  const boot2 = post(SNAP.ctx, { token: SNAP.token, action: 'bootstrap', payload: {} });
+  assert.deepStrictEqual(boot2.data.days, SNAP.boot.days,
+    'the stored day money is history and a flag flip must not touch it');
+  const app = syncedClient(boot2.data);
+  const { local } = assertCutoffSeam(app, PERIOD, after.data);
+  assert.strictEqual(local.total, N_EXPECT.total);
+  assert.strictEqual(local.total, local.cash + local.gcash);
+});
+
+// The bucket guard and the simple-only rule, at the seam: the phone can never
+// build a payload that trips either of them, and the server refuses them anyway.
+test('no bucket on an excluded sku, and an excluded sku is always group=simple', () => {
+  const app = syncedClient(NF.boot);
+  const nori = app.state.prices.find(p => p.sku === 'nori');
+  assert.strictEqual(nori.group, 'simple', 'an excluded sku must be a simple item');
+  assert.strictEqual(nori.in_cutoff, false);
+  // Whatever a stale draft holds, all three buckets leave the phone as 0.
+  app.loadBentaForm(N_DAY_A);
+  const row = app.benta.rows.find(r => r.sku === 'nori');
+  row.cheese = 3; row.gcash = 2; row.gcashCheese = 1;
+  const sent = app.bentaPayload().counts.find(c => c.sku === 'nori');
+  assert.deepStrictEqual([sent.cheeseQty, sent.gcashQty, sent.gcashCheeseQty], [0, 0, 0]);
+
+  // The server refuses each bucket by name if one ever arrives, and refuses the
+  // whole configuration if a box sku is hand-edited out of the cutoff.
+  const { ctx, ss, token } = loadServer();
+  const day = counts => post(ctx, { token, action: 'saveDay', payload: {
+    date: N_DAY_A, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: counts, entryId: 'seam-excl-1' } });
+  const gcash = day([{ sku: 'nori', sod: 4, eod: 0, cheeseQty: 0, gcashQty: 1, gcashCheeseQty: 0 }]);
+  assert.strictEqual(gcash.ok, false);
+  assert.match(gcash.error, /Nori/);
+  assert.match(gcash.error, /its GCash count must be 0/);
+
+  // A box sku switched out of the cutoff: savePrices will not create it...
+  const bad = post(ctx, { token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box4', price: 50, cheesePrice: 60, active: true, inCutoff: false }] } });
+  assert.strictEqual(bad.ok, false, 'a box with a cheese version cannot be kept out of the cutoff');
+  assert.match(bad.error, /box4/);
+  // ...and a sheet hand-edited into it cannot have a day saved against it, because
+  // the Sales card would hide the cheese steppers the payload still carries.
+  const prices = ss.getSheetByName('Prices');
+  const head = prices.getDataRange().getValues()[0];
+  prices.getRange(2, head.indexOf('in_cutoff') + 1).setValue(false);
+  assert.strictEqual(prices.getDataRange().getValues()[1][0], 'box4', 'precondition: row 2 is box4');
+  const handEdited = day([{ sku: 'box4', sod: 4, eod: 0, cheeseQty: 1, gcashQty: 0, gcashCheeseQty: 0 }]);
+  assert.strictEqual(handEdited.ok, false);
+  assert.match(handEdited.error, /Box 4/, 'the message must name the item');
+  assert.match(handEdited.error, /its cheese count must be 0|simple/,
+    'and say what to zero or what to change');
+});
+
+// ---------------------------------------------------------------------------
+console.log("\n--- 16. v2.4.1 on the PHONE: snapshot, buckets, and the nightly screen ---");
+
+// F2. The phone classified a SAVED day's money by the LIVE Prices flag, so ticking
+// "counts in the cutoff" in Maintenance restated a fortnight it had already shown —
+// in both directions. Whether a line's money counted is a fact about the night it
+// was saved, and the count row now carries it.
+test('the phone reads the SNAPSHOT off each count row, not the live flag', () => {
+  const app = syncedClient(NF.boot);
+  const rowOf = (date, sku) => app.state.counts[date].find(r => r.sku === sku);
+  assert.strictEqual(rowOf(N_DAY_A, 'nori').in_cutoff, false,
+    'the snapshot the server sent must survive normCount, or history is classified by a live flag');
+  assert.strictEqual(rowOf(N_DAY_A, 'box4').in_cutoff, true);
+  assert.strictEqual(app.countInCutoff(rowOf(N_DAY_A, 'nori')), false);
+  assert.strictEqual(app.countInCutoff(rowOf(N_DAY_A, 'box4')), true);
+
+  const before = app.computeCutoff(PERIOD);
+  assert.strictEqual(before.excluded, N_EXPECT.excluded, 'precondition: ₱400 of nori is kept out');
+
+  // The owner ticks nori BACK INTO the cutoff, a fortnight after the fact — an
+  // ordinary thing to do on the Maintenance screen.
+  app.applyLocalPrices({ rows: [{ sku: 'nori', price: 25, cheesePrice: 0, active: true, inCutoff: true }] });
+  assert.strictEqual(app.skuInCutoff('nori'), true, 'precondition: the live flag really did flip');
+  const after = app.computeCutoff(PERIOD);
+  assert.strictEqual(after.excluded, N_EXPECT.excluded,
+    'the ₱400 was in NO total, so dropping it from the block makes it vanish from the phone entirely');
+  assert.deepStrictEqual(after.excludedLines, before.excludedLines);
+  assert.strictEqual(after.total, before.total, 'and the saved day money is history — it must not move');
+  assert.strictEqual(app.buildNote(after, PERIOD), app.buildNote(before, PERIOD),
+    'the note is built from figures a flag flip may not touch');
+
+  // The other direction: a sku that WAS counted must not also appear as "kept out"
+  // — its money is inside `total`, so it would be shown twice, contradicting itself.
+  const out = syncedClient(NF.boot);
+  out.state.prices.find(p => p.sku === 'box4').in_cutoff = false;   // as a hand-edited sheet would arrive
+  const flipped = out.computeCutoff(PERIOD);
+  assert.deepStrictEqual(flipped.excludedLines, before.excludedLines,
+    "box4's saved money is inside total — it cannot also be listed as kept out");
+  assert.strictEqual(flipped.total, before.total);
+});
+
+test('a count row with no snapshot falls back to the sku flag, and only then', () => {
+  const app = loadClient();
+  // Raw at the normalizer: an explicit value survives, a blank stays blank.
+  assert.strictEqual(app.normCount({ sku: 'nori', date: N_DAY_A, in_cutoff: false }).in_cutoff, false);
+  assert.strictEqual(app.normCount({ sku: 'box4', date: N_DAY_A, in_cutoff: true }).in_cutoff, true);
+  assert.strictEqual(app.normCount({ sku: 'box4', date: N_DAY_A, in_cutoff: 'FALSE' }).in_cutoff, false,
+    'the sheet writes booleans as text through the API');
+  assert.strictEqual(app.normCount({ sku: 'box4', date: N_DAY_A }).in_cutoff, '',
+    'a row written before v2.4.1 has NO snapshot and must not pretend to have one');
+  assert.strictEqual(app.normCount({ sku: 'box4', date: N_DAY_A, in_cutoff: '' }).in_cutoff, '');
+  assert.strictEqual(app.normCount({ sku: 'nori', date: N_DAY_A, inCutoff: false }).in_cutoff, false,
+    'a legacy camelCase server must not lose the snapshot either');
+  assert.strictEqual(app.rawCutoffFlag(undefined), '');
+  assert.strictEqual(app.rawCutoffFlag('no'), false);
+
+  // Resolved at USE time: blank -> the sku's current flag; explicit -> itself.
+  assert.strictEqual(app.countInCutoff({ sku: 'nori', in_cutoff: '' }), false, "nori's flag is off");
+  assert.strictEqual(app.countInCutoff({ sku: 'box4', in_cutoff: '' }), true);
+  assert.strictEqual(app.countInCutoff({ sku: 'who-knows', in_cutoff: '' }), true,
+    'a sku with no price row counts IN — never drop money nobody asked to drop');
+  assert.strictEqual(app.countInCutoff({ sku: 'box4', in_cutoff: false }), false,
+    'an explicit snapshot beats the live flag, which is the whole point');
+
+  // A whole fortnight of pre-v2.4.1 rows: classified by the sku's flag, which is the
+  // best answer such a row can give — and NOT silently dropped.
+  const legacy = syncedClient(NF.boot);
+  [N_DAY_A, N_DAY_B].forEach(d => legacy.state.counts[d].forEach(r => { r.in_cutoff = ''; }));
+  assert.strictEqual(legacy.excludedForPeriod(PERIOD).total, N_EXPECT.excluded);
+  assert.strictEqual(legacy.computeCutoff(PERIOD).total, N_EXPECT.total);
+});
+
+test('the phone snapshots the flag when IT saves a day, and the server reply agrees', () => {
+  const app = syncedClient(NF.boot);
+  const payload = noriDay(N_DAY_A, 'box4', 10, 2, 12, 'nori-day-a');
+  app.applyLocalDay(payload);
+  const nori = app.state.counts[N_DAY_A].find(r => r.sku === 'nori');
+  assert.strictEqual(nori.in_cutoff, false,
+    'the optimistic write must snapshot the flag beside the money it decided');
+  assert.strictEqual(app.state.counts[N_DAY_A].find(r => r.sku === 'box4').in_cutoff, true);
+  // Offline, before any reply: flipping the flag must not restate what was just saved.
+  app.applyLocalPrices({ rows: [{ sku: 'nori', price: 25, cheesePrice: 0, active: true, inCutoff: true }] });
+  assert.strictEqual(app.excludedForPeriod(PERIOD).total, N_EXPECT.excluded);
+  // And the server's own per-line snapshot lands on the row when the reply arrives.
+  app.applyServerDay(payload, NF.dayA);
+  assert.strictEqual(app.state.counts[N_DAY_A].find(r => r.sku === 'nori').in_cutoff, false);
+  assert.strictEqual(app.excludedForPeriod(PERIOD).total, N_EXPECT.excluded);
+});
+
+test('the server reply corrects a snapshot the phone guessed wrong', () => {
+  const app = syncedClient(NF.boot);
+  // This phone has not seen the Maintenance change yet: its price list still says
+  // nori counts IN, so its own optimistic write snapshots the wrong answer.
+  app.state.prices.find(p => p.sku === 'nori').in_cutoff = true;
+  const payload = noriDay(N_DAY_A, 'box4', 10, 2, 12, 'nori-day-a');
+  app.applyLocalDay(payload);
+  assert.strictEqual(app.state.counts[N_DAY_A].find(r => r.sku === 'nori').in_cutoff, true,
+    'precondition: the phone guessed IN, because that is what its price list said');
+  assert.strictEqual(app.state.days[N_DAY_A].total, 800, 'and banked nori inside the day total');
+  // The sheet knows better, and its reply is authoritative — the money AND which
+  // line of it counted.
+  app.applyServerDay(payload, NF.dayA);
+  assert.strictEqual(app.state.days[N_DAY_A].total, 500);
+  assert.strictEqual(app.state.days[N_DAY_A].excluded_total, 300);
+  assert.strictEqual(app.state.counts[N_DAY_A].find(r => r.sku === 'nori').in_cutoff, false,
+    'the row must be reclassified too, or that ₱300 is in no total AND in no excluded block');
+  assert.strictEqual(app.excludedForPeriod(PERIOD).total, N_EXPECT.excluded,
+    'which is exactly the block the Cutoff screen shows');
+});
+
+// F1/F3. An excluded sku has NO variant and NO payment split at all. Guarding the
+// GCash bucket alone let a cheese count be priced at the CHEESE price into the
+// excluded money the receipt shows — money the sheet would never store.
+test('an excluded sku prices and sends NO bucket, even when the sheet calls it a box', () => {
+  const app = syncedClient(NF.boot);
+  // The sheet has been hand-edited into the state savePrices refuses to create:
+  // nori kept out of the cutoff, but still a box with a cheese price.
+  const nori = app.state.prices.find(p => p.sku === 'nori');
+  nori.group = 'box'; nori.cheese_price = 60;
+  // A payload an older build queued (or a hand-edited row) with every bucket filled.
+  const stale = { date: N_DAY_A, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'nori', sod: 12, eod: 0, cheeseQty: 2, gcashQty: 3, gcashCheeseQty: 1 }] };
+  const c = app.computeDay(stale);
+  assert.strictEqual(c.excluded, 300,
+    '12 nori at the ONE price of 25 — a cheese bucket must never be priced at 60 here');
+  assert.strictEqual(c.gcash, 0, 'and none of it may reach the day GCash figure');
+  assert.strictEqual(c.total, 0, 'nor the day total');
+  const line = c.lines.find(l => l.sku === 'nori');
+  assert.deepStrictEqual([line.cheese_qty, line.gcash_qty, line.gcash_cheese_qty], [0, 0, 0]);
+  assert.strictEqual(line.regular_qty, 12, 'all twelve are plain quantity');
+
+  // The form sends the same three 0s, whatever a stale draft holds.
+  app.loadBentaForm(N_DAY_A);
+  const row = app.benta.rows.find(r => r.sku === 'nori');
+  row.cheese = 2; row.gcash = 3; row.gcashCheese = 1;
+  const sent = app.bentaPayload().counts.find(x => x.sku === 'nori');
+  assert.deepStrictEqual([sent.cheeseQty, sent.gcashQty, sent.gcashCheeseQty], [0, 0, 0]);
+});
+
+test("the phone refuses a bucket on an excluded sku in the SERVER's own words", () => {
+  const app = syncedClient(NF.boot);
+  // A GCash count on nori (simple + excluded): word for word what the server says.
+  const srv = loadServer();
+  const day = counts => post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
+    date: N_DAY_A, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: counts, entryId: 'phone-excl-1' } });
+  const served = day([{ sku: 'nori', sod: 4, eod: 0, cheeseQty: 0, gcashQty: 1, gcashCheeseQty: 0 }]);
+  assert.strictEqual(served.ok, false, 'precondition: the server refuses it');
+  assert.strictEqual(app.excludedRowError('nori', { gcash: 1 }), served.error,
+    'the phone must say exactly what the server would, or the two disagree about the same money');
+
+  // Through the validator, which is what actually blocks the save.
+  app.loadBentaForm(N_DAY_A);
+  app.benta.rows.find(r => r.sku === 'nori').gcash = 4;
+  const errs = app.validateBenta();
+  assert.match(errs['sku:nori'], /its GCash count must be 0/);
+  assert.ok(!errs['sku:box4'] && !errs['sku:box6'], 'and it complains about nothing else');
+
+  // All three buckets at once, on a sheet hand-edited into box + excluded: the
+  // server names them with "and", and so must the phone.
+  const prices = srv.ss.getSheetByName('Prices');
+  const head = prices.getDataRange().getValues()[0];
+  assert.strictEqual(prices.getDataRange().getValues()[1][0], 'box4', 'precondition: row 2 is box4');
+  prices.getRange(2, head.indexOf('in_cutoff') + 1).setValue(false);
+  const three = day([{ sku: 'box4', sod: 9, eod: 0, cheeseQty: 1, gcashQty: 1, gcashCheeseQty: 1 }]);
+  assert.strictEqual(three.ok, false);
+  assert.match(three.error, /its cheese, GCash and GCash cheese counts must be 0/);
+  const app2 = syncedClient(NF.boot);
+  app2.state.prices.find(p => p.sku === 'box4').in_cutoff = false;
+  assert.strictEqual(app2.excludedRowError('box4', { cheese: 1, gcash: 1, gcashCheese: 1 }), three.error);
+
+  // A nightly save must NEVER trip any of this: nori is on the form every night
+  // with nothing in its buckets, and the day has to save.
+  const ok = syncedClient(NF.boot);
+  ok.loadBentaForm('2026-07-28');
+  ok.benta.rows.find(r => r.sku === 'box4').sod = 10;
+  assert.deepStrictEqual(Object.keys(ok.validateBenta()), [],
+    'an ordinary night with nori on the form and none sold must save without a word');
+});
+
+test('an excluded box sku is refused inline instead of losing its cheese counts', () => {
+  const app = syncedClient(NF.boot);
+  const nori = app.state.prices.find(p => p.sku === 'nori');
+  nori.group = 'box'; nori.cheese_price = 60;
+  app.loadBentaForm(N_DAY_A);
+  const errs = app.validateBenta();
+  assert.ok(errs['sku:nori'], 'the server refuses this whole configuration — the phone must say so first');
+  assert.match(errs['sku:nori'], /kept out of the cutoff/);
+  assert.match(errs['sku:nori'], /simple/, 'and say what to change');
+  assert.match(errs['sku:nori'], /Counts in the cutoff/, 'naming the toggle that is one tap away');
+  // The card renders plain — one price, no cheese price, no buckets — so it can never
+  // show a cheese figure the save is about to refuse.
+  const render = slab('function renderBenta(){', 'const CHEV =');
+  assert.ok(/const showCheese = isBox && inCut;/.test(render),
+    'an excluded sku must render as a plain quantity card whatever its group says');
+  assert.ok(/showCheese \? ' · Cheese '/.test(render), 'so no cheese price appears on it');
+
+  // Maintenance cannot CREATE that state either: the same rule the server enforces.
+  const box4 = app.state.prices.find(p => p.sku === 'box4');
+  const msg = app.priceRowError(box4, { price: 50, cheesePrice: 60, active: true, inCutoff: false });
+  assert.match(msg, /cannot be kept out of the cutoff/);
+  assert.match(msg, /Box 4/);
+  assert.strictEqual(app.priceRowError(box4, { price: 50, cheesePrice: 60, active: false, inCutoff: false }),
+    msg, 'switching the sku off does not make a box excludable');
+  assert.strictEqual(app.priceRowError(box4, { price: 50, cheesePrice: 60, active: true, inCutoff: true }), '');
+  assert.strictEqual(app.priceRowError(box4, { price: 50, cheesePrice: 60, active: true }), '',
+    'a batch that says nothing about the flag means leave it alone — it must still save');
+  assert.strictEqual(app.priceRowError({ sku: 'nori', label: 'Nori', group: 'simple' },
+    { price: 25, cheesePrice: 0, active: true, inCutoff: false }),
+    '', 'a simple sku is exactly what an excluded sku should be');
+  const srv = loadServer();
+  const bad = post(srv.ctx, { token: srv.token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box4', price: 50, cheesePrice: 60, active: true, inCutoff: false }] } });
+  assert.strictEqual(bad.ok, false, 'the server refuses the batch this screen would have queued');
+});
+
+// F4/F5. The nightly screen. There is a nori line in `excludedLines` on EVERY night,
+// so the receipt printed a dead "Nori ×0 — not in the total ₱0" and the tautology
+// "Cash in the tin: ₱825 + ₱0 Nori = ₱825" on every ordinary one.
+test('an ordinary night shows no excluded line and no tin line at all', () => {
+  const app = syncedClient(NF.boot);
+  app.loadBentaForm('2026-07-28');                 // a fresh night, nori on the form as always
+  app.benta.rows.find(r => r.sku === 'box4').sod = 10;
+  const c = app.computeDay(app.bentaPayload());
+  assert.strictEqual(c.total, 500);
+  assert.strictEqual(c.cash, 500);
+  assert.strictEqual(c.excluded, 0);
+  assert.strictEqual(c.excludedLines.length, 1,
+    'precondition: the dead nori line IS there — the filter is what keeps it off the screen');
+  assert.deepStrictEqual(app.excludedTonight(c), [], 'so nothing excluded is printed');
+
+  // The same night with 3 nori sold: one line, and the tin the money actually sits in.
+  app.benta.rows.find(r => r.sku === 'nori').sod = 3;
+  const withNori = app.computeDay(app.bentaPayload());
+  assert.strictEqual(withNori.total, 500, 'nori is still in no total');
+  assert.strictEqual(withNori.cash, 500);
+  assert.strictEqual(withNori.excluded, 75);
+  const shown = app.excludedTonight(withNori);
+  assert.deepStrictEqual(shown.map(l => [l.label, l.sold, l.amount]), [['Nori', 3, 75]]);
+  assert.strictEqual(app.tinTotal(withNori), 575, 'Cash 500 + the 75 that shares the tin');
+  assert.strictEqual(app.tinTotal(withNori), withNori.cash + withNori.excluded);
+
+  // A closed day, and a night where nothing at all was entered: still silent.
+  app.benta.closed = true;
+  assert.deepStrictEqual(app.excludedTonight(app.computeDay(app.bentaPayload())), []);
+});
+
+test('the receipt and the day strip read the SAME rule for the tin', () => {
+  const receipt = slab('function updateReceipt(){', 'function rLine(label, amt){');
+  assert.ok(/const xl = excludedTonight\(c\);/.test(receipt),
+    'the receipt must ask whether there is excluded money tonight');
+  assert.ok(/if \(xl\.length\)\{/.test(receipt), 'and print the block only then');
+  assert.ok(!/asArr\(c\.excludedLines\)\.length/.test(receipt),
+    'the unconditional test is what printed a ₱0 line every single night');
+  assert.ok(receipt.indexOf('r-tin') > receipt.indexOf('const xl = excludedTonight(c);'),
+    'the tin line lives inside that guard');
+  assert.ok(receipt.indexOf('excludedTonight') > receipt.indexOf('>Cash<'),
+    'and still comes BELOW Total / GCash / Cash');
+
+  const strip = slab('function updateDayStrip(c){', 'function isWhole(v){');
+  assert.ok(/excludedTonight\(d\)\.length/.test(strip),
+    'the strip must use the same rule as the receipt, or the two disagree about the tin');
+  assert.ok(/Tin <b>' \+ peso\(tinTotal\(d\)\)/.test(strip),
+    'one short item showing the tin — the strip exists because the receipt is screens away');
+  assert.ok(/\? '<span class="tin">/.test(strip) && /: ''/.test(strip),
+    'and nothing at all when there is no excluded money');
+  assert.ok(/<\/span>' \+ tin \+ '<\/div>/.test(strip), 'appended after Cash and GCash');
 });
 
 // ---------------------------------------------------------------------------

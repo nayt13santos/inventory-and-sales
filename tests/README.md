@@ -27,3 +27,46 @@ Both suites still pin the SERVER note byte-exactly against the SPEC sample.
 ### Proving a test bites
 
 Every 2.3.0 behaviour was verified by mutation: 32 single-behaviour reverts (drop the Salary line, let the residual print `- -2,000`, make Split the residual again, clamp a negative `on_hand`, coerce a blank `opening_date` to today, ignore stocktakes, let `saveSettings` write the token, …) applied to a **scratch copy** of `Code.gs` — never the repo. All 32 turned at least one test red. The three that initially slipped through are now covered: a blank salary on a *closed* legacy row, `saveStockItems` resetting a hand-typed baseline, and `setupSheet` overwriting an edited stock unit.
+
+The v2.4.1 server guards (section 20 of `run-tests.js`) were verified the same way — eight single-behaviour reverts on a scratch `Code.gs`, each red on at least one test, and each of the three findings red on its OWN test:
+
+| revert | reds |
+| --- | --- |
+| classify history by the CURRENT Prices flag (v2.4.0 behaviour) | 4 — the two flip tests, the byte-identical note after a flip, the seam |
+| never write the `in_cutoff` snapshot onto the count row | 9 |
+| a blank snapshot falls back to TRUE instead of the sku's flag | 1 |
+| a blank snapshot falls back to FALSE | 2 |
+| guard `gcashQty` only, as v2.4.0 did | 1 — the bucket test, on the cheese message |
+| let `savePrices` take a `group=box` sku out of the cutoff | 2 |
+| let `saveDay` save a day against an excluded `group=box` sku | 1 |
+| drop `in_cutoff` from the DailyCounts schema | 45 |
+| drop excluded money whose sku has left Prices | 1 |
+
+Two of those reverts are the failure modes the release exists to prevent, so they are worth naming: the first one restates a fortnight that has already been sent (a ₱300 of nori vanishing from the excluded block while `total` never contained it), and "guard `gcashQty` only" is how a cheese bucket on an excluded sku had its money priced into `excluded_total` and taken straight out of the day's GCash.
+
+The v2.4.1 PHONE guards (section 16 of `contract.test.js`) were verified the same way — **18 single-behaviour reverts on a scratch copy of the whole repo**, never the repo itself, each red on at least one test:
+
+| revert on `pwa/index.html` | reds |
+| --- | --- |
+| `computeDay` prices an excluded sku's cheese buckets again | 1 |
+| `computeDay` lets an excluded sku's GCash bucket through | 1 |
+| `bentaPayload` sends an excluded sku's cheese buckets | 1 |
+| `bentaPayload` sends an excluded sku's GCash bucket | 3 |
+| `validateBenta` stays silent about a bucket on an excluded sku | 2 |
+| `validateBenta` words the refusal differently from the server | 1 |
+| `normCount` drops the `in_cutoff` snapshot | 5 |
+| `excludedForPeriod` classifies history by the LIVE flag (v2.4.0) | 4 |
+| a blank snapshot reads TRUE instead of the sku's flag | 1 |
+| a blank snapshot reads FALSE | 2 |
+| `applyLocalDay` does not snapshot the flag onto the row it saves | 2 |
+| `applyServerDay` ignores the server's per-line snapshot | 1 |
+| `excludedForPeriod` drops excluded money whose price row has gone | 1 |
+| `renderBenta` shows a cheese price on an excluded box sku | 1 |
+| `priceRowError` lets Maintenance take a box sku out of the cutoff | 1 |
+| the receipt prints the excluded block on every night again | 1 |
+| the day strip shows no tin figure | 1 |
+| the day strip shows the tin on every night | 1 |
+
+The last three are the F4/F5 noise findings: `excludedLines` holds a nori line on EVERY night, so the receipt printed a dead "Nori ×0 — not in the total ₱0" and the tautology "Cash in the tin: ₱825 + ₱0 Nori = ₱825" on every ordinary one. `excludedTonight()` is the single rule both the receipt and the strip read, which is why one revert of it turns up in both places.
+
+Three of the phone's guards are pinned against the **source** rather than a rendered DOM (the renderers need one): that the receipt and the strip both call `excludedTonight`, that the tin line sits inside that guard and still below Total/GCash/Cash, and that an excluded card renders `showCheese` rather than `isBox`. The money itself is asserted through the real `computeDay` / `validateBenta` / `excludedForPeriod`, and the wording of both refusals is asserted **equal to the string the real server returns** for the same day.

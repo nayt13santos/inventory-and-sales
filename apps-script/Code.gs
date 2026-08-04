@@ -72,9 +72,49 @@
  *     instead of arriving as 0 and being written back into the cell.
  *   - whole units are enforced on ALL THREE ledger writers, not just saveDay:
  *     a delivery's stockQty and a stocktake's qty were accepting 1.5.
+ *
+ * WHAT CHANGED IN v2.4.0 — a sku can now be SOLD AND COUNTED but kept OUT of
+ * the cutoff (owner, 2026-08-04: nori at ₱25 is his own line of business — "it
+ * must not be added to the bi-monthly cutoff, just show the total per cutoff,
+ * and I'll exclude it on my own"):
+ *   - Prices gains `in_cutoff`. A BLANK OR MISSING CELL READS TRUE — every row
+ *     on the live sheet gets an empty cell at migration, and if blank read as
+ *     FALSE every takoyaki sku would drop out of the cutoff and the note would
+ *     collapse to almost nothing. Only an explicit false value is FALSE
+ *     (asCutoffFlag, which is DELIBERATELY not asBool).
+ *   - DailyLog gains `excluded_total`: that day's money from in_cutoff=FALSE
+ *     skus, stored apart and NEVER part of total / cash / gcash.
+ *   - An excluded sku has no payment split at all: a GCash count on one is
+ *     REFUSED (see apiSaveDay) rather than quietly banked somewhere, because
+ *     the day's GCash figure exists to be reconciled against GCash history.
+ *   - apiCutoff's figures gain `excluded` and `excluded_lines`, DISPLAY ONLY:
+ *     they enter no other figure, and buildNoteText is UNTOUCHED — the owner
+ *     chose "Cutoff screen only", so what his partner receives does not change
+ *     by a single byte.
+ *
+ * WHAT CHANGED IN v2.4.1 — three holes in the SERVER's own excluded-sku guards.
+ * All three are about MONEY MOVING AFTER IT WAS SAVED, or leaving the day's
+ * GCash figure short of the GCash app:
+ *   - DailyCounts gains `in_cutoff`: the flag is SNAPSHOTTED onto every count
+ *     row at save time, exactly as prices are, and HISTORY IS CLASSIFIED BY THE
+ *     SNAPSHOT (excludedForPeriod). Classifying it by the CURRENT Prices flag
+ *     restated money that was already saved, in both directions: ticking nori
+ *     back on made a past ₱300 vanish from the excluded block while `total`
+ *     (read off the DailyLog row) still did not contain it, and ticking a
+ *     counted sku off made money that IS inside `total` also show up as "kept
+ *     out". A blank snapshot on a legacy row falls back to the sku's current
+ *     flag — the best available answer for a row written before the column.
+ *   - EVERY bucket is refused on an excluded sku, not just gcashQty: cheese and
+ *     GCash cheese were accepted, priced into `excluded_total`, and their money
+ *     disappeared out of the day's GCash — the exact harm the guard exists to
+ *     prevent.
+ *   - an excluded sku must be `group=simple`, and both savePrices and saveDay
+ *     REFUSE `in_cutoff=FALSE` on a `group=box` sku, naming the item. Otherwise
+ *     the Sales card hides the cheese steppers while the payload still carries
+ *     cheese quantities, so the phone and the sheet disagree about what sold.
  */
 
-var VERSION = '2.3.1';
+var VERSION = '2.4.1';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -114,14 +154,25 @@ var SCHEMA = [
   // Settings value column is also "@" so the token (or any numeric-looking
   // value) is never mangled by Sheets' automatic type coercion.
   { name: TAB.SETTINGS, headers: ['key', 'value'], textCols: ['value'] },
-  { name: TAB.PRICES, headers: ['sku', 'label', 'group', 'size', 'price', 'cheese_price', 'active'], textCols: [] },
+  // in_cutoff was appended in v2.4.0: FALSE means "sell it, count it, but keep
+  // its money out of every cutoff figure". A BLANK CELL IS TRUE — see
+  // asCutoffFlag. Every pre-v2.4.0 row is blank after migration.
+  { name: TAB.PRICES, headers: ['sku', 'label', 'group', 'size', 'price', 'cheese_price', 'active', 'in_cutoff'], textCols: [] },
   // custom_gcash was appended in v2.1.0 (how much of custom_amount was GCash).
   // `gcash` is computed server-side now — it is still stored, still returned.
   // salary was appended in v2.3.0: that day's wage, SNAPSHOTTED at save time so
   // a later daily_salary change never rewrites history.
-  { name: TAB.DAILY_LOG, headers: ['date', 'closed', 'staff', 'gcash', 'total', 'cash', 'custom_amount', 'notes', 'entry_id', 'updated_at', 'custom_gcash', 'salary'], textCols: ['date', 'updated_at'] },
+  // excluded_total was appended in v2.4.0: that day's money from in_cutoff=FALSE
+  // skus. It is stored NEXT TO the day's money, never inside it — total, cash
+  // and gcash all remain the cutoff's figures alone.
+  { name: TAB.DAILY_LOG, headers: ['date', 'closed', 'staff', 'gcash', 'total', 'cash', 'custom_amount', 'notes', 'entry_id', 'updated_at', 'custom_gcash', 'salary', 'excluded_total'], textCols: ['date', 'updated_at'] },
   // gcash_qty / gcash_cheese_qty / gcash_amount were appended in v2.1.0.
-  { name: TAB.DAILY_COUNTS, headers: ['date', 'sku', 'sod', 'eod', 'sold', 'cheese_qty', 'regular_qty', 'amount', 'entry_id', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount'], textCols: ['date'] },
+  // in_cutoff was appended in v2.4.1: the SNAPSHOT of the sku's flag as it stood
+  // when the day was saved, so flipping "counts in the cutoff" later can never
+  // restate money that is already in the sheet. A BLANK cell (every row written
+  // before this column existed) falls back to the sku's CURRENT flag — see
+  // countCutoffFlag.
+  { name: TAB.DAILY_COUNTS, headers: ['date', 'sku', 'sod', 'eod', 'sold', 'cheese_qty', 'regular_qty', 'amount', 'entry_id', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff'], textCols: ['date'] },
   // opening_qty / opening_date / reorder_at were appended in v2.3.0 (stock
   // ledger). opening_date is a yyyy-MM-dd string and BLANK means "count the
   // whole history" — see computeStockStatus.
@@ -272,7 +323,8 @@ function withLock(fn) {
 // ---------------------------------------------------------------------------
 
 function apiBootstrap(ss, settings) {
-  var prices = readPrices(ss).list;
+  var priceInfo = readPrices(ss);
+  var prices = priceInfo.list;
   var expensesAll = readExpenses(ss);
   var backlogs = readBacklogs(ss, expensesAll);
   var usageAll = readStockUsage(ss);
@@ -323,8 +375,10 @@ function apiBootstrap(ss, settings) {
     days: days,
     // The SAME 90-day window as `days` and `expenses`, so a cutoff preview can
     // never show one side of a period without the other, and an edited day
-    // always reloads complete.
-    counts: readCounts(ss).filter(inWindow),
+    // always reloads complete. Each row carries the `in_cutoff` snapshot that
+    // decided its money, with a legacy blank resolved against the price list
+    // read above — so the phone is told what counted rather than inferring it.
+    counts: readCounts(ss, priceInfo.map).filter(inWindow),
     stockUsage: usageAll.filter(inWindow),
     stockCounts: countsAll.filter(inWindow),
     expenses: expenses,
@@ -458,6 +512,52 @@ function apiSaveDay(ss, settings, payload) {
       throw new Error(p.label + ' has no cheese version, so its cheese counts must be 0.');
     }
 
+    // An EXCLUDED sku has NO variant or payment split at all — not GCash, not
+    // cheese, not GCash cheese — and a count in ANY of those buckets is REFUSED
+    // rather than accepted-and-hidden. Both options were on the table; this is
+    // the only one that cannot make a day's Cash/GCash wrong:
+    //   - accepting it and adding it to the day's GCash breaks Total = Cash +
+    //     GCash outright (the money is not in Total);
+    //   - accepting it and keeping it inside excluded_total only leaves the
+    //     day's GCash figure SILENTLY short of the GCash app, and reconciling
+    //     the computed GCash against GCash history is the entire reason that
+    //     figure is shown. The owner would see a gap with nothing to explain it.
+    // Guarding gcashQty alone was NOT enough (v2.4.1): gcashCheeseQty walked
+    // straight through, was priced into excluded_total, and its money vanished
+    // out of the day's GCash — the precise harm this guard exists to prevent.
+    // Refusing says so out loud, names the item and names the bucket to zero.
+    // The excluded money then behaves exactly as the owner asked: one plain
+    // amount he settles himself, with no cash/GCash split to get wrong.
+    if (!p.in_cutoff) {
+      var buckets = [];
+      if (cheeseQty !== 0) buckets.push('cheese');
+      if (gcashQty !== 0) buckets.push('GCash');
+      if (gcashCheeseQty !== 0) buckets.push('GCash cheese');
+      if (buckets.length > 0) {
+        throw new Error(p.label + ' is kept out of the cutoff, so its money is not split into ' +
+          'cash and GCash: its ' + joinAnd(buckets) + ' count' + (buckets.length > 1 ? 's' : '') +
+          ' must be 0. Its total is shown on its own line.');
+      }
+      // ...and an excluded sku must be `group=simple` in the first place: one
+      // plain quantity at one price. A group=box sku kept out of the cutoff is a
+      // sheet that contradicts the app — the Sales card hides the cheese
+      // steppers (an excluded sku has no split) while the payload can still
+      // carry cheese quantities, so the phone and the sheet disagree about what
+      // was sold. savePrices refuses to CREATE that state; this refuses to save
+      // a day against it if it was made by hand, naming the item and saying what
+      // to change. This fires whenever such a sku is PRESENT in the payload,
+      // even with sod/eod both 0 — narrowing it to "only when something sold"
+      // would reopen the very hole it closes, because the phone hides the cheese
+      // steppers for an excluded sku while the payload still carries cheese
+      // quantities, and a zero-count row today can be edited to a real one.
+      if (p.group === 'box') {
+        throw new Error(p.label + ' is kept out of the cutoff, but it is still set up as a box ' +
+          'with a cheese version. An item kept out of the cutoff must be a simple item: one ' +
+          'price, no cheese and no GCash. In the Prices tab either switch "counts in the ' +
+          'cutoff" back on for it, or change its group to simple.');
+      }
+    }
+
     var paid = cheeseQty + gcashQty + gcashCheeseQty;
     if (paid > sold) {
       throw new Error(p.label + ': cheese (' + cheeseQty + ') + GCash (' + gcashQty +
@@ -479,7 +579,11 @@ function apiSaveDay(ss, settings, payload) {
       sku: sku, sod: sod, eod: eod, sold: sold,
       cheese_qty: cheeseQty, gcash_qty: gcashQty, gcash_cheese_qty: gcashCheeseQty,
       regular_qty: regularQty,
-      amount: round2(amount), gcash_amount: round2(gcashAmount)
+      amount: round2(amount), gcash_amount: round2(gcashAmount),
+      // Whether this line's money COUNTED. Carried on the line (and returned to
+      // the phone) so the receipt can print an excluded sku below the totals
+      // instead of leaving the owner to work out why they do not add up.
+      in_cutoff: p.in_cutoff
     });
   });
 
@@ -515,9 +619,20 @@ function apiSaveDay(ss, settings, payload) {
 
   // --- Day roll-up. Cash = Total − GCash still holds; GCash is now derived
   // from what was actually entered instead of read off the GCash app.
-  var total = round2(lines.reduce(function (s, l) { return s + l.amount; }, 0) + custom);
-  var gcash = round2(lines.reduce(function (s, l) { return s + l.gcash_amount; }, 0) + customGcash);
+  //
+  // ONLY in_cutoff skus reach total/gcash (v2.4.0). An excluded sku's money is
+  // summed into excluded_total and goes nowhere else: not into total, not into
+  // cash, not into gcash, and therefore into no cutoff figure and no note line.
+  // The gcash filter below is belt-and-braces — the guard in the loop above
+  // already refuses EVERY bucket on an excluded sku, so its gcash_amount is
+  // always 0 — but it is what makes "cash = total - gcash" true by construction
+  // rather than by argument.
+  var counted = lines.filter(function (l) { return l.in_cutoff; });
+  var excludedLines = lines.filter(function (l) { return !l.in_cutoff; });
+  var total = round2(counted.reduce(function (s, l) { return s + l.amount; }, 0) + custom);
+  var gcash = round2(counted.reduce(function (s, l) { return s + l.gcash_amount; }, 0) + customGcash);
   var cash = round2(total - gcash);
+  var excludedTotal = round2(excludedLines.reduce(function (s, l) { return s + l.amount; }, 0));
 
   var stamp = nowStamp();
 
@@ -534,7 +649,8 @@ function apiSaveDay(ss, settings, payload) {
   var logObj = {
     date: date, closed: closed, staff: staff, gcash: gcash, total: total, cash: cash,
     custom_amount: custom, custom_gcash: customGcash, notes: notes,
-    entry_id: entryId, updated_at: stamp, salary: salary
+    entry_id: entryId, updated_at: stamp, salary: salary,
+    excluded_total: excludedTotal
   };
   var logRow = buildRow(log, logWidth, logObj, found > 0 ? padRow(log.values[found - 1], logWidth) : null);
   if (found > 0) {
@@ -551,7 +667,12 @@ function apiSaveDay(ss, settings, payload) {
       date: date, sku: l.sku, sod: l.sod, eod: l.eod, sold: l.sold,
       cheese_qty: l.cheese_qty, regular_qty: l.regular_qty, amount: l.amount,
       entry_id: entryId,
-      gcash_qty: l.gcash_qty, gcash_cheese_qty: l.gcash_cheese_qty, gcash_amount: l.gcash_amount
+      gcash_qty: l.gcash_qty, gcash_cheese_qty: l.gcash_cheese_qty, gcash_amount: l.gcash_amount,
+      // The flag is SNAPSHOTTED beside the money it decided, exactly as the
+      // price is (v2.4.1). Whether this line's money counted is a fact about
+      // THIS day, settled when it was saved — so a later flip of "counts in the
+      // cutoff" cannot restate a cutoff that has already been sent.
+      in_cutoff: l.in_cutoff
     };
   }));
   rewriteDateBlock(ss, TAB.STOCK_USAGE, date, stockRows.map(function (r) {
@@ -569,6 +690,11 @@ function apiSaveDay(ss, settings, payload) {
     // the retired supplies card: a key that could only ever answer 0 is worse
     // than no key at all.
     salary: salary,
+    // The day's money from in_cutoff=FALSE skus. It is NOT inside total/cash/
+    // gcash above and must never be added to them — the receipt shows it on its
+    // own line BELOW them, because the nori cash sits in the same tin and the
+    // tin equals cash + excluded_total. Always present (0 when there is none).
+    excluded_total: excludedTotal,
     // Always present (empty when nothing was dropped) so the client never has
     // to guess whether an older server simply omitted it.
     dropped_skus: droppedSkus,
@@ -577,7 +703,10 @@ function apiSaveDay(ss, settings, payload) {
         sku: l.sku, sold: l.sold,
         cheese_qty: l.cheese_qty, gcash_qty: l.gcash_qty,
         gcash_cheese_qty: l.gcash_cheese_qty, regular_qty: l.regular_qty,
-        amount: l.amount, gcash_amount: l.gcash_amount
+        amount: l.amount, gcash_amount: l.gcash_amount,
+        // Did this line's money count? The phone needs it per line to render an
+        // excluded sku correctly instead of inferring it from a stale price list.
+        in_cutoff: l.in_cutoff
       };
     })
   };
@@ -737,9 +866,12 @@ function apiSaveCutoffSplit(ss, payload) {
 }
 
 /** Maintenance screen: edit prices without opening the sheet on a phone.
- *  Upsert by sku, and ONLY the three editable fields — label, group and size
- *  are left exactly as they are, and a sku the payload does not mention is not
- *  touched at all.
+ *  Upsert by sku, and ONLY the editable fields — price, cheese price, active,
+ *  and `inCutoff` WHEN THE PAYLOAD EXPLICITLY SENDS IT. label, group and size
+ *  are left exactly as they are, a sku the payload does not mention is not
+ *  touched at all, and a payload that says nothing about `inCutoff` leaves that
+ *  cell alone rather than defaulting it (see the guard below — defaulting it is
+ *  how every takoyaki sku could fall out of the cutoff in one tap).
  *  Price edits apply to FUTURE days only: historical DailyCounts keep their
  *  snapshotted amounts, which is the whole point of computing money at save
  *  time. */
@@ -782,10 +914,38 @@ function apiSavePrices(ss, payload) {
       throw new Error('"' + sku + '" is switched on, so it needs a cheese price too. At 0 ' +
         'the app would count every cheese box as free. Type a price, or switch the item off first.');
     }
-    updated.push({
+    var o = {
       sku: sku, price: round2(price), cheese_price: round2(cheesePrice),
       active: active
-    });
+    };
+    // in_cutoff is written ONLY when the payload explicitly says so. Omitted (or
+    // blank) means "leave it exactly as it is": upsertRows copies the existing
+    // row before applying these keys, so an unmentioned column keeps its cell —
+    // including a BLANK one, which still reads TRUE. That is what makes the
+    // ordinary Maintenance save safe. A price screen that knows nothing about
+    // this flag (an older phone, or a batch queued before v2.4.0) sends
+    // `undefined`; coercing that to false would take every takoyaki sku out of
+    // the cutoff in one tap.
+    // An explicit value goes through the SAME reader the sheet is read with, so
+    // what lands in the cell is what comes back out.
+    if (!(r.inCutoff === null || r.inCutoff === undefined || asStr(r.inCutoff) === '')) {
+      o.in_cutoff = asCutoffFlag(r.inCutoff);
+      // Keeping money out of the cutoff means ONE plain quantity at ONE price:
+      // no cheese variant and no cash/GCash split. A `group=box` sku cannot be
+      // that, so switching one out of the cutoff is REFUSED here rather than
+      // half-honoured later — the Sales card would hide its cheese steppers
+      // while the payload still carried cheese quantities, and the phone and the
+      // sheet would then disagree about what was sold. saveDay refuses the same
+      // combination for a sheet hand-edited into it.
+      // Only an EXPLICIT false is checked: a payload that says nothing about the
+      // flag (an older phone) must still be able to edit an existing row's price.
+      if (o.in_cutoff === false && known[sku].group === 'box') {
+        throw new Error('"' + sku + '" is a box with a cheese version, so it cannot be kept out ' +
+          'of the cutoff: an item kept out is a simple item with one price and no cheese. ' +
+          'Leave it counting in the cutoff, or change its group to simple in the Prices tab first.');
+      }
+    }
+    updated.push(o);
   });
   // Validate the whole batch BEFORE writing any of it, so a typo in the third
   // row cannot leave the first two applied and the rest not.
@@ -892,7 +1052,8 @@ function apiRange(ss, settings, payload) {
   var inRange = function (x) { return x.date >= start && x.date <= end; };
   return {
     days: readDays(ss, dailySalaryOf(settings)).filter(inRange),
-    counts: readCounts(ss).filter(inRange),
+    // Same row shape as bootstrap, `in_cutoff` snapshot included.
+    counts: readCounts(ss, readPrices(ss).map).filter(inRange),
     stockUsage: readStockUsage(ss).filter(inRange),
     stockCounts: readStockCounts(ss).filter(inRange),
     expenses: readExpenses(ss).filter(inRange)
@@ -958,13 +1119,33 @@ function apiCutoff(ss, settings, payload, dryRun) {
   // exactly the fortnight the owner most needs to see.
   var remaining = round2(total - mama - split - supplies - octopus - salary - other - electric);
 
+  // --- Excluded skus: DISPLAY ONLY, and deliberately computed AFTER `remaining`
+  // so it is obvious that nothing above can depend on it.
+  //
+  // Built from this period's DailyCounts joined to Prices: the AMOUNT is the one
+  // snapshotted on the count row when the day was saved (so a later price edit
+  // never rewrites history), and Prices is consulted only for the label and the
+  // flag. `excluded` is the sum of the lines returned beside it, so the block
+  // shown on the Cutoff screen always adds up to its own total.
+  //
+  // These two figures enter NOTHING: not total, cash, gcash, supplies or
+  // remaining, and above all not buildNoteText — the owner chose "Cutoff screen
+  // only", so the note his partner receives is byte-for-byte what it was.
+  var excludedBlock = excludedForPeriod(ss, start, end);
+  var excludedLines = excludedBlock.lines;
+  var excluded = excludedBlock.total;
+
   // RESPONSE: snake_case (per_partner mirrors the Cutoffs column header).
   var figures = {
     start: start, end: end,
     total: total, cash: cash, gcash: gcash,
     mama: mama, split: split, per_partner: perPartner,
     supplies: supplies, octopus: octopus, salary: salary,
-    other: other, electric: electric, remaining: remaining
+    other: other, electric: electric, remaining: remaining,
+    // Display only. See above; and see the identity asserted in the tests:
+    // total = mama + split + supplies + octopus + salary + other + electric
+    //       + remaining, with `excluded` nowhere in it.
+    excluded: excluded, excluded_lines: excludedLines
   };
 
   var branch = asStr(settings.branch) || 'Tañong';
@@ -1004,6 +1185,70 @@ function apiCutoff(ss, settings, payload, dryRun) {
   }
 
   return { figures: figures, note_text: noteText };
+}
+
+/**
+ * The period's money from in_cutoff=FALSE skus, per sku and in total.
+ *
+ * DISPLAY ONLY — nothing this returns may reach a cutoff figure or the note.
+ * It exists because the owner asked to SEE the excluded total per cutoff while
+ * keeping it out of everything ("just show the total per cutoff, and I'll
+ * exclude it on my own").
+ *
+ *   qty    = Σ sold      over the period's DailyCounts rows for that sku
+ *   amount = Σ amount    the SNAPSHOTTED money on those same rows, so a later
+ *                        price edit cannot rewrite what a past day earned
+ *
+ * WHICH ROWS ARE EXCLUDED IS ALSO A SNAPSHOT (v2.4.1). Each row carries the
+ * `in_cutoff` that decided its money when the day was saved, and that — never the
+ * current Prices flag — is what classifies it here. Classifying history by the
+ * live flag restated money the sheet had already banked, in BOTH directions:
+ *   - tick nori back ON: the ₱300 that `total` never contained dropped out of the
+ *     excluded block too, so it existed nowhere on the screen;
+ *   - tick a counted sku OFF: money that IS inside `total` also appeared under
+ *     "not part of this cutoff", i.e. shown twice, in two contradictory ways.
+ * Neither is a display quirk — the owner reconciles his tin against these figures.
+ * A row with a blank snapshot falls back to the sku's current flag (see
+ * countCutoffFlag), which is all a pre-v2.4.1 row can tell us.
+ *
+ * A count row whose sku is no longer in Prices keeps the same treatment it always
+ * had: with no snapshot it counts IN (the flag's job is to remove one sku the
+ * owner set up on purpose, never to quietly remove money nobody asked it to). But
+ * an explicit FALSE snapshot on such a row IS still excluded money and is still
+ * shown — listed after the priced skus, under its sku as its own label — because
+ * `excluded` must always equal the lines printed beneath it.
+ *
+ * Skus are listed in Prices order so the block reads the same every time, and a
+ * sku with nothing sold is left out rather than printed as a zero line.
+ */
+function excludedForPeriod(ss, start, end) {
+  var prices = readPrices(ss);
+  var agg = Object.create(null);
+  var orphans = [];
+  readCounts(ss, prices.map).forEach(function (c) {
+    if (c.date < start || c.date > end) return;
+    if (c.in_cutoff) return;
+    if (!agg[c.sku]) {
+      agg[c.sku] = { qty: 0, amount: 0 };
+      if (!prices.map[c.sku]) orphans.push(c.sku);
+    }
+    agg[c.sku].qty += asNum(c.sold);
+    agg[c.sku].amount += asNum(c.amount);
+  });
+  var lines = [];
+  var total = 0;
+  var emitted = Object.create(null);
+  var emit = function (sku, label) {
+    if (emitted[sku]) return;
+    var a = agg[sku];
+    if (!a || (a.qty === 0 && a.amount === 0)) return;
+    emitted[sku] = true;
+    lines.push({ sku: sku, label: label, qty: round2(a.qty), amount: round2(a.amount) });
+    total += a.amount;
+  };
+  prices.list.forEach(function (p) { emit(p.sku, p.label); });
+  orphans.forEach(function (sku) { emit(sku, sku); });
+  return { lines: lines, total: round2(total) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1255,7 +1500,11 @@ function readPrices(ss) {
       size: asNum(cellOf(r, t, 'size')),
       price: asNum(cellOf(r, t, 'price')),
       cheese_price: asNum(cellOf(r, t, 'cheese_price')),
-      active: asBool(cellOf(r, t, 'active'))
+      active: asBool(cellOf(r, t, 'active')),
+      // in_cutoff=FALSE means "sell it, count it, but keep its money out of
+      // every cutoff figure". asCutoffFlag, NOT asBool: a blank cell (every
+      // pre-v2.4.0 row) and a missing column both have to read TRUE.
+      in_cutoff: asCutoffFlag(cellOf(r, t, 'in_cutoff'))
     };
     list.push(p);
     map[sku] = p;
@@ -1296,6 +1545,12 @@ function readDays(ss, dailySalary) {
       custom_amount: asNum(cellOf(r, t, 'custom_amount')),
       // Pre-v2.1.0 rows have no custom_gcash column at all -> 0.
       custom_gcash: asNum(cellOf(r, t, 'custom_gcash')),
+      // That day's money from in_cutoff=FALSE skus (v2.4.0). It sits BESIDE the
+      // day's money and is never inside `total`, `cash` or `gcash`; the receipt
+      // shows it below them so the cash tin (Cash + excluded_total) reconciles.
+      // Pre-v2.4.0 rows have no column at all -> 0, which is exactly right:
+      // there was no excluded sku to sell.
+      excluded_total: asNum(cellOf(r, t, 'excluded_total')),
       notes: asStr(cellOf(r, t, 'notes')),
       entry_id: asStr(cellOf(r, t, 'entry_id')),
       updated_at: asStr(cellOf(r, t, 'updated_at'))
@@ -1304,16 +1559,24 @@ function readDays(ss, dailySalary) {
   return out;
 }
 
-function readCounts(ss) {
+/**
+ * One row per sku per date, with the money that was computed when the day was
+ * saved. `priceMap` (from readPrices) is used for ONE thing: resolving a BLANK
+ * `in_cutoff` snapshot on a row written before that column existed — see
+ * countCutoffFlag. Pass it whenever the flag matters; without it a blank row
+ * simply counts IN, which is the same safe default a blank Prices cell gets.
+ */
+function readCounts(ss, priceMap) {
   var t = readTab(ss, TAB.DAILY_COUNTS);
   var out = [];
   for (var i = 1; i < t.values.length; i++) {
     var r = t.values[i];
     var date = asDateStr(cellOf(r, t, 'date'));
     if (!date) continue;
+    var sku = asStr(cellOf(r, t, 'sku'));
     out.push({
       date: date,
-      sku: asStr(cellOf(r, t, 'sku')),
+      sku: sku,
       sod: asNum(cellOf(r, t, 'sod')),
       eod: asNum(cellOf(r, t, 'eod')),
       sold: asNum(cellOf(r, t, 'sold')),
@@ -1325,10 +1588,38 @@ function readCounts(ss) {
       // exactly what those days were.
       gcash_qty: asNum(cellOf(r, t, 'gcash_qty')),
       gcash_cheese_qty: asNum(cellOf(r, t, 'gcash_cheese_qty')),
-      gcash_amount: asNum(cellOf(r, t, 'gcash_amount'))
+      gcash_amount: asNum(cellOf(r, t, 'gcash_amount')),
+      // Whether THIS row's money counted, as decided when the day was saved
+      // (v2.4.1). Resolved, so a legacy blank never reaches a caller as an
+      // undecided cell.
+      in_cutoff: countCutoffFlag(cellOf(r, t, 'in_cutoff'), priceMap, sku)
     });
   }
   return out;
+}
+
+/**
+ * The `in_cutoff` SNAPSHOT on one DailyCounts row.
+ *
+ * An explicit cell is the answer, full stop: it is what the sku's flag said when
+ * this day was saved, and that is a fact about the day, not about the Prices tab
+ * as it stands today. Classifying saved money by the CURRENT flag is what let a
+ * tick in Maintenance restate a cutoff that had already been sent — in both
+ * directions (money vanishing from the excluded block, or money that is inside
+ * `total` also appearing as "kept out").
+ *
+ * A BLANK cell means there IS no snapshot: the row was written before v2.4.1, or
+ * the column has not been appended yet (cellOf reads a missing column as ''). It
+ * falls back to the sku's CURRENT flag, which is the best available answer for
+ * such a row — and to IN when the sku is not in Prices at all, the same default
+ * asCutoffFlag gives a blank Prices cell, because the flag's job is to remove one
+ * sku the owner set up on purpose and never to quietly remove money nobody asked
+ * it to.
+ */
+function countCutoffFlag(raw, priceMap, sku) {
+  if (asStr(raw) !== '') return asCutoffFlag(raw);
+  var p = priceMap ? priceMap[sku] : null;
+  return p ? p.in_cutoff : true;
 }
 
 /** The stock products the phone offers, plus their ledger settings.
@@ -1695,6 +1986,40 @@ function asBool(v) {
   return s === 'true' || s === '1' || s === 'yes';
 }
 
+/** ["cheese"] -> "cheese"; ["cheese","GCash"] -> "cheese and GCash";
+ *  ["a","b","c"] -> "a, b and c". Error messages are read by the owner on a
+ *  phone, so they are written like a sentence, not like a list dump. */
+function joinAnd(list) {
+  if (list.length < 2) return list.join('');
+  return list.slice(0, -1).join(', ') + ' and ' + list[list.length - 1];
+}
+
+/**
+ * The `in_cutoff` flag, and the ONE cell in this file whose blank means TRUE.
+ *
+ * THIS IS NOT asBool AND MUST NEVER BE REPLACED BY IT. asBool('') is false; a
+ * blank in_cutoff cell has to be TRUE, because:
+ *   - migration APPENDS the column, so every price row already on the owner's
+ *     live sheet has an EMPTY cell in it, and
+ *   - a sheet that has not been migrated yet has no such column at all, which
+ *     cellOf() also reads as ''.
+ * If either of those read FALSE, box4/box6/box10 would silently drop out of the
+ * cutoff and the note the owner sends his partner would collapse to almost
+ * nothing — with every figure still looking like a perfectly good number.
+ *
+ * So the default is IN, and only an explicitly false-y value takes a sku out.
+ * An unrecognised value (a typo, a stray word) also reads IN: the flag's job is
+ * to remove ONE sku the owner set up on purpose, never to quietly remove money
+ * nobody asked it to.
+ */
+function asCutoffFlag(v) {
+  if (v === true) return true;
+  if (v === false) return false;
+  var s = asStr(v).toLowerCase();
+  if (s === '') return true; // blank / missing column => counts IN
+  return !(s === 'false' || s === '0' || s === 'no' || s === 'n' || s === 'off');
+}
+
 /** Dates travel as yyyy-MM-dd strings end-to-end; tolerate a Date object in
  *  case a cell lost its "@" format after hand editing. Duck-typed rather
  *  than instanceof so it also matches Dates from other JS realms. */
@@ -2004,7 +2329,20 @@ function seedSettings(ss) {
   return token;
 }
 
-/** Seed Prices rows for skus that don't exist yet (never touches edited rows). */
+/**
+ * Seed Prices rows for skus that don't exist yet (never touches edited rows).
+ *
+ * NORI (v2.4.0) is the first row with `in_cutoff` FALSE: it is sold and counted
+ * exactly like anything else, but its money stays out of every cutoff figure —
+ * the owner settles it himself. It is `group: 'simple'`, so start/end counts, one
+ * price, no cheese — and being excluded it MUST be simple: an excluded sku has no
+ * variant or payment split at all, so saveDay refuses a cheese, GCash or GCash
+ * cheese count on it, and savePrices refuses to take a `group=box` sku out of the
+ * cutoff in the first place.
+ *
+ * Matched by sku like every other seeder, so a sheet that already has a `nori`
+ * row keeps it exactly as it is — including an in_cutoff the owner set himself.
+ */
 function seedPrices(ss) {
   var t = readTab(ss, TAB.PRICES);
   var have = existingKeys(t, 'sku');
@@ -2012,9 +2350,10 @@ function seedPrices(ss) {
   // here or directly in the Prices tab: group 'simple' means SOD/EOD counts with
   // a single price and no cheese split.
   var seeds = [
-    { sku: 'box4', label: 'Box 4', group: 'box', size: 4, price: 50, cheese_price: 60, active: true },
-    { sku: 'box6', label: 'Box 6', group: 'box', size: 6, price: 65, cheese_price: 80, active: true },
-    { sku: 'box10', label: 'Box 10', group: 'box', size: 10, price: 105, cheese_price: 125, active: true }
+    { sku: 'box4', label: 'Box 4', group: 'box', size: 4, price: 50, cheese_price: 60, active: true, in_cutoff: true },
+    { sku: 'box6', label: 'Box 6', group: 'box', size: 6, price: 65, cheese_price: 80, active: true, in_cutoff: true },
+    { sku: 'box10', label: 'Box 10', group: 'box', size: 10, price: 105, cheese_price: 125, active: true, in_cutoff: true },
+    { sku: 'nori', label: 'Nori', group: 'simple', size: '', price: 25, cheese_price: '', active: true, in_cutoff: false }
   ];
   appendObjects(ss, TAB.PRICES, seeds.filter(function (s) { return !have[s.sku]; }));
 }
