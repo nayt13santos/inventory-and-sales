@@ -1520,16 +1520,22 @@ test('MIGRATION: setupSheet appends the new columns and moves no existing cell',
 
   const counts = ss.getSheetByName('DailyCounts').getDataRange().getValues();
   assert.deepStrictEqual(counts[0],
-    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff']),
-    'the four new DailyCounts columns must be APPENDED, in schema order');
+    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price']),
+    'the new DailyCounts columns must be APPENDED, in schema order');
   const log = ss.getSheetByName('DailyLog').getDataRange().getValues();
   assert.deepStrictEqual(log[0],
     OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total']));
-  assert.deepStrictEqual(counts[1].slice(9), ['', '', '', ''],
+  assert.deepStrictEqual(counts[1].slice(9), ['', '', '', '', '', ''],
     'the appended cells start blank on a historical row: "that day was all cash", ' +
-    'and an in_cutoff with no snapshot, which falls back to the sku flag');
-  assert.deepStrictEqual(log[1].slice(10), ['', '', ''],
-    'a historical day gets no salary written into it — the rate is applied at read time');
+    'an in_cutoff with no snapshot (which reads TRUE — the money was inside the ' +
+    'totals when saved), and prices that fall back to the current Prices tab');
+  // PIN MOVED (v2.5.0, deliberate): the migration BACKFILLS the salary cell of
+  // every non-closed historical row with the CURRENT daily_salary — resolving
+  // it at read time meant a later rate change silently re-priced history.
+  assert.deepStrictEqual(log[1].slice(10), ['', 200, ''],
+    'salary backfilled at the current rate; custom_gcash and excluded_total stay blank');
+  assert.deepStrictEqual(log[2].slice(10), ['', 200, ''],
+    'every non-closed historical row gets the backfill');
   // The one appended column whose BLANK means TRUE. Asserted here, at the
   // migration itself, because this is the moment every live price row gets one.
   const priceRows = ss.getSheetByName('Prices').getDataRange().getValues();
@@ -1566,9 +1572,9 @@ test('MIGRATION: a sheet whose grid is only 9 columns wide is widened, not broke
   const ctx = loadOn(ss);
   assert.strictEqual(ctx.setupSheet(), OLD_TOKEN);
   const counts = ss.getSheetByName('DailyCounts');
-  assert.ok(counts.getMaxColumns() >= 13, 'the grid was not widened');
+  assert.ok(counts.getMaxColumns() >= 15, 'the grid was not widened');
   assert.deepStrictEqual(counts.getDataRange().getValues()[0],
-    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff']));
+    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price']));
   assert.deepStrictEqual(counts.getDataRange().getValues()[1].slice(0, 9), OLD_COUNT_ROWS[0]);
   const boot = post(ctx, { token: OLD_TOKEN, action: 'bootstrap', payload: {} });
   assert.strictEqual(boot.ok, true, boot.error);
@@ -1635,9 +1641,9 @@ test('MIGRATION: a saveDay after migrating works and leaves the legacy rows byte
     assert.deepStrictEqual(ss.getSheetByName('DailyLog').getDataRange().getValues()[i + 1].slice(0, 10), old,
       'legacy DailyLog row ' + (i + 1) + ' changed');
   });
-  // The new columns were written in their REAL positions (10-13), not guessed.
+  // The new columns were written in their REAL positions (10-15), not guessed.
   assert.deepStrictEqual(counts.slice(1).find(x => x[0] === '2026-07-28' && x[1] === 'box4'),
-    ['2026-07-28', 'box4', 10, 0, 10, 2, 5, 530, 'post-migration-1', 2, 1, 160, true]);
+    ['2026-07-28', 'box4', 10, 0, 10, 2, 5, 530, 'post-migration-1', 2, 1, 160, true, 50, 60]);
 
   // And the phone reads the mixed-vintage sheet correctly in one bootstrap.
   const boot = post(ctx, { token: OLD_TOKEN, action: 'bootstrap', payload: {} });

@@ -112,9 +112,56 @@
  *     REFUSE `in_cutoff=FALSE` on a `group=box` sku, naming the item. Otherwise
  *     the Sales card hides the cheese steppers while the payload still carries
  *     cheese quantities, so the phone and the sheet disagree about what sold.
+ *
+ * WHAT CHANGED IN v2.5.0 — the retroactivity/robustness pass. The note for
+ * valid data is byte-identical to what v2.4.1 produced; the deliberate changes
+ * only touch invalid or ambiguous data:
+ *   - PRICE SNAPSHOT COMPLETED: DailyCounts gains `price` and `cheese_price`,
+ *     written at save. Re-saving an existing date reuses THAT DATE's stored
+ *     per-sku prices (a re-save is a correction of that night, not a re-pricing
+ *     of it); a sku newly added to the day uses current Prices; a blank stored
+ *     price (legacy row) falls back to current Prices. saveDay also REFUSES a
+ *     blank/zero effective price on an ACTIVE sku (the server mirror of the
+ *     savePrices guard) and REFUSES the whole day when the Prices tab has no
+ *     readable products at all, instead of silently booking every box at ₱0.
+ *   - SPLIT: resolution order is CutoffInputs row -> the archived Cutoffs row's
+ *     own split -> Settings split_default, so regenerating an old period after
+ *     the default changed can never silently restate its archived Split. A
+ *     non-dryRun generation with no CutoffInputs row WRITES one recording the
+ *     split it used. saveCutoffSplit and split_default are WHOLE PESOS only.
+ *   - SALARY: setupSheet backfills every BLANK salary cell on a non-closed
+ *     DailyLog row with the current daily_salary, once, at migration — so a
+ *     later rate change can never quietly re-price history that predates the
+ *     column. saveSettings treats a BLANK daily_salary (any blank money value)
+ *     as leave-alone, never as ₱0.
+ *   - DELIBERATE: a BLANK in_cutoff on a DailyCounts row now reads TRUE on its
+ *     own (see countCutoffFlag) — the money on a pre-snapshot row was inside
+ *     the day's totals when it was saved, so classifying it by the CURRENT
+ *     Prices flag double-stated migrated history.
+ *   - DELIBERATE: a NEGATIVE expense-category sum REFUSES a non-dryRun cutoff,
+ *     naming the offending rows (a negative category is a data error); dryRun
+ *     still shows it plainly.
+ *   - HEADERS: matched case-insensitively and trimmed everywhere, and
+ *     migrateTab REFUSES a non-empty tab whose row 1 has no recognizable
+ *     headers instead of appending a second schema beside foreign data.
+ *   - SEEDS: Prices/Backlogs/StockItems rows seed ONLY when their tab was just
+ *     created — a row the owner deleted on purpose stays deleted. Settings
+ *     keeps its key-wise add-if-missing (and the token).
+ *   - DUPLICATES: readPrices and readDays dedupe deterministically (first row
+ *     wins, matching which row an upsert rewrites).
+ *   - DATES: saveDay/saveExpense/saveStockCount refuse a date in the future
+ *     (Asia/Manila) or before 2020; readers NORMALIZE non-canonical sheet-typed
+ *     dates (2026-7-5, 7/5/2026) to yyyy-MM-dd so hand-typed money is never
+ *     invisible to the phone or the cutoff.
+ *   - WRITE ORDER: apiSaveDay writes the DailyLog row LAST, so a mid-save crash
+ *     leaves detail rows a retry rewrites cleanly instead of a DailyLog row
+ *     whose money has no counts behind it.
+ *   - branch strips CR/LF on read and in saveSettings (an embedded newline
+ *     would corrupt the note's line structure); doPost answers a null/absent
+ *     JSON body with the friendly parse error, never a raw TypeError.
  */
 
-var VERSION = '2.4.1';
+var VERSION = '2.5.0';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -170,9 +217,14 @@ var SCHEMA = [
   // in_cutoff was appended in v2.4.1: the SNAPSHOT of the sku's flag as it stood
   // when the day was saved, so flipping "counts in the cutoff" later can never
   // restate money that is already in the sheet. A BLANK cell (every row written
-  // before this column existed) falls back to the sku's CURRENT flag — see
-  // countCutoffFlag.
-  { name: TAB.DAILY_COUNTS, headers: ['date', 'sku', 'sod', 'eod', 'sold', 'cheese_qty', 'regular_qty', 'amount', 'entry_id', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff'], textCols: ['date'] },
+  // before this column existed) reads TRUE — the money on such a row was inside
+  // the day's totals when it was saved. See countCutoffFlag.
+  // price / cheese_price were appended in v2.5.0: the per-unit prices the row's
+  // money was computed FROM, completing the snapshot the amounts began. A
+  // re-save of the same date reuses them, so correcting a count weeks later can
+  // never re-price the night at today's prices. Blank (legacy row) falls back
+  // to the current Prices tab.
+  { name: TAB.DAILY_COUNTS, headers: ['date', 'sku', 'sod', 'eod', 'sold', 'cheese_qty', 'regular_qty', 'amount', 'entry_id', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price'], textCols: ['date'] },
   // opening_qty / opening_date / reorder_at were appended in v2.3.0 (stock
   // ledger). opening_date is a yyyy-MM-dd string and BLANK means "count the
   // whole history" — see computeStockStatus.
@@ -234,6 +286,12 @@ function doPost(e) {
       body = JSON.parse(e.postData.contents);
     } catch (parseErr) {
       throw new Error('Request body is not valid JSON.');
+    }
+    // "null", a bare number or a string all PARSE as valid JSON but are not a
+    // request. Reading .action off them would throw a raw TypeError, and the
+    // owner would see engine debris instead of a sentence.
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      throw new Error('Request body is not valid JSON. Expected {token, action, payload}.');
     }
     var action = asStr(body.action);
     var payload = (body.payload && typeof body.payload === 'object') ? body.payload : {};
@@ -351,6 +409,11 @@ function apiBootstrap(ss, settings) {
   for (var k in settings) {
     if (k !== 'token') publicSettings[k] = settings[k];
   }
+  // The same cleaned branch the note is built with (see cleanBranch): the
+  // phone's preview must head its note the way the server will.
+  if (publicSettings.branch !== undefined) {
+    publicSettings.branch = cleanBranch(publicSettings.branch);
+  }
   // The Settings value column is "@"-formatted, so numeric values read back
   // as strings. The API contract ships known-numeric settings as numbers.
   publicSettings.mama_per_cutoff = asNum(settings.mama_per_cutoff);
@@ -376,8 +439,10 @@ function apiBootstrap(ss, settings) {
     // The SAME 90-day window as `days` and `expenses`, so a cutoff preview can
     // never show one side of a period without the other, and an edited day
     // always reloads complete. Each row carries the `in_cutoff` snapshot that
-    // decided its money, with a legacy blank resolved against the price list
-    // read above — so the phone is told what counted rather than inferring it.
+    // decided its money (a legacy blank reads TRUE — see countCutoffFlag) and
+    // the price snapshot it was computed from, with a legacy blank price
+    // resolved against the price list read above — so the phone is told what
+    // counted, and at what price, rather than inferring either.
     counts: readCounts(ss, priceInfo.map).filter(inWindow),
     stockUsage: usageAll.filter(inWindow),
     stockCounts: countsAll.filter(inWindow),
@@ -406,7 +471,7 @@ function apiBootstrap(ss, settings) {
  *  gcash_amount = gcash_qty * price + gcash_cheese_qty * cheese_price
  */
 function apiSaveDay(ss, settings, payload) {
-  var date = reqDate(payload.date, 'date');
+  var date = reqEntryDate(payload.date, 'date');
   var entryId = asStr(payload.entryId);
   if (!entryId) throw new Error('entryId is required.');
   var closed = asBool(payload.closed);
@@ -448,7 +513,23 @@ function apiSaveDay(ss, settings, payload) {
   var rawCounts = closed ? [] : (payload.counts || []);
   if (!Array.isArray(rawCounts)) throw new Error('counts must be an array.');
 
-  var priceMap = readPrices(ss).map;
+  var priceInfo = readPrices(ss);
+  var priceMap = priceInfo.map;
+  // A Prices tab with NOTHING readable in it cannot price a single box. Without
+  // this guard every sku fell into `dropped_skus` and the day quietly saved at
+  // ₱0 — a whole night's money booked as nothing, behind an ok:true. Refusing
+  // names the ACTUAL problem; per-sku gaps still go through the dropped path
+  // below, because one renamed row must never cost the rest of the day (v2.5.0).
+  if (priceInfo.list.length === 0 &&
+      rawCounts.some(function (rc) { return asStr((rc || {}).sku) !== ''; })) {
+    throw new Error("The Prices tab has no products the app can read, so tonight's boxes cannot " +
+      'be priced. Open the Google Sheet and check the Prices tab — row 1 should name the columns ' +
+      '(sku, label, group, size, price, cheese_price, active) with one product per row — then ' +
+      'save the day again.');
+  }
+  // The prices already stored on THIS DATE's rows (v2.5.0): a re-save is a
+  // correction of that night's counts, never a re-pricing of them.
+  var storedPrices = storedPricesFor(ss, date);
   // Prototype-free accumulators throughout: a sku called "toString" must not
   // read as already-seen (which silently swallowed it from `dropped_skus`).
   var seenSkus = Object.create(null);
@@ -567,10 +648,37 @@ function apiSaveDay(ss, settings, payload) {
     // The remainder is plain cash regular — always derived, never sent.
     var regularQty = sold - paid;
 
-    // Price snapshot: amounts are computed NOW from the current Prices tab and
-    // stored on the row, so later price edits never rewrite history.
-    var amount = (regularQty + gcashQty) * p.price + (cheeseQty + gcashCheeseQty) * p.cheese_price;
-    var gcashAmount = gcashQty * p.price + gcashCheeseQty * p.cheese_price;
+    // --- The EFFECTIVE prices for this line (v2.5.0). A date being RE-SAVED
+    // reuses the prices already stored on its own rows — a correction weeks
+    // later fixes the count, it does not re-price the night. A sku newly added
+    // to the day, or a legacy row whose price cells are blank, uses the current
+    // Prices tab — the only answer available, and the same one a fresh save
+    // would have used.
+    var stored = storedPrices[sku];
+    var price = (stored && asStr(stored.price) !== '') ? asNum(stored.price) : p.price;
+    var cheesePrice = (stored && asStr(stored.cheese_price) !== '') ? asNum(stored.cheese_price) : p.cheese_price;
+
+    // A blank/zero price on a sku that is still SELLING books the night at
+    // nothing — the server-side mirror of the savePrices guard (v2.5.0). Only a
+    // hand-cleared cell can reach this state; refuse it, naming the item, so
+    // the day is saved right or not at all. An INACTIVE sku is off the Sales
+    // screen and out of the payload, so it never trips this.
+    if (p.active && !(price > 0)) {
+      throw new Error('"' + p.label + '" is switched on but has no price in the Prices tab, so ' +
+        'the app would count every ' + p.label + ' sale as free. Set its price under Maintenance ' +
+        '(or in the Prices tab), then save the day again.');
+    }
+    if (p.active && p.group === 'box' && !(cheesePrice > 0)) {
+      throw new Error('"' + p.label + '" is switched on but has no cheese price in the Prices ' +
+        'tab, so the app would count every cheese box as free. Set its cheese price under ' +
+        'Maintenance (or in the Prices tab), then save the day again.');
+    }
+
+    // Price snapshot: amounts are computed NOW from the effective prices above
+    // and stored on the row — WITH those prices beside them (v2.5.0) — so later
+    // price edits never rewrite history.
+    var amount = (regularQty + gcashQty) * price + (cheeseQty + gcashCheeseQty) * cheesePrice;
+    var gcashAmount = gcashQty * price + gcashCheeseQty * cheesePrice;
 
     // Line objects are snake_case from here on: they are written to the
     // DailyCounts row AND returned to the client, and both of those are the
@@ -583,7 +691,9 @@ function apiSaveDay(ss, settings, payload) {
       // Whether this line's money COUNTED. Carried on the line (and returned to
       // the phone) so the receipt can print an excluded sku below the totals
       // instead of leaving the owner to work out why they do not add up.
-      in_cutoff: p.in_cutoff
+      in_cutoff: p.in_cutoff,
+      // The prices the money above was computed from — the rest of the snapshot.
+      price: round2(price), cheese_price: round2(cheesePrice)
     });
   });
 
@@ -636,9 +746,39 @@ function apiSaveDay(ss, settings, payload) {
 
   var stamp = nowStamp();
 
-  // --- Upsert DailyLog by date (one row per date => replays cannot duplicate).
-  // The row is built BY HEADER NAME on top of the existing row, so a column the
-  // owner added by hand survives the upsert and column order does not matter.
+  // --- Rewrite this date's blocks in the two date-keyed detail tabs FIRST, and
+  // write the DailyLog row LAST (v2.5.0). The DailyLog row is the one the phone
+  // (and the cutoff) treats as "this day exists, and this is its money" — so if
+  // the save dies half way, the failure must leave detail rows a retry rewrites
+  // cleanly, never a DailyLog row whose totals have no counts behind them
+  // looking like a perfectly saved day. Within the details, DailyCounts stays
+  // ahead of StockUsage, and each block is written before its surplus is
+  // cleared — see rewriteDateBlock for that half of the ordering.
+  rewriteDateBlock(ss, TAB.DAILY_COUNTS, date, lines.map(function (l) {
+    return {
+      date: date, sku: l.sku, sod: l.sod, eod: l.eod, sold: l.sold,
+      cheese_qty: l.cheese_qty, regular_qty: l.regular_qty, amount: l.amount,
+      entry_id: entryId,
+      gcash_qty: l.gcash_qty, gcash_cheese_qty: l.gcash_cheese_qty, gcash_amount: l.gcash_amount,
+      // The flag is SNAPSHOTTED beside the money it decided, exactly as the
+      // price is (v2.4.1). Whether this line's money counted is a fact about
+      // THIS day, settled when it was saved — so a later flip of "counts in the
+      // cutoff" cannot restate a cutoff that has already been sent.
+      in_cutoff: l.in_cutoff,
+      // ...and the prices themselves (v2.5.0), completing the snapshot: the
+      // amounts on this row can now always be explained from the row alone, and
+      // a re-save of this date reuses these instead of today's price list.
+      price: l.price, cheese_price: l.cheese_price
+    };
+  }));
+  rewriteDateBlock(ss, TAB.STOCK_USAGE, date, stockRows.map(function (r) {
+    return { date: date, product: r.product, qty: r.qty, entry_id: entryId, updated_at: stamp };
+  }));
+
+  // --- Upsert DailyLog by date (one row per date => replays cannot duplicate),
+  // LAST — see the write-order note above. The row is built BY HEADER NAME on
+  // top of the existing row, so a column the owner added by hand survives the
+  // upsert and column order does not matter.
   var log = readTabForWrite(ss, TAB.DAILY_LOG);
   var logWidth = writeWidth(log, TAB.DAILY_LOG);
   var logDateIdx = colOf(log, 'date');
@@ -658,26 +798,6 @@ function apiSaveDay(ss, settings, payload) {
   } else {
     log.sheet.appendRow(logRow);
   }
-
-  // --- Rewrite this date's blocks in the two date-keyed detail tabs.
-  // DailyCounts stays first so a mid-write failure has the same (safe) shape
-  // it always had — see rewriteDateBlock for the write-order reasoning.
-  rewriteDateBlock(ss, TAB.DAILY_COUNTS, date, lines.map(function (l) {
-    return {
-      date: date, sku: l.sku, sod: l.sod, eod: l.eod, sold: l.sold,
-      cheese_qty: l.cheese_qty, regular_qty: l.regular_qty, amount: l.amount,
-      entry_id: entryId,
-      gcash_qty: l.gcash_qty, gcash_cheese_qty: l.gcash_cheese_qty, gcash_amount: l.gcash_amount,
-      // The flag is SNAPSHOTTED beside the money it decided, exactly as the
-      // price is (v2.4.1). Whether this line's money counted is a fact about
-      // THIS day, settled when it was saved — so a later flip of "counts in the
-      // cutoff" cannot restate a cutoff that has already been sent.
-      in_cutoff: l.in_cutoff
-    };
-  }));
-  rewriteDateBlock(ss, TAB.STOCK_USAGE, date, stockRows.map(function (r) {
-    return { date: date, product: r.product, qty: r.qty, entry_id: entryId, updated_at: stamp };
-  }));
 
   // RESPONSE: snake_case. The PWA's applyServerDay() copies these straight
   // onto its DailyCounts mirror, which is snake_case in localStorage.
@@ -706,14 +826,47 @@ function apiSaveDay(ss, settings, payload) {
         amount: l.amount, gcash_amount: l.gcash_amount,
         // Did this line's money count? The phone needs it per line to render an
         // excluded sku correctly instead of inferring it from a stale price list.
-        in_cutoff: l.in_cutoff
+        in_cutoff: l.in_cutoff,
+        // The prices this line's money was computed from (v2.5.0), so the
+        // phone's mirror of the day matches the sheet's snapshot exactly.
+        price: l.price, cheese_price: l.cheese_price
       };
     })
   };
 }
 
+/**
+ * The price/cheese_price snapshots already stored on ONE date's DailyCounts
+ * rows, RAW (blank stays '', so the caller can tell "no snapshot" from ₱0),
+ * keyed by sku, first row per sku winning like every other reader.
+ *
+ * This is what makes a RE-SAVE of an existing date keep that date's own prices
+ * (v2.5.0): before it, editing last Tuesday's count after a price change
+ * silently re-priced last Tuesday at today's prices — history rewritten by the
+ * exact mechanism (compute-at-save) that exists to prevent it. Tolerant read:
+ * a sheet without the tab, or without the price columns yet, simply answers
+ * "no snapshots" and the current Prices tab is used, which is all a fresh save
+ * ever did.
+ */
+function storedPricesFor(ss, date) {
+  var out = Object.create(null);
+  var t = readTabOptional(ss, TAB.DAILY_COUNTS);
+  if (!t || t.col['date'] === undefined) return out;
+  for (var i = 1; i < t.values.length; i++) {
+    var r = t.values[i];
+    if (asDateStr(cellOf(r, t, 'date')) !== date) continue;
+    var sku = asStr(cellOf(r, t, 'sku'));
+    if (!sku || out[sku]) continue;
+    out[sku] = {
+      price: cellOf(r, t, 'price'),
+      cheese_price: cellOf(r, t, 'cheese_price')
+    };
+  }
+  return out;
+}
+
 function apiSaveExpense(ss, payload) {
-  var date = reqDate(payload.date, 'date');
+  var date = reqEntryDate(payload.date, 'date');
   var entryId = asStr(payload.entryId);
   if (!entryId) throw new Error('entryId is required.');
   var category = asStr(payload.category);
@@ -810,7 +963,7 @@ function apiDeleteExpense(ss, payload) {
  *  A count is understood as an END-OF-DAY figure, so the same day's deliveries
  *  and usage are already inside it and are NOT added again. */
 function apiSaveStockCount(ss, payload) {
-  var date = reqDate(payload.date, 'date');
+  var date = reqEntryDate(payload.date, 'date');
   var entryId = asStr(payload.entryId);
   if (!entryId) throw new Error('entryId is required.');
   var product = asStr(payload.product);
@@ -845,7 +998,11 @@ function apiSaveStockCount(ss, payload) {
 }
 
 /** The entered Split for one cutoff period. Upsert by (start, end) — the period
- *  is the natural key, so re-entering it converges on one row. */
+ *  is the natural key, so re-entering it converges on one row.
+ *  WHOLE PESOS only (v2.5.0): the Split is money handed over in cash, and a
+ *  centavo split also makes per_partner odd centavos that no note should carry.
+ *  Refused plainly rather than rounded — rounding would save a figure the owner
+ *  did not type. */
 function apiSaveCutoffSplit(ss, payload) {
   var start = reqDate(payload.start, 'start');
   var end = reqDate(payload.end, 'end');
@@ -854,14 +1011,18 @@ function apiSaveCutoffSplit(ss, payload) {
   if (!entryId) throw new Error('entryId is required.');
   var amount = numOrThrow(payload.amount, 'The split amount');
   if (amount < 0) throw new Error('The split amount cannot be negative.');
+  if (Math.floor(amount) !== amount) {
+    throw new Error('The split is whole pesos (like 3000), so "' + asStr(payload.amount) +
+      '" cannot be saved. Leave out the centavos.');
+  }
 
   upsertRows(ss, TAB.CUTOFF_INPUTS, [{
-    start: start, end: end, split_amount: round2(amount),
+    start: start, end: end, split_amount: amount,
     entry_id: entryId, updated_at: nowStamp()
   }], ['start', 'end']);
   return {
     entry_id: entryId, start: start, end: end,
-    split_amount: round2(amount), per_partner: round2(amount / 2)
+    split_amount: amount, per_partner: round2(amount / 2)
   };
 }
 
@@ -971,11 +1132,27 @@ function apiSaveSettings(ss, payload) {
       ? SETTABLE_SETTINGS[key] : '';
     if (!kind) { ignored.push(key); continue; }
     if (kind === 'money') {
+      // A BLANK money value means "leave it as it is", NEVER ₱0 (v2.5.0): a
+      // cleared daily_salary field would otherwise make every following day
+      // cost nothing, silently. Reported under `ignored` so the reply says
+      // plainly that the key was not written.
+      if (incoming[key] === null || incoming[key] === undefined || asStr(incoming[key]) === '') {
+        ignored.push(key);
+        continue;
+      }
       var n = numOrThrow(incoming[key], key);
       if (n < 0) throw new Error(key + ' cannot be negative.');
+      // The default Split is whole pesos for the same reason the entered one is
+      // (see apiSaveCutoffSplit) — this is the figure that pre-fills it.
+      if (key === 'split_default' && Math.floor(n) !== n) {
+        throw new Error('The split is whole pesos (like 3000), so "' + asStr(incoming[key]) +
+          '" cannot be saved as the default. Leave out the centavos.');
+      }
       accepted[key] = n;
     } else {
-      var s = asStr(incoming[key]);
+      // The branch heads the note; a CR/LF pasted into it (easy on a phone)
+      // would break the note's line structure, so line breaks become spaces.
+      var s = key === 'branch' ? cleanBranch(incoming[key]) : asStr(incoming[key]);
       if (key === 'branch' && !s) throw new Error('The branch name cannot be empty.');
       accepted[key] = s;
     }
@@ -1104,13 +1281,58 @@ function apiCutoff(ss, settings, payload, dryRun) {
   mama = round2(mama); supplies = round2(supplies); octopus = round2(octopus);
   electric = round2(electric); other = round2(other);
 
-  // Split is an ENTERED amount, not the residual (owner, 2026-08-03): the row
-  // saved for THIS period if there is one, else the Settings default. Half each.
+  // A NEGATIVE category sum is a data error, full stop — saveExpense refuses
+  // amounts <= 0, so only a hand-edited row can produce one — and a note built
+  // on it states money that never existed. A non-dryRun REFUSES (v2.5.0,
+  // DELIBERATE), naming the rows so the owner can fix them; a dryRun still
+  // shows the negative plainly, because the preview is where he will see it.
+  if (!dryRun) {
+    var negCats = [];
+    if (mama < 0) negCats.push('Mama');
+    if (supplies < 0) negCats.push('Supplies');
+    if (octopus < 0) negCats.push('Octopus');
+    if (electric < 0) negCats.push('Electric');
+    if (other < 0) negCats.push('Other payments');
+    if (negCats.length > 0) {
+      var noteCat = function (x) {
+        switch (x.category) {
+          case 'Mama': case 'Supplies': case 'Octopus': case 'Electric': return x.category;
+          default: return 'Other payments';
+        }
+      };
+      var offenders = expenses.filter(function (x) {
+        return x.amount < 0 && negCats.indexOf(noteCat(x)) !== -1;
+      }).map(function (x) {
+        return x.date + ' ' + x.category + (x.item ? ' "' + x.item + '"' : '') +
+          ' (' + fmtAmt(x.amount) + ')';
+      });
+      throw new Error('Cannot make the note: ' + joinAnd(negCats) +
+        (negCats.length > 1 ? ' add up to less than zero' : ' adds up to less than zero') +
+        ' for this period, because of ' +
+        (offenders.length === 1 ? 'this expense row: ' : 'these expense rows: ') +
+        offenders.join('; ') +
+        '. A negative expense is a data mistake — fix or delete ' +
+        (offenders.length === 1 ? 'that row' : 'those rows') +
+        ' in the Expenses tab, then generate the note again.');
+    }
+  }
+
+  // Split is an ENTERED amount, not the residual (owner, 2026-08-03). The
+  // resolution order (v2.5.0) is: the CutoffInputs row saved for THIS period ->
+  // the split this period's ARCHIVED note was built with -> the Settings
+  // default. The middle step is what keeps an old period stable: without it,
+  // regenerating January after split_default changed silently restated a note
+  // that was already sent. Half each.
   var entered = readCutoffInputs(ss).filter(function (r) {
     return r.start === start && r.end === end;
   });
-  var split = entered.length > 0 ? round2(entered[entered.length - 1].split_amount)
-    : splitDefaultOf(settings);
+  var split;
+  if (entered.length > 0) {
+    split = round2(entered[entered.length - 1].split_amount);
+  } else {
+    var archived = archivedSplitFor(ss, start, end);
+    split = archived === null ? splitDefaultOf(settings) : round2(archived);
+  }
   var perPartner = round2(split / 2);
 
   // REMAINING is the residual now — what is left in the business after
@@ -1148,10 +1370,23 @@ function apiCutoff(ss, settings, payload, dryRun) {
     excluded: excluded, excluded_lines: excludedLines
   };
 
-  var branch = asStr(settings.branch) || 'Tañong';
+  // Branch is read CLEANED (CR/LF -> space, v2.5.0): a line break pasted into
+  // the Settings cell would otherwise split the note's first line in two.
+  var branch = cleanBranch(settings.branch) || 'Tañong';
   var noteText = buildNoteText(branch, start, end, figures);
 
   if (!dryRun) {
+    // A real generation with NO CutoffInputs row RECORDS the split it used
+    // (v2.5.0), so the figure this note was built with is a fact in the sheet —
+    // never something a later split_default edit can quietly move. An entered
+    // row, when there is one, already is that record.
+    if (entered.length === 0) {
+      upsertRows(ss, TAB.CUTOFF_INPUTS, [{
+        start: start, end: end, split_amount: split,
+        entry_id: Utilities.getUuid(), updated_at: nowStamp()
+      }], ['start', 'end']);
+    }
+
     // Upsert by (start, end) — the period is the natural key. Retries and
     // legitimate regenerations converge on ONE archive row per period
     // instead of silently accumulating duplicates.
@@ -1188,6 +1423,28 @@ function apiCutoff(ss, settings, payload, dryRun) {
 }
 
 /**
+ * The Split the ARCHIVED note for (start, end) was built with, or null when the
+ * period was never archived (or the archive predates the split column — a blank
+ * cell is "no answer", never ₱0, because ₱0 is a real entered split that blanks
+ * the note's Split line). First matching row wins, like the upsert that writes
+ * it. This is the middle step of the split resolution (v2.5.0): an already-sent
+ * period keeps ITS split when it is regenerated, whatever the default says now.
+ */
+function archivedSplitFor(ss, start, end) {
+  var t = readTabOptional(ss, TAB.CUTOFFS);
+  if (!t) return null;
+  var si = t.col['start'], ei = t.col['end'], pi = t.col['split'];
+  if (si === undefined || ei === undefined || pi === undefined) return null;
+  for (var i = 1; i < t.values.length; i++) {
+    if (asDateStr(t.values[i][si]) === start && asDateStr(t.values[i][ei]) === end) {
+      var raw = t.values[i][pi];
+      return asStr(raw) === '' ? null : asNum(raw);
+    }
+  }
+  return null;
+}
+
+/**
  * The period's money from in_cutoff=FALSE skus, per sku and in total.
  *
  * DISPLAY ONLY — nothing this returns may reach a cutoff figure or the note.
@@ -1208,8 +1465,9 @@ function apiCutoff(ss, settings, payload, dryRun) {
  *   - tick a counted sku OFF: money that IS inside `total` also appeared under
  *     "not part of this cutoff", i.e. shown twice, in two contradictory ways.
  * Neither is a display quirk — the owner reconciles his tin against these figures.
- * A row with a blank snapshot falls back to the sku's current flag (see
- * countCutoffFlag), which is all a pre-v2.4.1 row can tell us.
+ * A row with a blank snapshot counts IN (see countCutoffFlag, v2.5.0): its money
+ * was put inside the day's totals when it was saved, so listing it here as well
+ * would state the same money twice.
  *
  * A count row whose sku is no longer in Prices keeps the same treatment it always
  * had: with no snapshot it counts IN (the flag's job is to remove one sku the
@@ -1328,11 +1586,16 @@ function fmtAmt(n) {
 // ---------------------------------------------------------------------------
 
 /** name -> 0-based column index, from row 1. First occurrence wins so a
- *  duplicated header cannot shadow the real column. */
+ *  duplicated header cannot shadow the real column.
+ *  Matching is CASE-INSENSITIVE and TRIMMED (v2.5.0): a hand-retyped "Date" or
+ *  " sku " is the same column as "date" — refusing to see it made the owner's
+ *  own repairs invisible, and migration then appended a duplicate column. Every
+ *  lookup key in this file is already lowercase, so normalizing here covers all
+ *  of them. */
 function headerMap(headerRow) {
   var m = {};
   for (var i = 0; i < headerRow.length; i++) {
-    var h = asStr(headerRow[i]);
+    var h = asStr(headerRow[i]).toLowerCase();
     if (h !== '' && m[h] === undefined) m[h] = i;
   }
   return m;
@@ -1372,8 +1635,10 @@ function readTabForWrite(ss, name) {
     }
     if (complete) return t;
   }
-  migrateTab(ss, def);
-  if (AUTO_SEED[name]) AUTO_SEED[name](ss);
+  var r = migrateTab(ss, def);
+  // Seed rows belong to tab CREATION only (v2.5.0): a migration that merely
+  // appended a column to a live tab must not re-plant rows the owner deleted.
+  if (r.created && AUTO_SEED[name]) AUTO_SEED[name](ss);
   return readTab(ss, name);
 }
 
@@ -1493,6 +1758,11 @@ function readPrices(ss) {
     var r = t.values[i];
     var sku = asStr(cellOf(r, t, 'sku'));
     if (!sku) continue; // tolerate blank filler rows
+    // Duplicate sku rows (a hand-copied row, a paste gone long): the FIRST row
+    // wins, deterministically — the same row an upsert rewrites — and the
+    // duplicate is simply not listed, so one stray row can never double a sku
+    // on the Sales screen or flip which price a save uses (v2.5.0).
+    if (map[sku]) continue;
     var p = {
       sku: sku,
       label: asStr(cellOf(r, t, 'label')) || sku,
@@ -1526,10 +1796,17 @@ function readDays(ss, dailySalary) {
   var t = readTab(ss, TAB.DAILY_LOG);
   var rate = asNum(dailySalary);
   var out = [];
+  var seenDates = Object.create(null);
   for (var i = 1; i < t.values.length; i++) {
     var r = t.values[i];
     var date = asDateStr(cellOf(r, t, 'date'));
     if (!date) continue;
+    // Duplicate date rows (hand edits — an upsert can't create them): the FIRST
+    // row wins, deterministically, because that is the row apiSaveDay's upsert
+    // finds and rewrites. Counting both would double the day in every cutoff;
+    // disagreeing with the upsert would make an edited day look unsaved (v2.5.0).
+    if (seenDates[date]) continue;
+    seenDates[date] = true;
     var closed = asBool(cellOf(r, t, 'closed'));
     var rawSalary = asStr(cellOf(r, t, 'salary'));
     out.push({
@@ -1562,9 +1839,9 @@ function readDays(ss, dailySalary) {
 /**
  * One row per sku per date, with the money that was computed when the day was
  * saved. `priceMap` (from readPrices) is used for ONE thing: resolving a BLANK
- * `in_cutoff` snapshot on a row written before that column existed — see
- * countCutoffFlag. Pass it whenever the flag matters; without it a blank row
- * simply counts IN, which is the same safe default a blank Prices cell gets.
+ * `price`/`cheese_price` snapshot on a row written before v2.5.0 appended those
+ * columns — the current price is the only available answer for such a row, and
+ * it is the fallback apiSaveDay itself uses when it re-saves that date.
  */
 function readCounts(ss, priceMap) {
   var t = readTab(ss, TAB.DAILY_COUNTS);
@@ -1574,6 +1851,9 @@ function readCounts(ss, priceMap) {
     var date = asDateStr(cellOf(r, t, 'date'));
     if (!date) continue;
     var sku = asStr(cellOf(r, t, 'sku'));
+    var p = priceMap ? priceMap[sku] : null;
+    var rawPrice = cellOf(r, t, 'price');
+    var rawCheese = cellOf(r, t, 'cheese_price');
     out.push({
       date: date,
       sku: sku,
@@ -1591,8 +1871,14 @@ function readCounts(ss, priceMap) {
       gcash_amount: asNum(cellOf(r, t, 'gcash_amount')),
       // Whether THIS row's money counted, as decided when the day was saved
       // (v2.4.1). Resolved, so a legacy blank never reaches a caller as an
-      // undecided cell.
-      in_cutoff: countCutoffFlag(cellOf(r, t, 'in_cutoff'), priceMap, sku)
+      // undecided cell — and a blank reads TRUE (see countCutoffFlag).
+      in_cutoff: countCutoffFlag(cellOf(r, t, 'in_cutoff')),
+      // The per-unit prices this row's money was computed FROM (v2.5.0),
+      // resolved the same way apiSaveDay resolves them on a re-save: the stored
+      // snapshot, else the sku's current price. The phone shows a loaded day's
+      // arithmetic with these, so editing an old night never re-prices it.
+      price: asStr(rawPrice) === '' ? (p ? p.price : 0) : asNum(rawPrice),
+      cheese_price: asStr(rawCheese) === '' ? (p ? p.cheese_price : 0) : asNum(rawCheese)
     });
   }
   return out;
@@ -1609,17 +1895,18 @@ function readCounts(ss, priceMap) {
  * `total` also appearing as "kept out").
  *
  * A BLANK cell means there IS no snapshot: the row was written before v2.4.1, or
- * the column has not been appended yet (cellOf reads a missing column as ''). It
- * falls back to the sku's CURRENT flag, which is the best available answer for
- * such a row — and to IN when the sku is not in Prices at all, the same default
- * asCutoffFlag gives a blank Prices cell, because the flag's job is to remove one
- * sku the owner set up on purpose and never to quietly remove money nobody asked
- * it to.
+ * the column has not been appended yet (cellOf reads a missing column as ''). A
+ * blank reads TRUE (v2.5.0 — DELIBERATE change from the current-flag fallback):
+ * every pre-snapshot row was saved by code that put ALL of a day's money inside
+ * `total`/`cash`/`gcash`, so its money is in the totals as a matter of record.
+ * The old fallback re-classified such rows by today's Prices flag, which showed
+ * migrated history's money BOTH inside the totals AND under "kept out" the
+ * moment a sku was excluded — the same money stated twice, in two contradictory
+ * ways. TRUE is not a guess here; it is what actually happened at save time.
  */
-function countCutoffFlag(raw, priceMap, sku) {
+function countCutoffFlag(raw) {
   if (asStr(raw) !== '') return asCutoffFlag(raw);
-  var p = priceMap ? priceMap[sku] : null;
-  return p ? p.in_cutoff : true;
+  return true; // no snapshot: the row predates exclusion, its money IS in the totals
 }
 
 /** The stock products the phone offers, plus their ledger settings.
@@ -1922,6 +2209,15 @@ function asStr(v) {
   return (v === null || v === undefined) ? '' : String(v).trim();
 }
 
+/** The branch name with any line break collapsed to a single space (v2.5.0).
+ *  The branch heads the cutoff note, so an embedded CR/LF — pasted into the
+ *  Settings cell, or typed on a phone keyboard — would split the note's first
+ *  line in two. Applied on READ (apiCutoff, bootstrap) as well as on write
+ *  (saveSettings), because the cell can be edited by hand. */
+function cleanBranch(v) {
+  return asStr(v).replace(/\s*[\r\n]+\s*/g, ' ').trim();
+}
+
 /** The current daily wage. The Settings value column is "@"-formatted, so it
  *  reads back as a string; a blank or unparseable cell falls back to the seeded
  *  rate rather than silently costing the day ₱0. */
@@ -2022,16 +2318,48 @@ function asCutoffFlag(v) {
 
 /** Dates travel as yyyy-MM-dd strings end-to-end; tolerate a Date object in
  *  case a cell lost its "@" format after hand editing. Duck-typed rather
- *  than instanceof so it also matches Dates from other JS realms. */
+ *  than instanceof so it also matches Dates from other JS realms.
+ *
+ *  Since v2.5.0 this also NORMALIZES the shapes a human types into a plain-text
+ *  cell — "2026-7-5", "2026/07/05", "7/5/2026" — to canonical yyyy-MM-dd.
+ *  Every reader and every date-keyed row match goes through here, so a day or
+ *  expense the owner typed by hand is FOUND (by the phone, by the cutoff, and
+ *  by the upsert that would otherwise write a duplicate row beside it) instead
+ *  of being silently invisible money. Slash dates read as month/day/year (the
+ *  Philippine Sheets convention); day/month is accepted only when month/day is
+ *  impossible (13/5/2026), because an unambiguous guess is the only safe one.
+ *  Anything that is not a real calendar date is returned untouched — this
+ *  normalizes, it never invents. */
 function asDateStr(v) {
   if (v && typeof v.getTime === 'function' && typeof v.getMonth === 'function') {
     return Utilities.formatDate(v, TZ, 'yyyy-MM-dd');
   }
-  return asStr(v);
+  var s = asStr(v);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s; // already canonical (the usual case)
+  var y, mo, d;
+  var m = /^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/.exec(s);
+  if (m) {
+    y = Number(m[1]); mo = Number(m[2]); d = Number(m[3]);
+  } else {
+    m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s);
+    if (m) {
+      y = Number(m[3]); mo = Number(m[1]); d = Number(m[2]);
+      if (mo > 12 && d >= 1 && d <= 12) { var t = mo; mo = d; d = t; } // 13/5/2026: only d/M fits
+    }
+  }
+  if (m && mo >= 1 && mo <= 12 && d >= 1 && d <= daysInMonth(y, mo)) {
+    return y + '-' + (mo < 10 ? '0' : '') + mo + '-' + (d < 10 ? '0' : '') + d;
+  }
+  return s;
 }
 
+/** Validate a REQUEST date. Deliberately strict about shape — the phone always
+ *  sends canonical yyyy-MM-dd, so a request that does not is a broken client,
+ *  not a hand-typed cell — which is why this does NOT run the lenient
+ *  normalization asDateStr applies to sheet reads. */
 function reqDate(v, label) {
-  var s = asDateStr(v);
+  var s = (v && typeof v.getTime === 'function' && typeof v.getMonth === 'function')
+    ? Utilities.formatDate(v, TZ, 'yyyy-MM-dd') : asStr(v);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) {
     throw new Error((label || 'date') + ' must be a yyyy-MM-dd string (got "' + asStr(v) + '").');
   }
@@ -2040,6 +2368,24 @@ function reqDate(v, label) {
   var p = parseYmd(s);
   if (p.m < 1 || p.m > 12 || p.d < 1 || p.d > daysInMonth(p.y, p.m)) {
     throw new Error((label || 'date') + ' is not a real calendar date (got "' + s + '").');
+  }
+  return s;
+}
+
+/** Validate the date of a RECORDED EVENT — a day of sales, an expense, a
+ *  stocktake. Unlike a cutoff period's bounds (which legitimately reach to the
+ *  end of the month), an event cannot be in the future, and one before 2020
+ *  predates the stall — both are almost always a mangled year from a hand-typed
+ *  or half-edited date, and both would file real money where nobody looks.
+ *  "Today" is Asia/Manila's today, never the server's locale. */
+function reqEntryDate(v, label) {
+  var s = reqDate(v, label);
+  var today = Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd');
+  if (s > today) {
+    throw new Error('That date (' + s + ') has not happened yet. Pick today or an earlier day.');
+  }
+  if (s < '2020-01-01') {
+    throw new Error('That date (' + s + ') is before 2020, which cannot be right. Check the year.');
   }
   return s;
 }
@@ -2104,16 +2450,31 @@ function setupSheet() {
   ss.setSpreadsheetTimeZone(TZ);
 
   var changes = [];
+  var createdTab = {};
   SCHEMA.forEach(function (def) {
     var r = migrateTab(ss, def);
+    createdTab[def.name] = r.created;
     if (r.created) changes.push('created tab "' + def.name + '"');
     if (r.added.length > 0) changes.push(def.name + ': appended ' + r.added.join(', '));
   });
 
+  // Settings keeps its key-wise add-if-missing (and the token) — a missing KEY
+  // is a hole every request falls into. The ROW seeders below run ONLY when
+  // their tab was just created (v2.5.0): a price, backlog or stock row the
+  // owner deleted on purpose must stay deleted, not reappear on every release.
   var token = seedSettings(ss);
-  seedPrices(ss);
-  seedStockItems(ss);
-  seedBacklogs(ss);
+  if (createdTab[TAB.PRICES]) seedPrices(ss);
+  if (createdTab[TAB.STOCK_ITEMS]) seedStockItems(ss);
+  if (createdTab[TAB.BACKLOGS]) seedBacklogs(ss);
+
+  // Backfill (v2.5.0, once): every non-closed DailyLog row whose salary cell is
+  // BLANK gets the CURRENT daily_salary written into it. Such rows predate the
+  // salary column and were counted at the live rate on every read — so the
+  // moment the owner changed the rate, history silently re-priced itself. The
+  // backfill freezes those days at the rate that was current when the sheet was
+  // migrated, which is the closest available answer to what those days cost.
+  var filled = backfillSalaries(ss, dailySalaryOf(readSettings(ss)));
+  if (filled > 0) changes.push('DailyLog: wrote the current daily salary onto ' + filled + ' blank row(s)');
 
   Logger.log('setupSheet complete (v' + VERSION + '). ' +
     (changes.length ? 'Changes: ' + changes.join('; ') : 'Nothing to change.'));
@@ -2143,6 +2504,26 @@ function migrateTab(ss, def) {
   var maxCols = sh.getMaxColumns();
   var headers = sh.getRange(1, 1, 1, maxCols).getValues()[0];
   var map = headerMap(headers);
+
+  // A tab that already holds data but whose row 1 has NOT ONE recognizable
+  // header is not an older version of this tab — it is something else wearing
+  // its name (or a tab whose header row was deleted). Appending the schema
+  // beside it would lay a second layout over foreign data and every reader
+  // would then see half of each. REFUSE, plainly, naming the tab. A tab that
+  // is completely empty is fine: it gets the headers exactly like a created
+  // one.
+  if (!created && sh.getLastRow() > 0) {
+    var recognized = 0;
+    for (var r = 0; r < def.headers.length; r++) {
+      if (map[def.headers[r]] !== undefined) recognized++;
+    }
+    if (recognized === 0) {
+      throw new Error('The tab "' + def.name + '" already has data in it, but row 1 has none of ' +
+        'the column names the app knows (it expects headers like "' +
+        def.headers.slice(0, 3).join('", "') + '"). Nothing was changed. Fix that tab\'s ' +
+        'header row — or rename the tab if it holds something else — then run setupSheet() again.');
+    }
+  }
 
   // Append point = the last OCCUPIED column, not the last NAMED one.
   //
@@ -2191,9 +2572,10 @@ function migrateTab(ss, def) {
 }
 
 /** Tabs whose seed rows must exist before a save can validate against them.
- *  Used by readTabForWrite when it has just created the tab, so a deploy that
- *  lands before setupSheet() is re-run still works. Every seeder is idempotent
- *  and keyed by name, so calling one again can never duplicate or reset a row. */
+ *  Used by readTabForWrite ONLY when it has just CREATED the tab (v2.5.0 — a
+ *  migration that merely appended a column must not re-plant deleted rows), so
+ *  a deploy that lands before setupSheet() is re-run still works. Every seeder
+ *  is idempotent and keyed by name, so a race can never duplicate a row. */
 var AUTO_SEED = {};
 AUTO_SEED[TAB.STOCK_ITEMS] = function (ss) { seedStockItems(ss); };
 
@@ -2284,6 +2666,32 @@ function existingKeys(t, name) {
   return have;
 }
 
+/**
+ * Write the CURRENT daily_salary into every non-closed DailyLog row whose
+ * salary cell is BLANK (v2.5.0, run by setupSheet). Rows like that predate the
+ * salary column and were resolved at READ time against the live rate — so the
+ * moment the owner changed the rate, every one of those historical days
+ * silently changed what it had cost, cutoffs already sent included. Writing
+ * the rate in freezes them, exactly as a normal save would have.
+ * Idempotent: a filled cell is never touched, an explicit 0 stands, and a
+ * closed day stays blank-or-0 (nobody worked). Returns how many were filled.
+ */
+function backfillSalaries(ss, rate) {
+  var t = readTab(ss, TAB.DAILY_LOG);
+  var salIdx = t.col['salary'];
+  if (salIdx === undefined) return 0; // cannot happen after migrateTab, but never throw here
+  var filled = 0;
+  for (var i = 1; i < t.values.length; i++) {
+    var r = t.values[i];
+    if (asDateStr(cellOf(r, t, 'date')) === '') continue; // blank filler row
+    if (asBool(cellOf(r, t, 'closed'))) continue;         // closed: 0 by definition, resolved on read
+    if (asStr(cellOf(r, t, 'salary')) !== '') continue;   // already snapshotted (0 included)
+    t.sheet.getRange(i + 1, salIdx + 1).setValue(rate);
+    filled++;
+  }
+  return filled;
+}
+
 /** Seed Settings rows that are missing; generate the token if absent/blank.
  *  Returns the current token. */
 function seedSettings(ss) {
@@ -2342,6 +2750,11 @@ function seedSettings(ss) {
  *
  * Matched by sku like every other seeder, so a sheet that already has a `nori`
  * row keeps it exactly as it is — including an in_cutoff the owner set himself.
+ *
+ * Since v2.5.0 the row seeders run ONLY when their tab was just created: on a
+ * live sheet, a row the owner deleted on purpose must stay deleted, and a sku
+ * he never sold must not appear because a release happened. Adding a product
+ * to a live sheet is a Prices-tab job, done once, on purpose.
  */
 function seedPrices(ss) {
   var t = readTab(ss, TAB.PRICES);

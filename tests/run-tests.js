@@ -360,10 +360,12 @@ test('"@" format is applied as WHOLE-COLUMN (A:A-style) ranges on every textCol'
   });
 });
 
-test('re-running setupSheet never resets an edited stock unit or threshold', () => {
+test('re-running setupSheet never resets an edited stock unit — or resurrects a deleted row', () => {
   // The seeded units are the thing you OPEN (pack/gallon), but the owner may
   // still change one — and setupSheet is run by hand after every release, so it
-  // must only ever ADD the rows that are missing.
+  // must not touch existing rows. PIN MOVED (v2.5.0, deliberate): row seeds now
+  // run ONLY when the tab is CREATED, so a row the owner deleted on purpose
+  // stays deleted instead of reappearing on every release.
   const { ctx, ss, token } = freshSetup();
   assert.strictEqual(post(ctx, {
     token, action: 'saveStockItems',
@@ -377,8 +379,8 @@ test('re-running setupSheet never resets an edited stock unit or threshold', () 
   const sauce = rows.find(r => r[0] === 'Takoyaki Sauce');
   assert.deepStrictEqual([sauce[1], sauce[6]], ['jug', 2], "the owner's edit must survive");
   assert.strictEqual(rows.filter(r => r[0] === 'Takoyaki Sauce').length, 1, 'no duplicate row');
-  assert.strictEqual(rows.filter(r => r[0] === 'Togarashi').length, 1,
-    'a row he deleted is re-seeded once, because only MISSING rows are added');
+  assert.strictEqual(rows.filter(r => r[0] === 'Togarashi').length, 0,
+    'a row he deleted on purpose must STAY deleted — seeds belong to tab creation only');
 });
 
 test('setupSheet is idempotent (re-run keeps token, no duplicate seeds)', () => {
@@ -705,7 +707,10 @@ test('saveDay computed figures: price snapshot, cheese split, cash = total - gca
     regular_qty: 3, amount: 320, gcash_amount: 50,
     // Every line says whether its money counted, so the receipt never has to
     // guess from a price list the phone may not have synced yet.
-    in_cutoff: true
+    in_cutoff: true,
+    // ...and the prices the money was computed from (v2.5.0), completing the
+    // snapshot the amounts began.
+    price: 50, cheese_price: 60
   }]);
   assert.strictEqual(r.data.excluded_total, 0,
     'a day with nothing excluded still answers the key, so the phone never guesses');
@@ -754,8 +759,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.4.1', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.4.1');
+  assert.strictEqual(g.data.version, '2.5.0', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.5.0');
 });
 
 // ---------------------------------------------------------------------------
@@ -852,19 +857,25 @@ test('setupSheet APPENDS the new columns and moves nothing', () => {
 
   const counts = ss.getSheetByName('DailyCounts').getDataRange().getValues();
   assert.deepStrictEqual(counts[0],
-    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff']),
+    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price']),
     'new DailyCounts columns must be appended to the RIGHT, in schema order');
   assert.deepStrictEqual(counts[1].slice(0, 9), OLD_COUNT_ROWS[0], 'existing cells must not shift');
   assert.deepStrictEqual(counts[2].slice(0, 9), OLD_COUNT_ROWS[1]);
   // A blank in the three GCash cells means "that day was all cash"; a blank
-  // in_cutoff means "this row has no snapshot", which falls back to the sku's
-  // current flag. Neither may be written as a 0 or a FALSE by the migration.
-  assert.deepStrictEqual(counts[1].slice(9), ['', '', '', ''], 'new cells start blank');
+  // in_cutoff means "this row predates the snapshot" and READS TRUE (its money
+  // was inside the totals when saved); blank price cells fall back to the
+  // current Prices tab. None may be written as a 0 or a FALSE by the migration.
+  assert.deepStrictEqual(counts[1].slice(9), ['', '', '', '', '', ''], 'new cells start blank');
 
   const log = ss.getSheetByName('DailyLog').getDataRange().getValues();
   assert.deepStrictEqual(log[0], OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total']));
   assert.deepStrictEqual(log[1].slice(0, 10), OLD_LOG_ROW);
-  assert.deepStrictEqual(log[1].slice(10), ['', '', ''], 'new cells start blank, not 0');
+  // PIN MOVED (v2.5.0, deliberate): the migration BACKFILLS the salary cell of
+  // every non-closed row with the current daily_salary — before it, those rows
+  // were resolved at the LIVE rate on every read, so a later rate change
+  // silently re-priced history. custom_gcash and excluded_total stay blank.
+  assert.deepStrictEqual(log[1].slice(10), ['', 200, ''],
+    'salary backfilled at the current rate; the other new cells start blank, not 0');
 
   const exp = ss.getSheetByName('Expenses').getDataRange().getValues();
   assert.deepStrictEqual(exp[0], ['date', 'category', 'item', 'amount', 'backlog_ref',
@@ -878,11 +889,13 @@ test('setupSheet APPENDS the new columns and moves nothing', () => {
   assert.strictEqual(prices[1][4], 55, "the owner's edited Box 4 price must survive");
   assert.strictEqual(prices[1][7], '',
     'every EXISTING price row keeps a BLANK in_cutoff — which must read TRUE');
-  assert.strictEqual(prices.length - 1, 4,
-    'the three live rows, untouched, plus the seeded nori row');
-  const nori = prices.slice(1).find(x => x[0] === 'nori');
-  assert.deepStrictEqual(nori, ['nori', 'Nori', 'simple', '', 25, '', true, false],
-    'nori is seeded active, priced, and the one row that is OUT of the cutoff');
+  // PIN MOVED (v2.5.0, deliberate): row seeds run only when the tab is CREATED,
+  // so migrating a live Prices tab adds NO nori row — a sku the owner never set
+  // up must not appear because a release happened. His real sheet already has
+  // nori; a fresh sheet still gets it (see the freshSetup tests).
+  assert.strictEqual(prices.length - 1, 3, 'the three live rows, untouched, and nothing seeded');
+  assert.strictEqual(prices.slice(1).find(x => x[0] === 'nori'), undefined,
+    'no nori row is planted into a tab that already existed');
 });
 
 test('setupSheet creates and seeds the stock + cutoff tabs', () => {
@@ -992,8 +1005,8 @@ test('after migrating, a new day writes the new columns and old rows are untouch
   assert.deepStrictEqual(counts[2].slice(0, 9), OLD_COUNT_ROWS[1]);
   const fresh = counts.slice(1).find(x => x[0] === '2026-07-22');
   assert.deepStrictEqual(fresh,
-    ['2026-07-22', 'box6', 10, 4, 6, 1, 2, 420, 'new-day-1', 2, 1, 210, true],
-    'and the in_cutoff snapshot is written beside the money it decided');
+    ['2026-07-22', 'box6', 10, 4, 6, 1, 2, 420, 'new-day-1', 2, 1, 210, true, 65, 80],
+    'and the in_cutoff + price snapshots are written beside the money they decided');
 });
 
 test('saveDay on a not-yet-migrated sheet self-heals instead of failing', () => {
@@ -1016,7 +1029,7 @@ test('saveDay on a not-yet-migrated sheet self-heals instead of failing', () => 
   assert.strictEqual(r.data.salary, 200, 'the wage is snapshotted even before setupSheet is re-run');
   // The tabs and columns it needed were created/appended on the fly...
   assert.deepStrictEqual(ss.getSheetByName('DailyCounts').getDataRange().getValues()[0],
-    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff']));
+    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price']));
   assert.deepStrictEqual(ss.getSheetByName('DailyLog').getDataRange().getValues()[0],
     OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total']));
   const healed = ss.getSheetByName('DailyLog').getDataRange().getValues().slice(1)
@@ -1038,7 +1051,7 @@ test('a hand-added column is never overwritten: new columns land to its right', 
   ctx.setupSheet();
 
   assert.deepStrictEqual(dc.getDataRange().getValues()[0],
-    OLD_COUNT_HEADERS.concat(['owner_note', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff']),
+    OLD_COUNT_HEADERS.concat(['owner_note', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price']),
     'new columns must go to the right of everything already there');
   assert.strictEqual(dc.getDataRange().getValues()[1][9], 'sobrang ulan',
     "the owner's column would have been reinterpreted as a GCash quantity");
@@ -1056,7 +1069,7 @@ test('a hand-added column is never overwritten: new columns land to its right', 
   }).ok, true);
   const after = dc.getDataRange().getValues();
   assert.deepStrictEqual(after.slice(1).find(x => x[0] === '2026-07-23'),
-    ['2026-07-23', 'box6', 3, 0, 3, 0, 2, 195, 'hand-1', '', 1, 0, 65, true]);
+    ['2026-07-23', 'box6', 3, 0, 3, 0, 2, 195, 'hand-1', '', 1, 0, 65, true, 65, 80]);
   assert.strictEqual(after[1][9], 'sobrang ulan', 'a block rewrite must carry unknown columns through');
 });
 
@@ -1123,8 +1136,8 @@ test('the four buckets sum to sold and produce amount + gcash_amount', () => {
   assert.strictEqual(r.data.gcash, 210);
   assert.strictEqual(r.data.cash, 320);
   const row = countsRowsFor(ss.getSheetByName('DailyCounts'), '2026-07-30')[0];
-  assert.deepStrictEqual(row.slice(5), [2, 4, 530, 'buckets-1', 3, 1, 210, true],
-    'cheese_qty, regular_qty, amount, entry_id, gcash_qty, gcash_cheese_qty, gcash_amount, in_cutoff');
+  assert.deepStrictEqual(row.slice(5), [2, 4, 530, 'buckets-1', 3, 1, 210, true, 50, 60],
+    'cheese_qty, regular_qty, amount, entry_id, gcash_qty, gcash_cheese_qty, gcash_amount, in_cutoff, price, cheese_price');
 });
 
 test('saveDay ignores a client-sent gcash (an old queued payload cannot write it)', () => {
@@ -1371,7 +1384,7 @@ test('B1: a column holding data under a BLANK header keeps its header blank', ()
 
   const v = dc.getDataRange().getValues();
   assert.deepStrictEqual(v[0],
-    OLD_COUNT_HEADERS.concat(['', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff']),
+    OLD_COUNT_HEADERS.concat(['', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price']),
     'the new columns must be appended BEYOND every occupied column, so J1 stays blank');
   assert.deepStrictEqual([v[1][9], v[2][9]], [3, 'kulang ang harina'],
     "the owner's own column was claimed and its values relabelled as a GCash quantity");
@@ -1409,10 +1422,10 @@ test('B1: a later save writes the GCash columns in their REAL positions', () => 
   });
   assert.strictEqual(r.ok, true, r.error);
   const v = dc.getDataRange().getValues();
-  // gcash_qty / gcash_cheese_qty / gcash_amount live in columns 11-13 here, and
-  // the in_cutoff snapshot in 14.
+  // gcash_qty / gcash_cheese_qty / gcash_amount live in columns 11-13 here, the
+  // in_cutoff snapshot in 14, and the price snapshot in 15-16.
   assert.deepStrictEqual(v.slice(1).find(x => x[0] === '2026-07-23'),
-    ['2026-07-23', 'box6', 3, 0, 3, 0, 2, 195, 'b1-save', '', 1, 0, 65, true]);
+    ['2026-07-23', 'box6', 3, 0, 3, 0, 2, 195, 'b1-save', '', 1, 0, 65, true, 65, 80]);
   assert.strictEqual(v[1][9], 3, 'a block rewrite must carry the unnamed column through');
   assert.strictEqual(v[2][9], 'kulang ang harina');
 });
@@ -1429,8 +1442,8 @@ test('B1: append beyond a STRAY value too, leaving the blank gap alone', () => {
 
   const v = dc.getDataRange().getValues();
   assert.deepStrictEqual(v[0].slice(9),
-    ['', '', '', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff'],
-    'columns 10-12 stay blank-headed; the schema lands at 13-16');
+    ['', '', '', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price'],
+    'columns 10-12 stay blank-headed; the schema lands at 13-18');
   assert.strictEqual(v[2][11], 'ANO ITO', 'a stray value must not be relabelled either');
   assert.strictEqual(post(ctx, { token: LEGACY_TOKEN, action: 'bootstrap', payload: {} })
     .data.counts.find(c => c.sku === 'box4').amount, 520);
@@ -2587,16 +2600,19 @@ test('a MISSING in_cutoff column counts every sku IN (a sheet not yet migrated)'
 
 test('a BLANK in_cutoff cell counts IN, and only nori is out', () => {
   // Straight after the migration: the column exists and every EXISTING row's
-  // cell is empty. Only the freshly seeded nori row says FALSE.
+  // cell is empty. Seeds now belong to tab CREATION only (v2.5.0), so the
+  // migration plants no nori row — the owner's live sheet already has one, and
+  // this fixture adds it the same way his sheet got it.
   const ss = legacySpreadsheet();
   const { ctx } = load(ss);
   ctx.setupSheet();
+  ss.getSheetByName('Prices').appendRow(['nori', 'Nori', 'simple', '', 25, '', true, false]);
   const rows = priceCells(ss);
   assert.strictEqual(rows[0][7], 'in_cutoff', 'precondition: the column was appended');
   assert.deepStrictEqual(rows.slice(1, 4).map(r => [r[0], r[7]]),
     [['box4', ''], ['box6', ''], ['box10', '']],
     'precondition: every migrated row has an EMPTY in_cutoff cell');
-  assert.strictEqual(rows[4][7], false, 'precondition: the seeded nori row says FALSE');
+  assert.strictEqual(rows[4][7], false, 'precondition: the nori row says FALSE');
 
   const boot = post(ctx, { token: LEGACY_TOKEN, action: 'bootstrap', payload: {} });
   assert.strictEqual(boot.ok, true, boot.error);
@@ -3095,37 +3111,45 @@ test('F2: the in_cutoff SNAPSHOT classifies history — a later flip moves no sa
     'Total = Mama + Split + Supplies + Octopus + Salary + Other + Electric + Remaining');
 });
 
-test('F2: a legacy count row with a BLANK in_cutoff falls back to the sku flag', () => {
+test('F2: a count row with NO snapshot counts IN — its money was saved inside the totals', () => {
+  // PIN MOVED (v2.5.0, deliberate): a BLANK in_cutoff on a count row now reads
+  // TRUE outright, replacing the fallback to the sku's CURRENT flag. Every
+  // pre-snapshot row was written by code that put ALL of a day's money inside
+  // total/cash/gcash — so classifying such rows by today's flag showed migrated
+  // money BOTH inside the totals AND under "kept out": the same pesos stated
+  // twice, in two contradictory ways, on the screen the owner reconciles his
+  // tin against.
   const { ctx, ss, token } = freshSetup();
+  // The pre-v2.4.0 world: nori counted IN when this fortnight was saved...
+  assert.strictEqual(setCutoffFlag(ctx, token, 'nori', 25, 0, true).ok, true);
   const r = post(ctx, { token, action: 'saveDay', payload: dayWithNori('2026-07-20', 10, 12, 'legacy-flag-1') });
   assert.strictEqual(r.ok, true, r.error);
-  // Every row written before v2.4.1 has an EMPTY cell in that column.
+  assert.strictEqual(r.data.total, 800, 'precondition: 500 of boxes + 300 of nori, ALL inside the total');
+  // ...and its rows predate the snapshot column, like every migrated row.
   clearCountFlags(ss);
+  // Today, the owner's live sheet excludes nori again.
+  assert.strictEqual(setCutoffFlag(ctx, token, 'nori', 25, 0, false).ok, true);
 
   const cut = cutoffFor(ctx, token, '2026-07-16', '2026-07-31').data;
-  assert.strictEqual(cut.figures.excluded, 300,
-    "a blank snapshot is not a decision: it falls back to the sku's CURRENT flag");
-  assert.deepStrictEqual(cut.figures.excluded_lines,
-    [{ sku: 'nori', label: 'Nori', qty: 12, amount: 300 }]);
-  assert.ok(!cut.figures.excluded_lines.some(l => l.sku === 'box4'),
-    'and a blank must never INVENT excluded money out of a counted sku');
-  assert.strictEqual(cut.figures.total, 500, "the day's stored money is untouched either way");
+  assert.strictEqual(cut.figures.total, 800, "the day's stored money is history and does not move");
+  assert.strictEqual(cut.figures.excluded, 0,
+    'the ₱300 is INSIDE the total: listing it under "kept out" too would state the same money twice');
+  assert.deepStrictEqual(cut.figures.excluded_lines, []);
 
-  // The resolved flag is what the phone receives, per row, so it never has to
-  // guess whether a row was snapshotted.
+  // The resolved flag is what the phone receives, per row, so both sides tell
+  // the owner the same thing: this money counted.
   const boot = post(ctx, { token, action: 'bootstrap', payload: {} }).data;
   const rowOf = sku => boot.counts.find(c => c.date === '2026-07-20' && c.sku === sku);
-  assert.strictEqual(rowOf('nori').in_cutoff, false);
+  assert.strictEqual(rowOf('nori').in_cutoff, true,
+    'a blank snapshot reads TRUE — the money was inside the totals when it was saved');
   assert.strictEqual(rowOf('box4').in_cutoff, true);
 
-  // The fallback is the sku's flag, not a constant: switch nori in, and the
-  // legacy row follows it — that is all a pre-v2.4.1 row can tell us.
+  // And the current Prices flag has NO say over it in either direction: flip
+  // nori back in, and nothing about the saved fortnight moves.
   assert.strictEqual(setCutoffFlag(ctx, token, 'nori', 25, 0, true).ok, true);
   const after = cutoffFor(ctx, token, '2026-07-16', '2026-07-31').data;
   assert.strictEqual(after.figures.excluded, 0);
-  assert.deepStrictEqual(after.figures.excluded_lines, []);
-  assert.strictEqual(post(ctx, { token, action: 'bootstrap', payload: {} }).data.counts
-    .find(c => c.date === '2026-07-20' && c.sku === 'nori').in_cutoff, true);
+  assert.strictEqual(after.figures.total, 800);
 });
 
 test('F2: an excluded sku deleted from Prices keeps its money VISIBLE, under its sku', () => {
@@ -3332,6 +3356,359 @@ test('the note stays BYTE-IDENTICAL to the spec sample when the flag is flipped 
   assert.deepStrictEqual(again.figures, first.figures, 'and not one figure may move');
   assert.strictEqual(again.figures.excluded, 400,
     'the ₱400 was never in the total, so it must still be shown as kept out');
+});
+
+// ---------------------------------------------------------------------------
+// 21. v2.5.0 — the retroactivity / robustness pass. Each test here is the
+// repro of a confirmed finding, kept as a pin.
+// ---------------------------------------------------------------------------
+console.log('\n--- 21. v2.5.0: price snapshots, split memory, and the server guards ---');
+
+test("re-saving a date reuses THAT DATE's stored prices; a new sku uses current", () => {
+  const { ctx, token } = freshSetup();
+  let r = saveDay(ctx, token, { date: '2026-07-20', counts: [{ sku: 'box4', sod: 2, eod: 0, cheeseQty: 1 }], entryId: 'snap-1' });
+  assert.strictEqual(r.data.total, 110, '1 regular x 50 + 1 cheese x 60');
+  // The owner raises prices mid-cutoff...
+  assert.strictEqual(post(ctx, {
+    token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box4', price: 60, cheesePrice: 75, active: true },
+                      { sku: 'box6', price: 70, cheesePrice: 90, active: true }] }
+  }).ok, true);
+  // ...then corrects the 20th's counts. A correction fixes the COUNT — it must
+  // never re-price the night at today's prices.
+  r = saveDay(ctx, token, {
+    date: '2026-07-20',
+    counts: [{ sku: 'box4', sod: 3, eod: 0, cheeseQty: 1 }, { sku: 'box6', sod: 1, eod: 0 }],
+    entryId: 'snap-1'
+  });
+  assert.strictEqual(r.ok, true, r.error);
+  const box4 = r.data.lines.find(l => l.sku === 'box4');
+  assert.deepStrictEqual([box4.price, box4.cheese_price], [50, 60], "the 20th keeps the 20th's prices");
+  assert.strictEqual(box4.amount, 2 * 50 + 60);
+  const box6 = r.data.lines.find(l => l.sku === 'box6');
+  assert.deepStrictEqual([box6.price, box6.cheese_price], [70, 90],
+    'a sku NEW to the day has no snapshot to reuse, so it uses the current price');
+  assert.strictEqual(r.data.total, 160 + 70);
+  // A brand-new date prices at the new list, as always.
+  r = saveDay(ctx, token, { date: '2026-07-21', counts: [{ sku: 'box4', sod: 1, eod: 0 }], entryId: 'snap-2' });
+  assert.strictEqual(r.data.total, 60);
+});
+
+test('a legacy count row with BLANK stored prices falls back to the current Prices tab', () => {
+  const ss = legacySpreadsheet();
+  const { ctx } = load(ss);
+  ctx.setupSheet();
+  // Bootstrap resolves the blank against the CURRENT list (box4 is 55 here) —
+  // the only answer a pre-v2.5.0 row has — while its stored money is untouched.
+  const boot = post(ctx, { token: LEGACY_TOKEN, action: 'bootstrap', payload: {} });
+  const c = boot.data.counts.find(x => x.sku === 'box4');
+  assert.deepStrictEqual([c.price, c.cheese_price], [55, 60]);
+  assert.strictEqual(c.amount, 520, 'the stored amount itself never moves');
+  // A re-save of that date has the same nothing to reuse, so it prices current.
+  const r = post(ctx, {
+    token: LEGACY_TOKEN, action: 'saveDay',
+    payload: {
+      date: '2026-07-20', closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+      counts: [{ sku: 'box4', sod: 10, eod: 0, cheeseQty: 2 }], entryId: 'old-day-1'
+    }
+  });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.deepStrictEqual([r.data.lines[0].price, r.data.lines[0].cheese_price], [55, 60]);
+});
+
+test('saveDay refuses a BLANK price on an ACTIVE sku, naming it (mirror of savePrices)', () => {
+  const { ctx, ss, token } = freshSetup();
+  // Only a hand edit can reach this state — savePrices refuses to create it.
+  const sh = ss.getSheetByName('Prices');
+  const v = sh.getDataRange().getValues();
+  const row = v.findIndex(x => x[0] === 'box6') + 1;
+  sh.getRange(row, v[0].indexOf('price') + 1).setValue('');
+  const before = JSON.stringify(snapshot(ss));
+  const r = saveDay(ctx, token, { counts: [{ sku: 'box6', sod: 4, eod: 0 }], entryId: 'blank-price' });
+  assert.strictEqual(r.ok, false, 'a night must never be silently booked at ₱0');
+  assert.match(r.error, /Box 6/, 'the message names the item');
+  assert.match(r.error, /price/);
+  assert.ok(!/undefined|NaN/.test(r.error), 'in plain English');
+  assert.strictEqual(JSON.stringify(snapshot(ss)), before, 'and nothing was written');
+  // A cleared CHEESE price is the same hole on a box sku.
+  sh.getRange(row, v[0].indexOf('price') + 1).setValue(65);
+  sh.getRange(row, v[0].indexOf('cheese_price') + 1).setValue('');
+  const r2 = saveDay(ctx, token, { counts: [{ sku: 'box6', sod: 4, eod: 0 }], entryId: 'blank-price' });
+  assert.strictEqual(r2.ok, false);
+  assert.match(r2.error, /cheese price/);
+});
+
+test('a Prices tab with nothing readable REFUSES the day, naming the actual problem', () => {
+  const { ctx, ss, token } = freshSetup();
+  ['box4', 'box6', 'box10', 'nori'].forEach(s => deleteFirstColRow(ss, 'Prices', s));
+  const r = saveDay(ctx, token, { counts: [{ sku: 'box4', sod: 4, eod: 0 }], entryId: 'no-prices' });
+  assert.strictEqual(r.ok, false,
+    'an unreadable Prices tab used to drop every sku and book the night at ₱0 behind ok:true');
+  assert.match(r.error, /Prices tab/, 'the message names where the problem is');
+  assert.ok(!/undefined|NaN/.test(r.error));
+  // The guard is scoped to a payload that NEEDS pricing: a custom-only day and a
+  // closed day still save.
+  assert.strictEqual(saveDay(ctx, token, { counts: [], customAmount: 100, entryId: 'no-prices-ok' }).ok, true);
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-07-29', closed: true, counts: [], entryId: 'no-prices-closed' }).ok, true);
+});
+
+test('duplicate Prices/DailyLog rows: the FIRST wins, deterministically, and nothing blocks', () => {
+  const { ctx, ss, token } = freshSetup();
+  // A hand-copied duplicate box4 row at a nonsense price.
+  ss.getSheetByName('Prices').appendRow(['box4', 'Box 4 copy', 'box', 4, 999, 999, true, '']);
+  const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
+  const rows4 = boot.data.prices.filter(p => p.sku === 'box4');
+  assert.strictEqual(rows4.length, 1, 'one sku, one row on the phone');
+  assert.strictEqual(rows4[0].price, 50, 'the FIRST row wins — the same row an upsert rewrites');
+  const r = saveDay(ctx, token, { counts: [{ sku: 'box4', sod: 2, eod: 0 }], entryId: 'dup-1' });
+  assert.strictEqual(r.ok, true, 'a duplicate row must never make the day unsaveable: ' + r.error);
+  assert.strictEqual(r.data.total, 100, 'priced by the first row');
+
+  // A duplicate DATE row typed into DailyLog by hand, contradicting the real one.
+  ss.getSheetByName('DailyLog').appendRow(['2026-07-30', false, 'Mama', 0, 77777, 77777, 0, '', 'dup-hand', '']);
+  const days = post(ctx, { token, action: 'bootstrap', payload: {} }).data.days.filter(d => d.date === '2026-07-30');
+  assert.strictEqual(days.length, 1, 'one date, one day');
+  assert.strictEqual(days[0].total, 100, 'the FIRST row wins — the one apiSaveDay updates');
+  const cut = cutoffFor(ctx, token, '2026-07-16', '2026-07-31').data;
+  assert.strictEqual(cut.figures.total, 100, 'the duplicate must not double the cutoff');
+});
+
+test('headers match case-insensitively and trimmed, so a retyped header still reads', () => {
+  const { ctx, ss, token } = freshSetup();
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-07-20', counts: [{ sku: 'box4', sod: 2, eod: 0 }], entryId: 'case-1' }).ok, true);
+  // The owner retypes two headers, with a capital and a stray space.
+  const sh = ss.getSheetByName('DailyLog');
+  sh.getRange(1, 1).setValue(' Date ');
+  sh.getRange(1, 5).setValue('Total');
+  const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
+  assert.strictEqual(boot.ok, true, boot.error);
+  assert.strictEqual(boot.data.days.find(d => d.date === '2026-07-20').total, 100,
+    'a retyped header must not make its column — and its money — invisible');
+  // Saving upserts the SAME row, and migration appends no duplicate column.
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-07-20', counts: [{ sku: 'box4', sod: 3, eod: 0 }], entryId: 'case-1' }).ok, true);
+  assert.strictEqual(sh.getDataRange().getValues().slice(1).filter(x => String(x[0]) === '2026-07-20').length, 1);
+  ctx.setupSheet();
+  const heads = sh.getDataRange().getValues()[0].map(h => String(h).trim().toLowerCase());
+  assert.strictEqual(heads.filter(h => h === 'date').length, 1, 'no second "date" column appended');
+  assert.strictEqual(heads.filter(h => h === 'total').length, 1);
+});
+
+test('migrateTab REFUSES a non-empty tab with no recognizable headers', () => {
+  const ss = new FakeSpreadsheet();
+  makeTab(ss, 'Settings', ['key', 'value'], [['token', 'x']]);
+  // Something else entirely, wearing the DailyLog name.
+  makeTab(ss, 'DailyLog', ['fecha', 'monto'], [['2026-07-01', 99]]);
+  const { ctx } = load(ss);
+  assert.throws(() => ctx.setupSheet(), /DailyLog/, 'the error must name the tab');
+  assert.throws(() => ctx.setupSheet(), /header/i, 'and say what is wrong, plainly');
+  assert.deepStrictEqual(ss.getSheetByName('DailyLog').getDataRange().getValues()[0],
+    ['fecha', 'monto'], 'a second schema must NOT be appended beside foreign data');
+});
+
+test('the split remembers the period: entered row, then the ARCHIVED split, then the default', () => {
+  const { ctx, ss, token } = splitFixture();
+  // Generate the note for real at the default...
+  let r = cutoffFor(ctx, token, SPLIT_PERIOD.start, SPLIT_PERIOD.end, false);
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.data.figures.split, 3000);
+  // ...which RECORDS the split it used, so the period now owns its figure.
+  const inputs = ss.getSheetByName('CutoffInputs').getDataRange().getValues().slice(1);
+  assert.strictEqual(inputs.length, 1, 'a real generation with no entered split writes one row');
+  assert.strictEqual(inputs[0][2], 3000);
+  // Changing the default later moves NOTHING about this period.
+  assert.strictEqual(post(ctx, { token, action: 'saveSettings', payload: { settings: { split_default: 5000 } } }).ok, true);
+  r = cutoffFor(ctx, token, SPLIT_PERIOD.start, SPLIT_PERIOD.end);
+  assert.strictEqual(r.data.figures.split, 3000, 'an already-generated period keeps ITS split');
+  // Even with the CutoffInputs row gone (hand edit), the ARCHIVED split answers
+  // before the default does.
+  ss.getSheetByName('CutoffInputs').deleteRow(2);
+  r = cutoffFor(ctx, token, SPLIT_PERIOD.start, SPLIT_PERIOD.end);
+  assert.strictEqual(r.data.figures.split, 3000, 'the archived split outranks a newer default');
+  // A period never generated still falls through to the default.
+  r = cutoffFor(ctx, token, '2026-06-16', '2026-06-30');
+  assert.strictEqual(r.data.figures.split, 5000);
+});
+
+test('the split is WHOLE PESOS: centavos are refused on entry and on the default', () => {
+  const { ctx, ss, token } = freshSetup();
+  const r = post(ctx, {
+    token, action: 'saveCutoffSplit',
+    payload: { start: '2026-07-16', end: '2026-07-31', amount: 3000.5, entryId: 'c-split' }
+  });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /whole pesos/);
+  assert.ok(!/undefined|NaN/.test(r.error));
+  assert.strictEqual(ss.getSheetByName('CutoffInputs').getDataRange().getValues().length - 1, 0, 'nothing written');
+  const r2 = post(ctx, { token, action: 'saveSettings', payload: { settings: { split_default: 1500.25 } } });
+  assert.strictEqual(r2.ok, false);
+  assert.match(r2.error, /whole pesos/);
+  assert.strictEqual(settingsMap(ss).split_default, 3000, 'the default is untouched');
+  // Whole pesos still save — including an odd figure, whose half is x.50.
+  const ok = post(ctx, {
+    token, action: 'saveCutoffSplit',
+    payload: { start: '2026-07-16', end: '2026-07-31', amount: 3001, entryId: 'c-split' }
+  });
+  assert.strictEqual(ok.ok, true, ok.error);
+  assert.strictEqual(ok.data.per_partner, 1500.5);
+});
+
+test('a BLANK money value in saveSettings means leave-alone, never ₱0', () => {
+  const { ctx, ss, token } = freshSetup();
+  const r = post(ctx, {
+    token, action: 'saveSettings',
+    payload: { settings: { daily_salary: '', split_default: null, branch: 'Marikina' } }
+  });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.deepStrictEqual(r.data.saved, ['branch']);
+  assert.deepStrictEqual(r.data.ignored, ['daily_salary', 'split_default'],
+    'the blank keys are reported back as untouched');
+  assert.strictEqual(settingsMap(ss).daily_salary, 200, 'a cleared field must not zero the wage');
+  assert.strictEqual(settingsMap(ss).split_default, 3000);
+});
+
+test('setupSheet backfills BLANK salaries on open rows — and never touches 0 or closed', () => {
+  const { ctx, ss, token } = freshSetup();
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-07-20', counts: [], entryId: 'bf-1' }).ok, true);
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-07-21', salary: 0, counts: [], entryId: 'bf-2' }).ok, true);
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-07-22', closed: true, counts: [], entryId: 'bf-3' }).ok, true);
+  setSalaryCell(ss, '2026-07-20', ''); // the rows as v2.2.0 left them
+  setSalaryCell(ss, '2026-07-22', '');
+
+  ctx.setupSheet();
+  assert.strictEqual(salaryCellFor(ss, '2026-07-20'), 200, 'a blank OPEN row is written at the current rate');
+  assert.strictEqual(salaryCellFor(ss, '2026-07-21'), 0, 'an explicit 0 (a day off) stands');
+  assert.strictEqual(salaryCellFor(ss, '2026-07-22'), '', 'a closed day stays blank — nobody worked');
+  // ...so a LATER rate change no longer re-prices that history.
+  assert.strictEqual(post(ctx, { token, action: 'saveSettings', payload: { settings: { daily_salary: 500 } } }).ok, true);
+  const cut = cutoffFor(ctx, token, '2026-07-16', '2026-07-31').data;
+  assert.strictEqual(cut.figures.salary, 200, 'the backfilled fortnight keeps what it actually cost');
+});
+
+test('a NEGATIVE category refuses the real note, naming the rows; dryRun shows it plainly', () => {
+  const { ctx, ss, token } = freshSetup();
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-07-20', counts: [{ sku: 'box4', sod: 4, eod: 0 }], entryId: 'neg-day' }).ok, true);
+  // Only a hand edit can make a negative amount — saveExpense refuses them.
+  const sh = ss.getSheetByName('Expenses');
+  sh.appendRow(['2026-07-21', 'Supplies', 'refund', -500, '', '', 'neg-exp', '']);
+
+  const dry = cutoffFor(ctx, token, '2026-07-16', '2026-07-31');
+  assert.strictEqual(dry.ok, true, 'the PREVIEW still answers: ' + dry.error);
+  assert.strictEqual(dry.data.figures.supplies, -500, 'and shows the negative plainly');
+
+  const real = cutoffFor(ctx, token, '2026-07-16', '2026-07-31', false);
+  assert.strictEqual(real.ok, false, 'the real note is refused — it would state money that never existed');
+  assert.match(real.error, /Supplies/);
+  assert.match(real.error, /2026-07-21/, 'the offending row is named by date');
+  assert.match(real.error, /refund/, '...and by item');
+  assert.ok(!/undefined|NaN/.test(real.error));
+  assert.strictEqual(ss.getSheetByName('Cutoffs').getDataRange().getValues().length - 1, 0, 'nothing archived');
+
+  // Fix the row, and the same generation goes through.
+  const v = sh.getDataRange().getValues();
+  sh.getRange(v.findIndex(x => x[6] === 'neg-exp') + 1, 4).setValue(500);
+  const ok = cutoffFor(ctx, token, '2026-07-16', '2026-07-31', false);
+  assert.strictEqual(ok.ok, true, ok.error);
+});
+
+test('event dates: the future and the deep past are refused; periods still reach ahead', () => {
+  const { ctx, token } = freshSetup(); // frozen "now" is 2026-08-01, Manila
+  const dayF = saveDay(ctx, token, { date: '2026-08-02', counts: [], entryId: 'fut-1' });
+  assert.strictEqual(dayF.ok, false); assert.match(dayF.error, /has not happened yet/);
+  const expF = post(ctx, {
+    token, action: 'saveExpense',
+    payload: { date: '2026-08-02', category: 'Other', item: 'x', amount: 10, backlogRef: '', notes: '', entryId: 'fut-2' }
+  });
+  assert.strictEqual(expF.ok, false); assert.match(expF.error, /has not happened yet/);
+  const cntF = post(ctx, {
+    token, action: 'saveStockCount',
+    payload: { date: '2026-08-02', product: 'Bonito', qty: 1, entryId: 'fut-3' }
+  });
+  assert.strictEqual(cntF.ok, false); assert.match(cntF.error, /has not happened yet/);
+  const old = saveDay(ctx, token, { date: '2019-12-31', counts: [], entryId: 'old-1' });
+  assert.strictEqual(old.ok, false); assert.match(old.error, /before 2020/);
+  // TODAY is not the future.
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-08-01', counts: [], entryId: 'today-1' }).ok, true);
+  // A cutoff PERIOD legitimately reaches into the future (the 1-15 of "now"),
+  // and so does the split saved for it — period bounds are not event dates.
+  assert.strictEqual(cutoffFor(ctx, token, '2026-08-01', '2026-08-15').ok, true);
+  assert.strictEqual(post(ctx, {
+    token, action: 'saveCutoffSplit',
+    payload: { start: '2026-08-01', end: '2026-08-15', amount: 3000, entryId: 'sp-f' }
+  }).ok, true);
+});
+
+test('hand-typed dates are NORMALIZED on read, so that money is never invisible', () => {
+  const { ctx, ss, token } = freshSetup();
+  // The owner types a day and an expense straight into the sheet, shorthand.
+  ss.getSheetByName('DailyLog').appendRow(['2026-7-5', false, 'Mama', 0, 400, 400, 0, '', 'hand-day', '']);
+  ss.getSheetByName('Expenses').appendRow(['7/5/2026', 'Supplies', 'sauce', 120, '', '', 'hand-exp', '']);
+  const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
+  assert.strictEqual(boot.data.days.find(d => d.date === '2026-07-05').total, 400,
+    'the hand-typed day reaches the phone, canonical');
+  assert.strictEqual(boot.data.expenses.find(x => x.entry_id === 'hand-exp').date, '2026-07-05');
+  const cut = cutoffFor(ctx, token, '2026-07-01', '2026-07-15').data;
+  assert.strictEqual(cut.figures.total, 400, 'hand-typed money reaches the cutoff');
+  assert.strictEqual(cut.figures.supplies, 120);
+  // Saving that date from the phone UPDATES the hand-typed row, not a duplicate.
+  const r = saveDay(ctx, token, { date: '2026-07-05', counts: [{ sku: 'box4', sod: 2, eod: 0 }], entryId: 'hand-day' });
+  assert.strictEqual(r.ok, true, r.error);
+  const logRows = ss.getSheetByName('DailyLog').getDataRange().getValues().slice(1)
+    .filter(x => String(x[0]) === '2026-7-5' || String(x[0]) === '2026-07-05');
+  assert.strictEqual(logRows.length, 1, 'no duplicate row for the same real day');
+  // 13/5/2026 can only be day/month; it reads as May 13 rather than vanishing.
+  ss.getSheetByName('Expenses').appendRow(['13/5/2026', 'Other', 'x', 10, '', '', 'hand-exp2', '']);
+  const range = post(ctx, { token, action: 'range', payload: { start: '2026-05-01', end: '2026-05-31' } });
+  assert.strictEqual(range.data.expenses.find(x => x.entry_id === 'hand-exp2').date, '2026-05-13');
+});
+
+test('branch strips CR/LF on both paths, and a null body gets the friendly error', () => {
+  const { ctx, ss, token } = freshSetup();
+  // On write:
+  let r = post(ctx, { token, action: 'saveSettings', payload: { settings: { branch: 'Tañong\nAnnex' } } });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(settingsMap(ss).branch, 'Tañong Annex');
+  // On read — a cell edited by hand:
+  const sh = ss.getSheetByName('Settings');
+  const v = sh.getDataRange().getValues();
+  sh.getRange(v.findIndex(x => x[0] === 'branch') + 1, 2).setValue('Tañong\r\nMain');
+  const cut = cutoffFor(ctx, token, '2026-07-16', '2026-07-31');
+  assert.strictEqual(cut.ok, true, cut.error);
+  assert.match(cut.data.note_text, /^Tañong Main: /, 'the note heading stays ONE line');
+  assert.strictEqual(cut.data.note_text.split('\n').length, 16, 'and the line structure is intact');
+  assert.strictEqual(post(ctx, { token, action: 'bootstrap', payload: {} }).data.settings.branch,
+    'Tañong Main', 'the phone previews with the same cleaned branch');
+
+  // A JSON body that parses to null (or a non-object) answers plainly.
+  ['null', '"hello"', '42', '[]'].forEach(body => {
+    const out = ctx.doPost({ postData: { contents: body } });
+    const res = JSON.parse(out.getContent());
+    assert.strictEqual(res.ok, false, body + ' must be refused');
+    assert.match(res.error, /not valid JSON|Empty request body/, body + ' must answer plainly');
+    assert.ok(!/TypeError|Cannot read/.test(res.error), 'never a raw engine error');
+  });
+});
+
+test('the DailyLog row is written LAST: a mid-save crash leaves no day that looks complete', () => {
+  const { ctx, ss, token } = freshSetup();
+  // A first good save so every tab exists; then the DailyCounts write dies.
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-07-20', counts: [{ sku: 'box4', sod: 2, eod: 0 }], entryId: 'wo-1' }).ok, true);
+  const dc = ss.getSheetByName('DailyCounts');
+  const proto = Object.getPrototypeOf(dc.getRange(1, 1, 1, 1));
+  const orig = proto.setValues;
+  proto.setValues = function () {
+    if (this.sheet && this.sheet.name === 'DailyCounts') throw new Error('SIMULATED CRASH');
+    return orig.apply(this, arguments);
+  };
+  let r;
+  try {
+    r = saveDay(ctx, token, { date: '2026-07-25', counts: [{ sku: 'box4', sod: 9, eod: 0 }], entryId: 'wo-2' });
+  } finally {
+    proto.setValues = orig;
+  }
+  assert.strictEqual(r.ok, false, 'the request itself fails');
+  assert.strictEqual(ss.getSheetByName('DailyLog').getDataRange().getValues().slice(1)
+    .filter(x => x[0] === '2026-07-25').length, 0,
+    'no DailyLog row may claim a day whose counts were never written — the retry rewrites cleanly');
 });
 
 // ---------------------------------------------------------------------------
