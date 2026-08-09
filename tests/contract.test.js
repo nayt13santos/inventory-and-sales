@@ -2996,12 +2996,488 @@ test('the receipt and the day strip read the SAME rule for the tin', () => {
 });
 
 // ---------------------------------------------------------------------------
-console.log('\n============================================');
-console.log('  ' + passed + ' passed, ' + failed + ' failed  (' + path.basename(__filename) + ')');
-console.log('============================================');
-if (failed > 0) {
-  failures.forEach(f => console.error('\nFAILED: ' + f.name + '\n' + f.err.stack));
-  process.exit(1);
+console.log('\n--- 17. v2.5.0 on the PHONE: queue races, price snapshots, dates, details ---');
+
+// The sync engine itself, lifted the same way as everything else. These slabs
+// fill the gaps between the ones above, so the whole stretch from the appliers
+// to applyBootstrap is the REAL shipped code.
+const S_ENQUEUE  = slab('function enqueue(action, payload){', 'function noteAttention(kind, action, payload, message){');
+const S_WIRE     = slab('function isLegacyGcashPayload(p){', 'function applyServerDay(p, data){');
+const S_DOBOOT   = slab('async function doBootstrap(){', 'function applyBootstrap(data){');
+const S_PERSISTA = slab('function persistAttention(){', 'function persistDrafts(){');
+const S_ATTNCOPY = slab('function attnCopy(a){', 'function attentionCardHTML(){');
+const S_CUTHELP  = slab('function cutoffMissingDays(per){', 'function renderCutoff(){');
+
+/** A client whose sync engine is REAL: enqueue, drainQueue, doBootstrap, api —
+ *  with the wire (fetch), storage success and every toast/render under the
+ *  test's control via `hooks`. drainQueue and doBootstrap return promises, so
+ *  the tests that race them are async (see atest below). */
+function loadSyncClient() {
+  const src = `
+'use strict';
+const hooks = {
+  fetch: () => { throw new Error('this test made no wire'); },
+  storeFail: false, toasts: [], panels: []
+};
+const store = { read(){ return null; }, set(k, v){ return !hooks.storeFail; } };
+const navigator = { onLine: true };
+${S_LOADERS}
+${S_UTILS}
+${S_DOMAIN}
+${S_APPLIERS}
+${S_ENQUEUE}
+${S_ATTN}
+${S_WIRE}
+${S_SERVERDAY}
+${S_DOBOOT}
+${S_BOOTSTRAP}
+${S_FORM}
+${S_CARDS}
+${S_MAINT}
+${S_VALIDATE}
+${S_ATTNCOPY}
+${S_CUTHELP}
+${S_PERSISTA}
+let state = freshState();
+let queue = [];
+let config = freshConfig();
+let attention = [];
+let drafts = {};
+let lastNote = null;
+let benta = null;
+let activeTab = 'benta';
+let storageFull = false;
+function pruneState(){}
+function persistState(){}
+function persistQueue(){}
+function persistConfig(){}
+function persistDrafts(){}
+function updateStatus(){}
+function renderIbapa(){}
+function applyUpdateIfSafe(){}
+function renderPanel(t){ hooks.panels.push(String(t)); }
+function toast(m){ hooks.toasts.push(String(m)); }
+function fetch(url, opts){ return hooks.fetch(url, opts); }
+return {
+  get state(){ return state; },
+  get benta(){ return benta; },
+  get queue(){ return queue; },
+  get attention(){ return attention; },
+  get storageFull(){ return storageFull; },
+  hooks, cfg: config,
+  applyBootstrap, applyLocalDay, applyLocalExpense, applyLocalStockCount,
+  applyServerDay, reapplyQueue,
+  enqueue, drainQueue, doBootstrap,
+  noteAttention, attentionForDate, dateNotInSheet, clearAttentionFor,
+  attnCopy, persistAttention, isLegacyGcashPayload,
+  loadBentaForm, bentaPayload, computeDay, computeCutoff, validateBenta,
+  entryDateError, cutoffExpenseDate, previewIncomplete, cutoffMissingDays,
+  currentPeriod, periodKey, storedPricesFor, priceOnDay,
+  num, fmt, peso
+};`;
+  // eslint-disable-next-line no-new-func
+  return new Function(src)();
 }
+
+// Async tests: registered here, awaited IN ORDER by the runner at the bottom
+// of the file (the summary waits for them).
+const ASYNC_TESTS = [];
+function atest(name, fn) { ASYNC_TESTS.push({ name, fn }); }
+
+/** A wire that forwards every request to a REAL server's doPost. */
+function liveWire(srv) {
+  return (url, opts) => Promise.resolve({
+    ok: true,
+    text: async () => srv.ctx.doPost({ postData: { contents: opts.body } }).getContent()
+  });
+}
+
+// Today/tomorrow on the CLIENT's clock (the PWA is not frozen — it runs on the
+// phone's real clock), Asia/Manila like everything else.
+function clientYmd(offsetDays) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Manila' })
+    .format(new Date(Date.now() + (offsetDays || 0) * 86400000));
+}
+
+// --- The two in-flight races (critical findings #4 and #5) -------------------
+// A reply belongs to THE ITEM THAT WAS SENT. While it is in the air, enqueue
+// may replace that item (a newer save for the same day coalesces) — and the
+// stale reply must then be dropped whole, never applied over newer local rows.
+
+atest('a reply that lands after its save was superseded is dropped whole', async () => {
+  const srv = loadServer();
+  const app = loadSyncClient();
+  app.cfg.apiUrl = 'https://api.example/exec';
+  app.cfg.token = srv.token;
+  const D = ymdDaysAgo(2);
+
+  const v1 = dayPayload(D, 100, 'race-old');       // the save that goes out first
+  app.applyLocalDay(v1);
+  app.enqueue('saveDay', v1);
+
+  let release = null;
+  let sent = 0;
+  app.hooks.fetch = (url, opts) => {
+    sent++;
+    if (sent === 1) {
+      // The request LEFT (the sheet write happens — it is harmless, the
+      // replacement re-sends over the same upsert key), but the reply hangs
+      // in the air until the test lets it land.
+      const reply = srv.ctx.doPost({ postData: { contents: opts.body } }).getContent();
+      return new Promise(res => { release = () => res({ ok: true, text: async () => reply }); });
+    }
+    // The network drops before the replacement can follow.
+    return Promise.reject(new TypeError('Failed to fetch'));
+  };
+
+  const drained = app.drainQueue();
+  assert.strictEqual(sent, 1, 'precondition: the old save is on the wire');
+
+  // While it is in flight she corrects the same day: ₱3,000, not ₱5,000.
+  const v2 = dayPayload(D, 60, 'race-new');
+  app.applyLocalDay(v2);
+  app.enqueue('saveDay', v2);                       // coalesces onto the same slot
+  assert.strictEqual(app.state.days[D].total, 3000);
+
+  release();                                        // the STALE reply lands now
+  await drained;
+
+  assert.strictEqual(app.state.days[D].total, 3000,
+    'the superseded reply stamped OLD money (₱5,000) over the corrected row — while the pill said Synced');
+  assert.strictEqual(app.queue.length, 1, 'the replacement must still be queued');
+  assert.strictEqual(app.queue[0].payload.entryId, 'race-new');
+  assert.strictEqual(app.attention.length, 0, 'nothing to warn about: the correction is on its way');
+});
+
+atest('a refusal of a superseded payload leaves no rejection card', async () => {
+  const srv = loadServer();
+  const app = loadSyncClient();
+  app.cfg.apiUrl = 'https://api.example/exec';
+  app.cfg.token = srv.token;
+  const D = ymdDaysAgo(3);
+
+  // An old queued item the server WILL refuse (EOD > SOD) — exactly the state
+  // after typing a slip and losing signal before the drain could report it.
+  const bad = dayPayload(D, 5, 'stale-bad');
+  bad.counts[0].eod = 9;
+  app.queue.push({ action: 'saveDay', payload: bad, tries: 0 });
+
+  let release = null;
+  let sent = 0;
+  app.hooks.fetch = (url, opts) => {
+    sent++;
+    const reply = srv.ctx.doPost({ postData: { contents: opts.body } }).getContent();
+    if (sent === 1) return new Promise(res => { release = () => res({ ok: true, text: async () => reply }); });
+    return Promise.resolve({ ok: true, text: async () => reply });
+  };
+
+  const drained = app.drainQueue();
+  assert.strictEqual(sent, 1, 'precondition: the bad save is on the wire');
+
+  // She fixes the day while the refusal is still in the air.
+  const fix = dayPayload(D, 8, 'stale-fix');
+  app.applyLocalDay(fix);
+  app.enqueue('saveDay', fix);
+
+  release();
+  await drained;
+
+  assert.strictEqual(app.attention.length, 0,
+    'the stale refusal left a permanent false "not in the sheet" card for a day the sheet HAS');
+  assert.strictEqual(app.dateNotInSheet(D), false);
+  assert.strictEqual(app.queue.length, 0, 'the fixed day went through behind it');
+  assert.ok(!app.hooks.toasts.some(t => /Not saved/.test(t)), 'and no false refusal was announced');
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} });
+  assert.strictEqual(boot.data.days.find(d => d.date === D).total, 400, '8 x ₱50 is in the sheet');
+});
+
+atest('a bootstrap reply is DISCARDED when a local mutation postdates the request', async () => {
+  const srv = loadServer();
+  const D1 = ymdDaysAgo(6);
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay',
+    payload: dayPayload(D1, 4, 'boot-d1') }).ok, true);
+
+  const app = loadSyncClient();
+  app.cfg.apiUrl = 'https://api.example/exec';
+  app.cfg.token = srv.token;
+
+  let release = null;
+  app.hooks.fetch = (url, opts) => {
+    const reply = srv.ctx.doPost({ postData: { contents: opts.body } }).getContent();
+    return new Promise(res => { release = () => res({ ok: true, text: async () => reply }); });
+  };
+
+  const booting = app.doBootstrap();               // the snapshot request leaves…
+
+  const D2 = ymdDaysAgo(1);                        // …and she saves a day meanwhile
+  const p = dayPayload(D2, 7, 'boot-d2');
+  app.applyLocalDay(p);
+  app.enqueue('saveDay', p);
+
+  release();                                       // the stale snapshot lands now
+  assert.strictEqual(await booting, false, 'a stale snapshot must be discarded, not applied');
+  assert.ok(app.state.days[D2],
+    'the reply deleted the just-saved day off the phone — while the pill said Synced');
+  assert.strictEqual(app.state.days[D2].total, 350);
+  assert.ok(!app.state.days[D1], 'no part of the stale snapshot may be applied either');
+
+  // With nothing in flight, the NEXT sync lands normally and both days stand.
+  app.hooks.fetch = liveWire(srv);
+  await app.drainQueue();
+  assert.strictEqual(await app.doBootstrap(), true, 'a current snapshot applies fine');
+  assert.ok(app.state.days[D1] && app.state.days[D2]);
+  assert.strictEqual(app.state.days[D2].total, 350);
+});
+
+// --- The rest of the v2.5.0 phone fixes are synchronous ----------------------
+
+test('deleting an expense clears its attention entries and its queued save', () => {
+  const app = loadSyncClient();
+  const exp = { date: ymdDaysAgo(4), category: 'Supplies', item: 'harina', amount: 300,
+    backlogRef: '', notes: '', stockProduct: '', stockQty: '', entryId: 'del-exp-1' };
+  app.applyLocalExpense(exp);
+  app.noteAttention('rejected', 'saveExpense', exp, 'refused');
+  app.queue.push({ action: 'saveExpense', payload: exp, tries: 0 });
+  assert.strictEqual(app.attention.length, 1, 'precondition: the red card is up');
+
+  app.enqueue('deleteExpense', { entryId: 'del-exp-1' });
+
+  assert.strictEqual(app.attention.length, 0,
+    'the card kept telling her to re-send an expense she has just chosen not to have');
+  assert.ok(!app.queue.some(q => q.action === 'saveExpense'), 'the queued save went with it');
+  assert.strictEqual(app.queue.filter(q => q.action === 'deleteExpense').length, 1);
+});
+
+test('a failed attention write is SAID out loud, never silent', () => {
+  const app = loadSyncClient();
+  app.hooks.storeFail = true;                      // the phone is out of storage
+  app.noteAttention('rejected', 'saveDay', dayPayload(ymdDaysAgo(5), 3, 'full-1'), 'refused');
+  assert.strictEqual(app.storageFull, true,
+    'the attention list is the ONE copy of "this day is not in the sheet" — losing it must set the flag');
+  assert.ok(app.hooks.toasts.some(t => /storage/i.test(t)),
+    'a warning that cannot be persisted must be announced, not dropped');
+  assert.ok(app.hooks.panels.length > 0, 'and the screen re-rendered so it shows now');
+  // Storage comes back: the same write succeeds and the flag it set is its own.
+  app.hooks.storeFail = false;
+  assert.strictEqual(app.persistAttention(), true);
+});
+
+test('a legacy-GCash day is NOT "not in the sheet", and its card says so', () => {
+  const app = loadSyncClient();
+  const D = ymdDaysAgo(2);
+  const legacy = { date: D, closed: false, staff: 'Mama', gcash: 450, customAmount: 0,
+    customGcash: 0, notes: '',
+    counts: [{ sku: 'box4', sod: 10, eod: 0, cheeseQty: 0, gcashQty: 0, gcashCheeseQty: 0 }],
+    entryId: 'legacy-1' };
+  assert.strictEqual(app.isLegacyGcashPayload(legacy), true, 'precondition: the flagger sees it');
+  app.noteAttention('gcash', 'saveDay', legacy, '');
+
+  assert.strictEqual(app.dateNotInSheet(D), false,
+    'a gcash note is about a day the sheet HOLDS — claiming otherwise says money is missing that is sitting right there');
+  assert.deepStrictEqual(app.cutoffMissingDays({ start: D, end: D }), [],
+    'and it must not badge the cutoff preview as missing days');
+  const copy = app.attnCopy(app.attention[0]);
+  assert.ok(!/NOT in the Google Sheet/.test(copy.why), 'the card must not claim the day is missing');
+  assert.match(copy.why, /GCash for this day needs re-entering/);
+  assert.match(copy.help, /counts as all cash/);
+
+  // A real refusal still says it all, plainly.
+  app.noteAttention('rejected', 'saveDay', dayPayload(D, 5, 'rej-x'), 'refused');
+  assert.strictEqual(app.dateNotInSheet(D), true);
+  assert.strictEqual(app.cutoffMissingDays({ start: D, end: D }).length, 1);
+});
+
+test('reopening a saved day shows the money it was SAVED at (client price snapshot)', () => {
+  const srv = loadServer();
+  const D = ymdDaysAgo(8);
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
+    date: D, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box4', sod: 10, eod: 0, cheeseQty: 2, gcashQty: 0, gcashCheeseQty: 0 }],
+    entryId: 'psnap-1' } }).ok, true);
+  // The owner raises the price AFTER that night was saved…
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'savePrices', payload: {
+    rows: [{ sku: 'box4', price: 60, cheesePrice: 75, active: true }] } }).ok, true);
+
+  const app = loadSyncClient();
+  app.applyBootstrap(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+  assert.strictEqual(app.num(app.state.prices.find(p => p.sku === 'box4').price), 60,
+    'precondition: the live price list moved');
+
+  // …the phone's own snapshot map still answers that date at ITS prices…
+  const stored = app.storedPricesFor(D);
+  assert.deepStrictEqual(stored['box4'], { price: 50, cheese_price: 60 },
+    'storedPricesFor must read the snapshot off the count rows');
+  assert.deepStrictEqual(app.priceOnDay(stored, app.state.prices.find(p => p.sku === 'box4')),
+    { price: 50, cheese_price: 60 });
+
+  // …and REOPENING the day prices it at what it was saved at, not at today.
+  app.loadBentaForm(D);
+  const c = app.computeDay(app.bentaPayload());
+  assert.strictEqual(c.total, 8 * 50 + 2 * 60,
+    'the receipt re-priced a finished night at today\'s prices');
+  assert.strictEqual(c.total, app.num(app.state.days[D].total), 'agreeing with the stored day to the peso');
+
+  // A date with no snapshot — a fresh entry — prices at the current list.
+  app.loadBentaForm(ymdDaysAgo(0));
+  app.benta.rows.find(r => r.sku === 'box4').sod = 1;
+  assert.strictEqual(app.computeDay(app.bentaPayload()).total, 60);
+});
+
+test('the phone refuses the dates the server refuses — in the server\'s own words', () => {
+  const app = loadSyncClient();
+  const today = clientYmd(0), tomorrow = clientYmd(1);
+  assert.strictEqual(app.entryDateError(today), '');
+  assert.match(app.entryDateError(tomorrow), /has not happened yet/);
+  assert.match(app.entryDateError('2019-12-31'), /before 2020/);
+  assert.match(app.entryDateError('0002-07-30'), /before 2020/,
+    'a half-edited year-000X state must read as an error, never commit');
+  assert.match(app.entryDateError('2026-07'), /not complete/);
+  assert.match(app.entryDateError(''), /not complete/);
+
+  // Byte-for-byte the sentences the real server refuses the same dates with.
+  const srv = loadServer();
+  const served = d => post(srv.ctx, { token: srv.token, action: 'saveDay',
+    payload: dayPayload(d, 1, 'date-x') }).error;
+  assert.strictEqual(app.entryDateError(tomorrow), served(tomorrow));
+  assert.strictEqual(app.entryDateError('2019-12-31'), served('2019-12-31'));
+
+  // Through the validator — and a CLOSED day cannot smuggle a bad date past it.
+  app.loadBentaForm(today);
+  app.benta.date = tomorrow;
+  app.benta.closed = true;
+  assert.match(app.validateBenta().date || '', /has not happened yet/);
+
+  // The pickers themselves clamp to today, and the change handler snaps back
+  // instead of committing a partial date (these live in DOM code, so they are
+  // pinned against the source like the other screen guards).
+  assert.ok(/id="bentaDate"[^>]*max="' \+ todayStr\(\) \+ '"/.test(HTML),
+    'the Sales date input must carry max=today');
+  assert.ok(/id="gxDate"[^>]*max="' \+ todayStr\(\) \+ '"/.test(HTML),
+    'the expense date input must carry max=today');
+  const onDate = slab("if (id === 'bentaDate'){", "else if (id === 'closedToggle'){");
+  assert.ok(/entryDateError\(v\)/.test(onDate), 'the change handler must judge the typed date');
+  assert.ok(/ev\.target\.value = benta\.date;/.test(onDate),
+    'and snap back to the day it was on rather than committing the bad one');
+});
+
+test('the cutoff one-tap dates money into the period, never into the future', () => {
+  const app = loadSyncClient();
+  const today = clientYmd(0);
+  assert.strictEqual(app.cutoffExpenseDate(app.currentPeriod(today)), today,
+    'current cutoff: today');
+  assert.strictEqual(app.cutoffExpenseDate({ start: '2026-01-01', end: '2026-01-15' }), '2026-01-15',
+    'an earlier cutoff: its last day');
+  assert.strictEqual(app.cutoffExpenseDate({ start: '2031-01-16', end: '2031-01-31' }), '',
+    'a FUTURE cutoff books nothing — that date has not happened and the server refuses it');
+});
+
+test('the preview says when this phone cannot see a whole period', () => {
+  const app = loadSyncClient();
+  app.cfg.apiUrl = 'https://api.example/exec';
+  app.state.window_start = '2026-05-05';
+  assert.strictEqual(app.previewIncomplete({ start: '2026-05-01', end: '2026-05-15' }), true,
+    'a period reaching behind the stated window may be missing money');
+  assert.strictEqual(app.previewIncomplete({ start: '2026-05-05', end: '2026-05-15' }), false);
+  app.cfg.apiUrl = '';
+  assert.strictEqual(app.previewIncomplete({ start: '2026-05-01', end: '2026-05-15' }), false,
+    'demo mode has no window: this phone IS the whole archive');
+  // and the Cutoff screen actually renders the warning from that one rule
+  const cutoffRender = slab('function renderCutoff(){', 'async function generateNote(){');
+  assert.ok(/previewIncomplete\(per\)/.test(cutoffRender), 'the screen must ask the rule');
+  assert.ok(/cannot see the whole of this cutoff/.test(cutoffRender), 'and say it plainly');
+});
+
+test('fmt never prints -0', () => {
+  const app = loadSyncClient();
+  assert.strictEqual(app.fmt(-0), '0');
+  assert.strictEqual(app.fmt(-0.004), '0',
+    'rounding lands on negative zero and toLocaleString prints it as "-0"');
+  assert.strictEqual(app.peso(-0.004), '₱0');
+});
+
+test('a sku or product named like an Object property cannot poison a lookup', () => {
+  const app = loadSyncClient();
+  app.state.counts['2026-07-01'] = [
+    { date: '2026-07-01', sku: '__proto__', sod: 2, eod: 0, sold: 2, amount: 82,
+      price: 41, cheese_price: '', entry_id: 'x', in_cutoff: true },
+    { date: '2026-07-01', sku: 'toString', sod: 1, eod: 0, sold: 1, amount: 7,
+      price: 7, cheese_price: '', entry_id: 'x', in_cutoff: true }
+  ];
+  const stored = app.storedPricesFor('2026-07-01');
+  assert.strictEqual(stored['toString'] && stored['toString'].price, 7,
+    'a name that exists on Object.prototype must not read as already-seen');
+  assert.strictEqual(stored['__proto__'] && stored['__proto__'].price, 41);
+  assert.strictEqual(app.priceOnDay(stored, { sku: 'toString', price: 99, cheese_price: '' }).price, 7);
+  // validateBenta's error map takes hostile names too (namespaced, null-proto).
+  app.loadBentaForm(clientYmd(0));
+  app.benta.stock = [{ product: '__proto__', qty: 1.5, unit: 'pack' }];
+  assert.match(app.validateBenta()['stock:__proto__'] || '', /whole unit/);
+});
+
+test('a half-typed row renders a receipt that still adds up to sold', () => {
+  const app = loadSyncClient();
+  app.loadBentaForm(clientYmd(0));
+  const r = app.benta.rows.find(x => x.sku === 'box4');
+  r.sod = 3; r.eod = 0; r.cheese = 2; r.gcash = 2; r.gcashCheese = 2;
+  const c = app.computeDay(app.bentaPayload());
+  const line = c.lines.find(l => l.sku === 'box4');
+  assert.deepStrictEqual(
+    [line.cheese_qty, line.gcash_qty, line.gcash_cheese_qty, line.regular_qty],
+    [2, 1, 0, 0],
+    'each bucket may only claim what is still unclaimed — three "clamped" buckets each judged against sold alone still listed more boxes than were sold');
+  assert.strictEqual(line.cheese_qty + line.gcash_qty + line.gcash_cheese_qty + line.regular_qty,
+    line.sold, 'what the receipt prints must sum to sold');
+  assert.strictEqual(line.amount, 1 * 50 + 2 * 60);
+  // The clamp only keeps the PREVIEW honest — the validator still refuses the save.
+  assert.match(app.validateBenta()['sku:box4'] || '', /adds up to 6, but only 3 were sold/);
+});
+
+// These guards live inside DOM handlers, so they are pinned against the SOURCE
+// exactly like the section-16 screen guards.
+test('save day: typed work survives the tear-off, slips ask one question, error cards open', () => {
+  const save = slab('function saveBenta(){', 'function prefersReduced(){');
+  // f: nothing typed during the ~450ms tear-off is lost — the callback may only
+  // reload a form nobody has touched since the save.
+  assert.ok(/benta\.dirty = false;/.test(save), 'the save marks the form clean');
+  assert.ok(/isObj\(benta\) && benta\.date === savedDate && !benta\.dirty/.test(save),
+    'the tear-off callback must check dirty again before reloading the form');
+  assert.ok(/updateReceipt\(\);/.test(save),
+    'the kept-typing branch refreshes the receipt without touching the form');
+  // f: a save with no money on it asks one plain question (it books a wage).
+  assert.ok(/No sales are entered/.test(save) && /if \(!confirm\(ask\)\) return;/.test(save),
+    'an all-zero save must ask before booking an empty day plus the wage');
+  // f: every collapsed card holding an error opens itself before the scroll.
+  assert.ok(/toggleCollapse\('stock'\)/.test(save) && /toggleCollapse\('wage'\)/.test(save),
+    'a message inside a closed card is invisible');
+  // f: "Closed today" over entered sales asks once, naming the money.
+  const onToggle = slab("else if (id === 'closedToggle'){", 'document.addEventListener(\'focusout\'');
+  assert.ok(/confirm\('This day has ' \+ peso\(money\)/.test(onToggle),
+    'closing a day with sales on the form must ask, naming the amount');
+  assert.ok(/ev\.target\.checked = false;/.test(onToggle), 'and a "no" leaves the day open');
+});
+
+// ---------------------------------------------------------------------------
+// The async race tests run through the REAL drainQueue/doBootstrap promises,
+// so they are awaited in order here — and the summary waits for them.
+(async () => {
+  for (const t of ASYNC_TESTS) {
+    try {
+      await t.fn();
+      passed++;
+      console.log('  PASS  ' + t.name);
+    } catch (err) {
+      failed++;
+      failures.push({ name: t.name, err });
+      console.log('  FAIL  ' + t.name + '\n        ' + String(err.message).split('\n').join('\n        '));
+    }
+  }
+  console.log('\n============================================');
+  console.log('  ' + passed + ' passed, ' + failed + ' failed  (' + path.basename(__filename) + ')');
+  console.log('============================================');
+  if (failed > 0) {
+    failures.forEach(f => console.error('\nFAILED: ' + f.name + '\n' + f.err.stack));
+    process.exit(1);
+  }
+})();
 
 // ---------------------------------------------------------------------------
