@@ -1054,11 +1054,16 @@ test('the client payload survives a real round-trip through doPost unchanged', (
 
 test('applyServerDay makes the SERVER authoritative for every GCash figure', () => {
   // The optimistic local write happens first, so asserting on it proves nothing
-  // about applyServerDay. Give the phone a STALE price mirror — exactly what
-  // happens when the owner edits the Prices tab and the phone has not synced —
-  // so the local numbers are provably wrong and only the server can fix them.
+  // about applyServerDay. Give the phone a STALE price mirror — a legacy phone
+  // whose stored rows carry NO price snapshot (pre-v2.5.0), after the owner
+  // edited the Prices tab — so the local numbers are provably wrong and only
+  // the server can fix them. (Blanking the snapshots is load-bearing since
+  // v2.5.0: WITH them, a re-save of this date deliberately keeps the date's own
+  // prices and the live 999 could never leak in — which is finding the price
+  // snapshot exists to fix.)
   const app = loadClient();
   app.applyBootstrap(BK.boot);
+  (app.state.counts[B_DAY] || []).forEach(r => { r.price = ''; r.cheese_price = ''; });
   app.state.prices.find(p => p.sku === 'box4').price = 999;
   app.applyLocalDay(BUCKET_PAYLOAD);
   const stale = (app.state.counts[B_DAY] || []).find(r => r.sku === 'box4');
@@ -2446,11 +2451,15 @@ test('the seeded phone knows nori, so demo mode and the first price save both wo
   assert.strictEqual(day.excluded_total, 75, '3 nori at 25');
 });
 
-test('the phone never sends a GCash count on an excluded sku, so the day always saves', () => {
-  // The server REFUSES a GCash count on an excluded sku (its money is not in Total,
-  // so banking it as GCash would break Total = Cash + GCash). The card shows no
-  // GCash stepper, so a stale draft is the only way a figure can get there — and it
-  // must not make the day un-saveable with no field to fix it.
+test('an old bucket on an excluded sku is refused with a stepper to fix it, then saves (v2.5.0)', () => {
+  // v2.5.0 pin move (was: "the phone never sends a GCash count on an excluded
+  // sku, so the day always saves"). Silently zeroing the buckets in the payload
+  // while validateBenta refused the RAW figures was the dead end of finding
+  // i=0/i=27: the save was blocked over numbers that were neither sent nor
+  // fixable, so the day could never be saved again. Now the payload sends the
+  // buckets EXACTLY as the row holds them (what is shown is what is sent),
+  // validateBenta judges those same values, and the card renders a stepper for
+  // any non-zero one — so the figure is zeroed on purpose, never behind her back.
   const app = syncedClient(NF.boot);
   app.loadBentaForm(N_DAY_A);
   const nori = app.benta.rows.find(r => r.sku === 'nori');
@@ -2460,18 +2469,29 @@ test('the phone never sends a GCash count on an excluded sku, so the day always 
   nori.cheese = 2;                                 // and nori has no cheese version
   const payload = app.bentaPayload();
   const sent = payload.counts.find(c => c.sku === 'nori');
-  assert.strictEqual(sent.gcashQty, 0, 'the payload must carry the 0 the server demands');
-  assert.strictEqual(sent.cheeseQty, 0, 'and no cheese count on a sku that has no cheese');
-  assert.strictEqual(sent.gcashCheeseQty, 0);
+  assert.strictEqual(sent.gcashQty, 4, 'what is shown is what is sent — never a silent 0');
+  assert.strictEqual(sent.cheeseQty, 2);
   assert.strictEqual(app.computeDay(payload).excluded, 300,
-    'and the money it shows must be the whole nori amount, unsplit');
-  // Neither figure has a stepper on the card, so neither may raise a complaint she
-  // has no field to answer — that is a day that can never be saved again.
-  const box4 = payload.counts.find(c => c.sku === 'box4');
+    'the receipt still prices the excluded money whole and unsplit');
+  // validateBenta refuses the day BEFORE it can queue, over exactly the values
+  // the payload carries — and the card now renders steppers for them.
+  const errs = app.validateBenta();
+  assert.ok(errs['sku:nori'], 'a non-zero bucket on an excluded sku must block the save');
+  const render = slab('function renderBenta(){', 'const CHEV =');
+  assert.ok(/oldBuckets/.test(render) && /num\(row\[b\.field\]\) !== 0/.test(render),
+    'the card must render a stepper for any non-zero bucket the loaded row holds');
+  // Zeroed deliberately (what the steppers are for), the day saves — editing
+  // unrelated fields of such a day must never be blocked once the row is clean.
+  nori.gcash = 0; nori.cheese = 0;
+  assert.deepStrictEqual(Object.keys(app.validateBenta()), [], 'a clean row must save');
+  const clean = app.bentaPayload();
+  const sentClean = clean.counts.find(c => c.sku === 'nori');
+  assert.deepStrictEqual([sentClean.cheeseQty, sentClean.gcashQty, sentClean.gcashCheeseQty], [0, 0, 0]);
+  const box4 = clean.counts.find(c => c.sku === 'box4');
   assert.strictEqual(box4.gcashQty, 2, 'a normal sku still sends its real buckets');
   // The real server takes it.
   const r = post(NF.ctx, { token: NF.token, action: 'saveDay',
-    payload: Object.assign(payload, { entryId: 'nori-day-a' }) });
+    payload: Object.assign(clean, { entryId: 'nori-day-a' }) });
   assert.strictEqual(r.ok, true, 'the phone queued a day the server refuses: ' + r.error);
   assert.strictEqual(r.data.excluded_total, 300);
   assert.strictEqual(r.data.total, 500);
@@ -2635,12 +2655,25 @@ test('no bucket on an excluded sku, and an excluded sku is always group=simple',
   const nori = app.state.prices.find(p => p.sku === 'nori');
   assert.strictEqual(nori.group, 'simple', 'an excluded sku must be a simple item');
   assert.strictEqual(nori.in_cutoff, false);
-  // Whatever a stale draft holds, all three buckets leave the phone as 0.
+  // v2.5.0: what is SHOWN is what is SENT. The old force-to-zero made a stale
+  // GCash count invisible and unsaveable — the campaign's dead-end finding (i=0).
+  // A stale draft's buckets now travel as-is, the phone refuses the save with
+  // the escape route named, and zeroing the now-visible steppers frees the day.
   app.loadBentaForm(N_DAY_A);
   const row = app.benta.rows.find(r => r.sku === 'nori');
   row.cheese = 3; row.gcash = 2; row.gcashCheese = 1;
   const sent = app.bentaPayload().counts.find(c => c.sku === 'nori');
-  assert.deepStrictEqual([sent.cheeseQty, sent.gcashQty, sent.gcashCheeseQty], [0, 0, 0]);
+  assert.deepStrictEqual([sent.cheeseQty, sent.gcashQty, sent.gcashCheeseQty], [3, 2, 1],
+    'visible = sent: the phone never silently drops a count it is showing');
+  const errs = app.validateBenta();
+  assert.ok(errs['sku:nori'], 'and it refuses to save while a bucket is non-zero');
+  assert.match(errs['sku:nori'], /back to 0|Counts in the cutoff/,
+    'naming the way out, not just the rule');
+  // Zeroing the (now visible) buckets is the escape — the same day then saves.
+  row.cheese = 0; row.gcash = 0; row.gcashCheese = 0;
+  const cleared = app.bentaPayload().counts.find(c => c.sku === 'nori');
+  assert.deepStrictEqual([cleared.cheeseQty, cleared.gcashQty, cleared.gcashCheeseQty], [0, 0, 0]);
+  assert.ok(!app.validateBenta()['sku:nori'], 'no error once zeroed');
 
   // The server refuses each bucket by name if one ever arrives, and refuses the
   // whole configuration if a box sku is hand-edited out of the cutoff.
@@ -2802,12 +2835,25 @@ test('an excluded sku prices and sends NO bucket, even when the sheet calls it a
   assert.deepStrictEqual([line.cheese_qty, line.gcash_qty, line.gcash_cheese_qty], [0, 0, 0]);
   assert.strictEqual(line.regular_qty, 12, 'all twelve are plain quantity');
 
-  // The form sends the same three 0s, whatever a stale draft holds.
+  // v2.5.0: the form sends what it shows — and refuses to save until the
+  // now-visible buckets are zeroed, so nothing is silently dropped and the
+  // pricing above (one plain price) can never disagree with a saved sheet row.
   app.loadBentaForm(N_DAY_A);
   const row = app.benta.rows.find(r => r.sku === 'nori');
   row.cheese = 2; row.gcash = 3; row.gcashCheese = 1;
   const sent = app.bentaPayload().counts.find(x => x.sku === 'nori');
-  assert.deepStrictEqual([sent.cheeseQty, sent.gcashQty, sent.gcashCheeseQty], [0, 0, 0]);
+  assert.deepStrictEqual([sent.cheeseQty, sent.gcashQty, sent.gcashCheeseQty], [2, 3, 1],
+    'visible = sent, even on a hand-broken excluded box sku');
+  assert.ok(app.validateBenta()['sku:nori'],
+    'and the save is refused until they are zeroed, so [2,3,1] can never land');
+  // Zeroing clears the BUCKET complaint, but this sku is the hand-broken
+  // box+excluded CONFIGURATION, which stays refused in its own words until the
+  // sheet is fixed — that is the next test's subject, and the server's rule.
+  row.cheese = 0; row.gcash = 0; row.gcashCheese = 0;
+  const still = app.validateBenta()['sku:nori'];
+  assert.ok(still, 'the configuration itself is still refused at zero');
+  assert.match(still, /simple|Counts in the cutoff|Prices tab/,
+    'in configuration words, not bucket words');
 });
 
 test("the phone refuses a bucket on an excluded sku in the SERVER's own words", () => {
@@ -2819,8 +2865,15 @@ test("the phone refuses a bucket on an excluded sku in the SERVER's own words", 
     counts: counts, entryId: 'phone-excl-1' } });
   const served = day([{ sku: 'nori', sod: 4, eod: 0, cheeseQty: 0, gcashQty: 1, gcashCheeseQty: 0 }]);
   assert.strictEqual(served.ok, false, 'precondition: the server refuses it');
-  assert.strictEqual(app.excludedRowError('nori', { gcash: 1 }), served.error,
-    'the phone must say exactly what the server would, or the two disagree about the same money');
+  // v2.5.0: the phone keeps the server's sentence BYTE-EXACT as its prefix (so
+  // the two can never describe the same money differently) and then appends the
+  // escape route the server cannot know about — the campaign's dead-end finding
+  // (i=0) was precisely that this refusal named no way out.
+  const phoneMsg = app.excludedRowError('nori', { gcash: 1 });
+  assert.ok(phoneMsg.startsWith(served.error),
+    'the server sentence must survive byte-exact at the front of the phone message');
+  assert.match(phoneMsg, /back to 0/, 'and the way out is named: zero the visible count');
+  assert.match(phoneMsg, /Counts in the cutoff|Maintenance/, 'or re-include the sku');
 
   // Through the validator, which is what actually blocks the save.
   app.loadBentaForm(N_DAY_A);
@@ -2840,7 +2893,9 @@ test("the phone refuses a bucket on an excluded sku in the SERVER's own words", 
   assert.match(three.error, /its cheese, GCash and GCash cheese counts must be 0/);
   const app2 = syncedClient(NF.boot);
   app2.state.prices.find(p => p.sku === 'box4').in_cutoff = false;
-  assert.strictEqual(app2.excludedRowError('box4', { cheese: 1, gcash: 1, gcashCheese: 1 }), three.error);
+  const phoneThree = app2.excludedRowError('box4', { cheese: 1, gcash: 1, gcashCheese: 1 });
+  assert.ok(phoneThree.startsWith(three.error),
+    "the multi-bucket 'and' sentence survives byte-exact, escape route appended");
 
   // A nightly save must NEVER trip any of this: nori is on the form every night
   // with nothing in its buckets, and the day has to save.

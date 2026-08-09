@@ -538,7 +538,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.4.1';
+const APP_VERSION = '2.5.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -615,12 +615,20 @@ function freshState(){
       baseline_qty:0, baseline_date:'', delivered_since:0, used_since:0
     })),
     backlogs:[],
-    days:{},          // date -> DailyLog row
-    counts:{},        // date -> [DailyCounts rows]
-    stockUsage:{},    // date -> [StockUsage rows]   (whole units opened — NEVER money)
-    stockCounts:{},   // date -> [StockCounts rows]  (stocktakes; each becomes a baseline)
-    cutoffInputs:{},  // "start_end" -> CutoffInputs row (the ENTERED split)
-    expenses:{}       // entry_id -> Expenses row
+    // Row maps are PROTOTYPE-FREE (Object.create(null)): they are keyed by sheet
+    // data — an entry_id, a sku, a product name — and on a plain object a key
+    // spelled "__proto__" would silently rewrite the map's prototype instead of
+    // storing the row. A null prototype makes every key an ordinary key.
+    days: Object.create(null),          // date -> DailyLog row
+    counts: Object.create(null),        // date -> [DailyCounts rows]
+    stockUsage: Object.create(null),    // date -> [StockUsage rows]   (whole units opened — NEVER money)
+    stockCounts: Object.create(null),   // date -> [StockCounts rows]  (stocktakes; each becomes a baseline)
+    cutoffInputs: Object.create(null),  // "start_end" -> CutoffInputs row (the ENTERED split)
+    expenses: Object.create(null),      // entry_id -> Expenses row
+    // The first date the last bootstrap snapshot covered ('' before the first
+    // sync). Kept so the Cutoff screen can say plainly when a period reaches
+    // further back than this phone can see.
+    window_start: ''
   };
 }
 
@@ -770,6 +778,14 @@ function normCount(c, key){
     regular_qty: num(pick(c, 'regular_qty', 'regularQty')),
     amount: num(c.amount),
     gcash_amount: num(pick(c, 'gcash_amount', 'gcashAmount')),
+    // The per-unit PRICES this row's money was computed from (v2.5.0) — the rest
+    // of the snapshot, beside the amounts it explains. Kept RAW: a blank means
+    // the row was written before the columns existed, and it is answered by the
+    // sku's CURRENT price at use time (storedPricesFor), exactly as the server
+    // resolves it. Coercing a blank to 0 here would re-price an old night at
+    // nothing the moment it was reopened.
+    price: rawNum(c.price),
+    cheese_price: rawNum(pick(c, 'cheese_price', 'cheesePrice')),
     entry_id: txt(pick(c, 'entry_id', 'entryId')),
     // Whether THIS row's money counted, as decided the night it was saved
     // (v2.4.1). Kept raw — '' when the row predates the column — because a blank
@@ -884,8 +900,10 @@ function normExpense(e, key){
 
 // date/id -> row maps. Accepts the map shape the app writes today and a
 // plain array (an older/newer shape), so an upgrade can't blank the app.
+// PROTOTYPE-FREE: the keys are sheet data (an entry_id, a date), and on a plain
+// object a key spelled "__proto__" would rewrite the map's prototype.
 function toRowMap(v, norm, keyOf){
-  const out = {};
+  const out = Object.create(null);
   if (Array.isArray(v)){
     for (const r of v){ const n = norm(r, ''); if (n) out[keyOf(n)] = n; }
   } else if (isObj(v)){
@@ -897,7 +915,7 @@ function toRowMap(v, norm, keyOf){
 // daily supplies, stock usage). Accepts the map shape the app stores AND the
 // flat array the API returns, so both go through the same normalizer.
 function toDateListMap(v, norm){
-  const out = {};
+  const out = Object.create(null);
   const add = (row, key) => { const n = norm(row, key); if (n) (out[n.date] = out[n.date] || []).push(n); };
   if (Array.isArray(v)){ for (const r of v) add(r, ''); }
   else if (isObj(v)){
@@ -942,6 +960,7 @@ function sanitizeState(raw){
   s.stockCounts   = toDateListMap(raw.stockCounts, normStockCount);
   s.cutoffInputs  = toRowMap(raw.cutoffInputs, normCutoffInput, r => periodKey(r));
   s.expenses = toRowMap(raw.expenses, normExpense, r => r.entry_id);
+  s.window_start = isDateStr(raw.window_start) ? txt(raw.window_start) : '';
   return s;
 }
 
@@ -966,12 +985,16 @@ function sanitizeConfig(raw){
 // Actions whose payload is a COMPLETE snapshot of one form, so a second save
 // replaces the first outright instead of queueing behind it (last write wins).
 // Declared here because attnTarget() below needs it.
-const SNAPSHOT_ACTIONS = { savePrices:true, saveSettings:true, saveStockItems:true };
-const QUEUE_KEY_FOR = {
+// Both lookup tables are PROTOTYPE-FREE: they are indexed with strings read out
+// of storage (an action name) and a plain literal would answer truthily for
+// "__proto__" or "toString", letting a corrupt queue entry take a wrong branch.
+const SNAPSHOT_ACTIONS = Object.assign(Object.create(null),
+  { savePrices:true, saveSettings:true, saveStockItems:true });
+const QUEUE_KEY_FOR = Object.assign(Object.create(null), {
   saveDay:'date', saveExpense:'entryId', deleteExpense:'entryId',
   saveStockCount:'entryId', saveCutoffSplit:'entryId',
   savePrices:'entryId', saveSettings:'entryId', saveStockItems:'entryId'
-};
+});
 function sanitizeQueue(raw){
   const out = [];
   for (const item of asArr(raw)){
@@ -996,7 +1019,7 @@ function sanitizeQueue(raw){
                 server (correct), so the cash/GCash split needs re-entering
      dropped  — the server dropped counts for a sku that has left Prices
    ------------------------------------------------------------ */
-const ATTN_KINDS = { rejected:true, gcash:true, dropped:true };
+const ATTN_KINDS = Object.assign(Object.create(null), { rejected:true, gcash:true, dropped:true });
 function attnTarget(action, payload){
   // A config form coalesces by ACTION — one form, one pending batch — so its
   // identity is the action itself. Keying it on entryId (a fresh uuid every
@@ -1066,12 +1089,13 @@ function ensureShape(){
   if (!Array.isArray(state.prices) || !state.prices.length) state.prices = freshState().prices;
   if (!Array.isArray(state.stockItems) || !state.stockItems.length) state.stockItems = freshState().stockItems;
   if (!Array.isArray(state.backlogs)) state.backlogs = [];
-  if (!isObj(state.days)) state.days = {};
-  if (!isObj(state.counts)) state.counts = {};
-  if (!isObj(state.stockUsage)) state.stockUsage = {};
-  if (!isObj(state.stockCounts)) state.stockCounts = {};
-  if (!isObj(state.cutoffInputs)) state.cutoffInputs = {};
-  if (!isObj(state.expenses)) state.expenses = {};
+  if (!isObj(state.days)) state.days = Object.create(null);
+  if (!isObj(state.counts)) state.counts = Object.create(null);
+  if (!isObj(state.stockUsage)) state.stockUsage = Object.create(null);
+  if (!isObj(state.stockCounts)) state.stockCounts = Object.create(null);
+  if (!isObj(state.cutoffInputs)) state.cutoffInputs = Object.create(null);
+  if (!isObj(state.expenses)) state.expenses = Object.create(null);
+  if (!isDateStr(state.window_start)) state.window_start = '';
   if (!Array.isArray(queue)) queue = [];
   if (!isObj(config)) config = freshConfig();
   if (!Array.isArray(attention)) attention = [];
@@ -1158,7 +1182,21 @@ function persistQueue(){
   return false;
 }
 function persistConfig(){ store.set('config_v1', config); }
-function persistAttention(){ store.set('attention_v1', attention); }
+// The needs-attention list is the ONE copy of "this day is not in the sheet".
+// A write that fails silently would let the red card vanish on the next app
+// start while the money is still missing — so it gets the queue's treatment:
+// make room by pruning old history, try again, and if it still cannot be
+// written SAY SO instead of pretending everything is fine.
+function persistAttention(){
+  if (store.set('attention_v1', attention)) return true;
+  pruneState(45);
+  store.set('state_v1', state);
+  if (store.set('attention_v1', attention)) return true;
+  storageFull = true;
+  toast('This phone is out of storage. A warning about work that is not in the sheet may be lost if you close the app.');
+  renderPanel(activeTab);
+  return false;
+}
 function persistDrafts(){ store.set('drafts_v1', drafts); }
 
 /* ============================================================
@@ -1200,6 +1238,9 @@ function num(v){
 function r2(n){ return Math.round(num(n) * 100) / 100; }
 function fmt(n){
   n = r2(n);
+  // Rounding can land on NEGATIVE ZERO (r2(-0.004) is -0), and toLocaleString
+  // prints that as "-0" — a minus sign on a figure that is nothing. Normalize.
+  if (n === 0) n = 0;
   const whole = Number.isInteger(n);
   return n.toLocaleString('en-PH', { minimumFractionDigits: whole ? 0 : 2, maximumFractionDigits: 2 });
 }
@@ -1268,6 +1309,42 @@ function splitDefault(){
   return (v == null || v === '') ? DEFAULT_SPLIT : Math.max(0, num(v));
 }
 
+/**
+ * The price/cheese_price snapshots already stored on ONE date's count rows,
+ * keyed by sku — '' where a row has no snapshot (written before v2.5.0).
+ * Mirrors storedPricesFor() in Code.gs.
+ *
+ * This is what makes REOPENING a saved day show the money it was saved at: a
+ * correction weeks after a price change fixes the count, it does not re-price
+ * the night. The rows this reads are the same ones the server sends back (its
+ * own stored snapshot), so the phone and the sheet resolve a date's prices the
+ * same way.
+ */
+function storedPricesFor(date){
+  const out = Object.create(null);
+  for (const r of asArr(asObj(state.counts)[txt(date)])){
+    const c = asObj(r);
+    const sku = txt(c.sku);
+    if (!sku || out[sku]) continue;
+    out[sku] = {
+      price: (c.price === '' || c.price == null) ? '' : num(c.price),
+      cheese_price: (c.cheese_price === '' || c.cheese_price == null) ? '' : num(c.cheese_price)
+    };
+  }
+  return out;
+}
+/** The prices ONE sku counts at on the day the map above was built for: the
+ *  stored snapshot where there is one, else the sku's CURRENT price — the same
+ *  fallback the server applies, and the only answer a legacy row can give. */
+function priceOnDay(stored, pr){
+  const p = asObj(pr);
+  const s = asObj(stored)[txt(p.sku)];
+  return {
+    price: (s && s.price !== '') ? s.price : num(p.price),
+    cheese_price: (s && s.cheese_price !== '') ? s.cheese_price : num(p.cheese_price)
+  };
+}
+
 /* ============================================================
    Domain math — day computation (mirrors the server rules) and
    cutoff figures. Prices come from the local mirror; the server
@@ -1297,6 +1374,11 @@ function splitDefault(){
 function computeDay(p){
   const lines = [];
   let sum = 0, gsum = 0, xsum = 0;
+  // The prices already stored on THIS DATE's rows (v2.5.0): a re-save is a
+  // correction of that night's counts, never a re-pricing of them. Read BEFORE
+  // applyLocalDay rewrites the date's rows, exactly as apiSaveDay reads the
+  // sheet before it rewrites the block.
+  const stored = storedPricesFor(asObj(p).date);
   if (!p.closed){
     for (const c of asArr(p.counts)){
       const pr = asArr(state.prices).find(x => isObj(x) && x.sku === c.sku);
@@ -1306,7 +1388,8 @@ function computeDay(p){
       const sold = Math.max(0, sod - eod);
       const isBox = pr.group === 'box';
       const inCutoff = inCutoffFlag(pr.in_cutoff);
-      const price = num(pr.price), cheesePrice = num(pr.cheese_price);
+      const eff = priceOnDay(stored, pr);
+      const price = num(eff.price), cheesePrice = num(eff.cheese_price);
       // An EXCLUDED sku has NO variant and NO payment split at all — not cheese,
       // not GCash, not GCash cheese — so ALL THREE buckets are 0 here, exactly as
       // apiSaveDay refuses all three (v2.4.1). Guarding gcashQty alone was not
@@ -1317,9 +1400,15 @@ function computeDay(p){
       // 0s, and validateBenta refuses a non-zero one in the server's own words
       // rather than letting the money change quietly.
       // (group=simple has no cheese version either, hence `isBox` too.)
+      // Clamped IN SEQUENCE, not each against `sold` alone: three buckets each
+      // clamped to sold could still add up to more than sold (cheese 2 + GCash 2
+      // on 3 sold), and the receipt then listed more boxes than were sold while
+      // the inline error said so. Each bucket may only claim what is still
+      // unclaimed, so what the receipt and the strip print always sums to sold.
+      // validateBenta still refuses the save; this only keeps the preview honest.
       const cheese = (isBox && inCutoff) ? clampQty(c.cheeseQty, sold) : 0;
-      const gcashQty = inCutoff ? clampQty(c.gcashQty, sold) : 0;
-      const gcashCheese = (isBox && inCutoff) ? clampQty(c.gcashCheeseQty, sold) : 0;
+      const gcashQty = inCutoff ? clampQty(c.gcashQty, sold - cheese) : 0;
+      const gcashCheese = (isBox && inCutoff) ? clampQty(c.gcashCheeseQty, sold - cheese - gcashQty) : 0;
       const regular = Math.max(0, sold - cheese - gcashQty - gcashCheese);
       const amount = (regular + gcashQty) * price + (cheese + gcashCheese) * cheesePrice;
       const gcashAmount = gcashQty * price + gcashCheese * cheesePrice;
@@ -1784,7 +1873,11 @@ function applyLocalDay(p){
     // it (v2.4.1). Whether this line's money counted is a fact about THIS day,
     // settled when it was saved — so a later tick of "counts in the cutoff" cannot
     // restate a cutoff this phone has already shown.
-    in_cutoff: l.in_cutoff
+    in_cutoff: l.in_cutoff,
+    // ...and the prices themselves (v2.5.0), completing the snapshot exactly as
+    // apiSaveDay stores it: a re-save of this date reuses these, so a later
+    // price edit can never restate a night already entered.
+    price: l.price, cheese_price: l.cheese_price
   }));
   // The server rewrites the whole date block and writes only non-zero rows —
   // mirror that exactly, or a zeroed product would linger on this phone alone.
@@ -1959,6 +2052,9 @@ function reapplyQueue(){
    Triggers: app start, `online`, visibilitychange, after save.
    ============================================================ */
 function enqueue(action, payload){
+  // Everything queued changed the local mirror first, so any bootstrap reply
+  // still in flight is now describing a phone that no longer exists.
+  bumpMutations();
   // A fresh mutation for the same day/expense supersedes an earlier failure:
   // whatever went wrong is being re-sent now, so the warning goes.
   clearAttentionFor(action, attnTarget(action, payload));
@@ -1977,6 +2073,11 @@ function enqueue(action, payload){
     if (i >= 0){ queue[i] = { action, payload, tries:0 }; persistQueue(); updateStatus(); return; }
   }
   if (action === 'deleteExpense'){
+    // Deleting the expense settles every complaint about it too: a rejected
+    // save on the attention list is a card telling her to re-send an expense
+    // she has just chosen not to have, and it can never clear itself (nothing
+    // else will ever enqueue that saveExpense again).
+    clearAttentionFor('saveExpense', txt(payload.entryId));
     // Splice in place (never reassign `queue`) so references held by an
     // in-flight drainQueue stay coherent.
     for (let i = queue.length - 1; i >= 0; i--){
@@ -2015,10 +2116,13 @@ function clearAttentionFor(action, target){
 }
 function findAttention(key){ return attention.find(a => attnKey(a) === key) || null; }
 function attentionForDate(date){ return asArr(attention).filter(a => a.date === date); }
-/** Whether the sheet is missing this date — a refusal, or a lost GCash split.
- *  ('dropped' is a note about one sku, not a missing day.) */
+/** Whether the sheet is MISSING this date — a server refusal, and only that.
+ *  'dropped' is a note about one sku on a day that saved; 'gcash' is a note
+ *  that a saved day's cash/GCash split needs re-entering. Both days ARE in the
+ *  sheet, so claiming "not in the sheet" for them (as this once did for
+ *  'gcash') told the owner money was missing that was sitting right there. */
 function dateNotInSheet(date){
-  return attentionForDate(date).some(a => a.kind !== 'dropped');
+  return attentionForDate(date).some(a => a.kind === 'rejected');
 }
 /** What to say once the receipt has torn off. The tear-off animation runs ~450ms,
  *  so its callback speaks AFTER drainQueue has already said the server refused
@@ -2110,6 +2214,16 @@ async function api(action, payload){
 let syncing = false;
 let lastSyncError = '';
 
+/* A COUNTER of local change, stamped when a slow request starts and compared
+   when its reply lands. A bootstrap takes seconds on a cold Apps Script start,
+   and she keeps working: anything saved (or drained) in that window makes the
+   in-flight snapshot a picture of a sheet that is already out of date —
+   applying it would roll the screen back and, worse, re-run reapplyQueue over
+   rows the drain has already reconciled. The reply is simply discarded; the
+   next sync asks again. */
+let mutationCounter = 0;
+function bumpMutations(){ mutationCounter++; }
+
 async function drainQueue(){
   updateStatus();
   if (syncing || !config.apiUrl || !navigator.onLine || queue.length === 0) return;
@@ -2125,31 +2239,48 @@ async function drainQueue(){
         attnChanged = true;
       }
       const data = await api(item.action, item.payload);
-      if (item.action === 'saveDay' && data) applyServerDay(item.payload, data);
-      // Remove the item actually sent BY IDENTITY — enqueue may have
-      // replaced/removed it mid-flight; if so, leave the replacement in
-      // place so the next loop iteration sends it (entryId/date upserts
-      // make a duplicate send harmless).
+      // The reply belongs to THE ITEM THAT WAS SENT, by identity. While it was
+      // in flight, enqueue may have REPLACED it (a newer save for the same
+      // day/entry coalesces into a fresh object) or REMOVED it (a delete
+      // superseding a queued save). A superseded item's reply is stale: its
+      // sheet write was harmless (the replacement re-sends over the same
+      // upsert key), but applying it here would stamp OLD money over the NEWER
+      // local rows. So a superseded reply is dropped whole — never applied.
       const i = queue.indexOf(item);
-      if (i !== -1) queue.splice(i, 1);
-      persistQueue();
+      const superseded = i === -1;
+      if (!superseded){
+        if (item.action === 'saveDay' && data) applyServerDay(item.payload, data);
+        queue.splice(queue.indexOf(item), 1);
+        persistQueue();
+      }
+      // Either way the SHEET changed, so any bootstrap reply still in flight
+      // is a picture of a sheet that no longer exists.
+      bumpMutations();
       lastSyncError = '';
     }catch(err){
+      // Same identity check as the success path: a refusal of a payload that
+      // has already been superseded must not leave a rejection card — the
+      // replacement is queued right behind it and is about to speak for that
+      // target itself. The stale item is already out of the queue.
+      const superseded = queue.indexOf(item) === -1;
       if (err && err.server){
-        // REJECTED BY THE SERVER. This is NOT done: the optimistic day is still
-        // only on this phone and the sheet has nothing for it. The item leaves
-        // the queue (it would jam every later item) but goes on the persisted
-        // needs-attention list, so the pill cannot turn green and the Sales
-        // screen and More both name the date and quote the server.
-        noteAttention('rejected', item.action, item.payload, err.message);
-        attnChanged = true;
+        if (!superseded){
+          // REJECTED BY THE SERVER. This is NOT done: the optimistic day is still
+          // only on this phone and the sheet has nothing for it. The item leaves
+          // the queue (it would jam every later item) but goes on the persisted
+          // needs-attention list, so the pill cannot turn green and the Sales
+          // screen and More both name the date and quote the server.
+          noteAttention('rejected', item.action, item.payload, err.message);
+          attnChanged = true;
+          const i = queue.indexOf(item);
+          if (i !== -1) queue.splice(i, 1);
+          persistQueue();
+          bumpMutations();
+          toast(item.action === 'saveDay' && isDateStr(item.payload.date)
+            ? 'Not saved: ' + fmtShort(item.payload.date) + ' is still not in the sheet. See the red card on the Sales screen.'
+            : 'Not saved: the server refused an expense. See More.');
+        }
         lastSyncError = '';
-        const i = queue.indexOf(item);
-        if (i !== -1) queue.splice(i, 1);
-        persistQueue();
-        toast(item.action === 'saveDay' && isDateStr(item.payload.date)
-          ? 'Not saved: ' + fmtShort(item.payload.date) + ' is still not in the sheet. See the red card on the Sales screen.'
-          : 'Not saved: the server refused an expense. See More.');
       } else if (err && err.badResponse){
         // Server answered, but not with our API's JSON — a setup problem
         // (wrong URL/deployment), not offline. Keep the item; surface distinctly.
@@ -2212,6 +2343,13 @@ function applyServerDay(p, data){
         // a live flag that may since have been flipped.
         const snap = pick(l, 'in_cutoff', 'inCutoff');
         if (snap != null) r.in_cutoff = inCutoffFlag(snap);
+        // The prices the sheet actually computed this line at (v2.5.0), so a
+        // re-save from this phone reuses the sheet's own snapshot. Guarded the
+        // same way: an older deployment sends none, and a 0 would re-price the
+        // night at nothing.
+        if (l.price != null && l.price !== '') r.price = num(l.price);
+        const chp = pick(l, 'cheese_price', 'cheesePrice');
+        if (chp != null && chp !== '') r.cheese_price = num(chp);
       }
     }
   }
@@ -2260,8 +2398,15 @@ function applyDroppedSkus(p, skus){
 
 async function doBootstrap(){
   if (!config.apiUrl || !navigator.onLine) return false;
+  // Stamp the moment the request LEAVES. If anything is saved locally — or the
+  // drain lands anything on the sheet — while the reply is in the air, that
+  // reply describes a sheet (and a phone) that no longer exists: applying it
+  // would roll fresh work back to the pre-drain rows. Discard it; the next
+  // sync trigger asks again and gets a current snapshot.
+  const stamp = mutationCounter;
   try{
     const data = await api('bootstrap', {});
+    if (mutationCounter !== stamp) return false;   // stale before it arrived
     applyBootstrap(data);
     persistState();
     renderPanel(activeTab);
@@ -2311,6 +2456,10 @@ function applyBootstrap(data){
   // An older deployment that does not send it falls back to the cautious
   // behaviour — only dates the reply mentions are touched, nothing is removed.
   const winStart = txt(pick(data, 'window_start', 'windowStart')).trim();
+  // Remembered so the Cutoff screen can say plainly when a period reaches
+  // further back than this phone can see (the note the server generates is
+  // always computed from the whole sheet, so IT stays complete).
+  if (isDateStr(winStart)) state.window_start = winStart;
   if (winStart){
     // The server stated its window, so inside it the snapshot is complete and
     // authoritative for EVERY collection: a date it omits was deleted. One
@@ -2417,10 +2566,11 @@ function updateStatus(){
   ensureShape();
   // "Synced" is a promise that the sheet has everything. While anything is on
   // the needs-attention list that promise is false, so the pill never goes
-  // green. A day the server REFUSED (or one whose GCash split was lost) is
-  // missing money and says so in red; a dropped sku is a note, so it is amber.
+  // green. Only a day the server REFUSED is actually missing money and says so
+  // in red; a dropped sku and a legacy GCash split are notes about days the
+  // sheet already holds, so they are amber — informational, never an alarm.
   const needs = asArr(attention).length;
-  const missing = asArr(attention).filter(a => a.kind !== 'dropped').length;
+  const missing = asArr(attention).filter(a => a.kind === 'rejected').length;
   if (!config.apiUrl){ pill.className = 'pill demo'; pill.textContent = 'Demo'; }
   else if (!navigator.onLine){ pill.className = 'pill off'; pill.textContent = 'Offline'; }
   else if (syncing){ pill.className = 'pill pending'; pill.textContent = 'Syncing…'; }
@@ -2508,7 +2658,7 @@ function loadBentaForm(date){
   // this date, so editing an old day after a SKU is deactivated still
   // round-trips that SKU's counts instead of silently erasing them.
   const rows = [];
-  const seen = {};
+  const seen = Object.create(null);   // keyed by sku — sheet data, prototype-free
   const rowOf = (sku, c) => ({
     sku,
     sod:num(c.sod), eod:num(c.eod),
@@ -2616,7 +2766,7 @@ function clearBentaDraft(date){
 // of zeroes, and it is what keeps the row out of the payload entirely.
 function bentaStockRows(d){
   const saved = asArr(asObj(state.stockUsage)[d]).filter(isObj);
-  const rows = [], seen = {};
+  const rows = [], seen = Object.create(null);   // keyed by product name — prototype-free
   for (const it of activeStockItems()){
     if (seen[it.product]) continue;
     seen[it.product] = true;
@@ -2630,6 +2780,35 @@ function bentaStockRows(d){
     rows.push({ product:r.product, unit:txt(it && it.unit), qty:num(r.qty) });
   }
   return rows;
+}
+
+/**
+ * The three bucket figures one row SENDS — the same values validateBenta
+ * judges, so the phone can never refuse a figure it was not going to send, or
+ * send a figure it never showed.
+ *
+ * A group=simple sku IN the cutoff has no cheese version, no cheese stepper and
+ * nothing to fix, so a stray cheese figure is sent as 0 (the silent-zero rule —
+ * the server enforces the real guard). An EXCLUDED sku sends its buckets
+ * EXACTLY AS THE ROW HOLDS THEM: on every night entered since the sku was
+ * excluded they are 0, and a non-zero one — an old day from before the flag
+ * flipped — is money she has already read, so it must be seen and zeroed on
+ * purpose. Its stepper renders (renderBenta's oldBuckets), validateBenta
+ * refuses the save in the server's own words, and nothing is zeroed behind her
+ * back. Sending 0 while validating the raw figure was the dead end: the save
+ * was refused over a number that was neither sent nor fixable.
+ */
+function sentBuckets(r){
+  const row = asObj(r);
+  if (!skuInCutoff(row.sku)){
+    return { cheeseQty: num(row.cheese), gcashQty: num(row.gcash), gcashCheeseQty: num(row.gcashCheese) };
+  }
+  const cheeseSent = isBoxSku(row.sku);
+  return {
+    cheeseQty: cheeseSent ? num(row.cheese) : 0,
+    gcashQty: num(row.gcash),
+    gcashCheeseQty: cheeseSent ? num(row.gcashCheese) : 0
+  };
 }
 
 function bentaPayload(){
@@ -2651,24 +2830,17 @@ function bentaPayload(){
     notes: benta.notes,
     // REQUEST keys are camelCase. `gcash` is deliberately NOT sent: the server
     // computes it from these buckets and ignores a typed figure.
-    // Exactly the buckets computeDay used for the receipt she just read.
-    // A group=simple sku has no cheese version, and an EXCLUDED sku has no variant
-    // or payment split AT ALL — the server refuses every one of the three on it
-    // (v2.4.1), naming the item, and none of them has a stepper on the card. So a
-    // figure in one of those can only come from a stale draft or a hand-edited sheet
-    // row, and sending it would refuse the whole day while the receipt had already
-    // (correctly) ignored it. Send what was shown — and validateBenta stops the save
-    // and quotes the server, so nothing is dropped behind her back either.
+    // The buckets are sentBuckets(r) — the ONE reading shared with validateBenta,
+    // so the validator only ever complains about figures that would really be
+    // sent, and every figure sent was on the screen (see sentBuckets for the
+    // excluded-sku rule that broke this symmetry once).
     counts: closed ? [] : asArr(benta.rows).map(r => {
-      const inCut = skuInCutoff(r.sku);
-      // Cheese needs BOTH: only a box has a cheese version, and an excluded sku is
-      // one plain quantity at one price whatever its group says.
-      const cheeseSent = inCut && isBoxSku(r.sku);
+      const b = sentBuckets(r);
       return {
         sku:r.sku, sod:num(r.sod), eod:num(r.eod),
-        cheeseQty: cheeseSent ? num(r.cheese) : 0,
-        gcashQty: inCut ? num(r.gcash) : 0,
-        gcashCheeseQty: cheeseSent ? num(r.gcashCheese) : 0
+        cheeseQty: b.cheeseQty,
+        gcashQty: b.gcashQty,
+        gcashCheeseQty: b.gcashCheeseQty
       };
     }),
     // Only what was actually opened travels: the server writes non-zero rows
@@ -2685,7 +2857,7 @@ function bentaPayload(){
 // (deactivated-but-recorded, or activated after the form was loaded).
 function bentaSkuList(){
   const list = activePrices().slice();
-  const seen = {};
+  const seen = Object.create(null);   // keyed by sku — sheet data, prototype-free
   for (const pr of list) seen[pr.sku] = true;
   for (const r of asArr(benta.rows)){
     if (seen[r.sku]) continue;
@@ -2718,9 +2890,11 @@ function skuSplitText(pr, row){
   if (!inCutoffFlag(pr.in_cutoff)){
     return sold + ' × ' + peso(price) + ' = ' + peso(r2(sold * price)) + '  ·  not in the day’s total';
   }
+  // Clamped in sequence, the same way computeDay clamps for the receipt, so
+  // this line never spells out more boxes than were sold.
   const cheese = isBox ? clampQty(row.cheese, sold) : 0;
-  const gcash = clampQty(row.gcash, sold);
-  const gcashCheese = isBox ? clampQty(row.gcashCheese, sold) : 0;
+  const gcash = clampQty(row.gcash, sold - cheese);
+  const gcashCheese = isBox ? clampQty(row.gcashCheese, sold - cheese - gcash) : 0;
   const regular = Math.max(0, sold - cheese - gcash - gcashCheese);
   const amount = (regular + gcash) * price + (cheese + gcashCheese) * cheesePrice;
   // Read in the same two groups the steppers are arranged in, and show each
@@ -2742,8 +2916,11 @@ function skuSplitText(pr, row){
 }
 
 // The row fields a stepper may write. A whitelist rather than free indexing,
-// so a sku or a stray data attribute can never reach the prototype.
-const ROW_FIELDS = { sod:'sod', eod:'eod', cheese:'cheese', gcash:'gcash', gcashCheese:'gcashCheese' };
+// so a sku or a stray data attribute can never reach the prototype — and
+// prototype-free itself, so "__proto__" or "toString" in a data attribute
+// cannot answer truthily either.
+const ROW_FIELDS = Object.assign(Object.create(null),
+  { sod:'sod', eod:'eod', cheese:'cheese', gcash:'gcash', gcashCheese:'gcashCheese' });
 // The three ENTERED buckets, with the label each one shows.
 // Labels name BOTH dimensions — variant and payment — because a bare "Cheese"
 // or "GCash" is ambiguous on its own and read as a riddle in the first cut of
@@ -2915,7 +3092,8 @@ function renderBenta(){
     '</div>' +
     '<svg class="cal-ico" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M8 3v4M16 3v4M3 10h18"/></svg>' +
     '<input type="date" id="bentaDate" class="date-cover" value="' + benta.date + '" max="' + todayStr() + '" aria-label="Choose the date">' +
-  '</div>';
+  '</div>' +
+  '<p class="err" id="err-date" style="margin:-8px 4px 14px;" hidden></p>';
 
   // Never claim a day is saved while it is sitting on the needs-attention list:
   // the sheet does not have it.
@@ -2952,9 +3130,15 @@ function renderBenta(){
       h += '<div class="card"><p class="hint">No box sizes to count yet. Add them in the Prices tab of the Google Sheet, then sync.</p></div>';
     }
     h += '<p class="hint" style="margin:-4px 0 12px;">Cheese and GCash boxes are part of what sold. Whatever is left over is regular, paid in cash.</p>';
+    // The prices THIS DAY counts at (v2.5.0): a saved day keeps the prices it
+    // was saved with, so reopening an old night shows the money it actually
+    // made — not what the same boxes would make at today's prices.
+    const daySnap = storedPricesFor(benta.date);
     for (const pr of skus){
       let row = asArr(benta.rows).find(r => r.sku === pr.sku);
       if (!row){ row = { sku:pr.sku, sod:0, eod:0, cheese:0, gcash:0, gcashCheese:0 }; benta.rows.push(row); }
+      const eff = priceOnDay(daySnap, pr);
+      const prEff = Object.assign({}, pr, eff);
       const sold = Math.max(0, num(row.sod) - num(row.eod));
       const isBox = pr.group === 'box';
       // A sku kept OUT of the cutoff is counted exactly like the others, so its
@@ -2991,11 +3175,32 @@ function renderBenta(){
       buckets += payRow('Regular', stepFor('gcash'), true);
       if (isBox) buckets += payRow('Cheese', stepFor('gcashCheese'), true);
       buckets += '</div>';
+      // An EXCLUDED sku normally has no bucket steppers at all — but a LOADED
+      // row can still hold one from before the sku was excluded, and the save
+      // refuses the day while it does. A figure with no stepper is a dead end:
+      // there was no way to zero it from the phone, so the day could never be
+      // saved again. Same rule the missing-sku placeholder uses for its cheese
+      // steppers — whatever the row already holds must render, so it can be
+      // seen and zeroed on purpose, never zeroed behind her back.
+      let oldBuckets = '';
+      if (!inCut){
+        const held = BUCKETS.filter(b => num(row[b.field]) !== 0);
+        if (held.length){
+          oldBuckets = '<div class="buckets"><div class="pay-intro">Old counts to clear</div>' +
+            '<p class="hint" style="margin:-4px 0 10px;">' + esc(pr.label) +
+              ' is kept out of the cutoff now, so these old counts must go back to 0 before the day can save. ' +
+              'The boxes still count in “Sold”.</p>' +
+            held.map(b => payRow(esc(b.label), stepFor(b.field), b.gcash)).join('') +
+          '</div>';
+        }
+      }
       h += '<div class="card sku-card" data-skucard="' + sk + '">' +
         '<div class="sku-head"><strong>' + esc(pr.label) + '</strong>' +
           (inCut ? '' : '<span class="badge-excl">Not in the cutoff</span>') +
+          // The prices shown are the DAY's prices (the stored snapshot on a
+          // saved day), so an old night reads at the money it was saved at.
           '<span class="sku-price">' + (pr.missing ? 'Not in the Prices tab'
-            : peso(pr.price) + (showCheese ? ' · Cheese ' + peso(pr.cheese_price) : '') +
+            : peso(eff.price) + (showCheese ? ' · Cheese ' + peso(eff.cheese_price) : '') +
               (truthy(pr.active) ? '' : ' · no longer active')) + '</span></div>' +
         // It cannot be priced any more, so the server drops these counts when
         // the day is saved. Say so here rather than letting it surprise her.
@@ -3009,17 +3214,19 @@ function renderBenta(){
           '<div class="sold-badge" id="soldbadge-' + sk + '">Sold: <b id="sold-' + sk + '">' + sold + '</b></div>' +
         '</div>' +
         // No payment split on an excluded sku — its money is one plain amount that
-        // never joins the day's Cash or GCash. One short line says so.
+        // never joins the day's Cash or GCash. One short line says so. (Old
+        // bucket figures the row still holds render above it so they can be
+        // zeroed — see oldBuckets.)
         (inCut
           ? '<div class="buckets">' +
               '<div class="pay-intro">How were they paid?</div>' + buckets +
             '</div>'
-          : '<p class="excl-note">Count it as usual — its money is kept separate.</p>') +
+          : oldBuckets + '<p class="excl-note">Count it as usual — its money is kept separate.</p>') +
         // Every bucket is a SUBSET of what sold — a dearer filling, or a
         // different way of paying — so raising one only moves a box from one
         // bucket to another. Spelling all four out per row stops a stepper
         // reading as "that button didn't add anything".
-        '<div class="sku-split" id="split-' + sk + '">' + skuSplitText(pr, row) + '</div>' +
+        '<div class="sku-split" id="split-' + sk + '">' + skuSplitText(prEff, row) + '</div>' +
         '<p class="err" id="err-sku-' + sk + '" hidden></p>' +
       '</div>';
     }
@@ -3311,6 +3518,21 @@ function updateDayStrip(c){
 function isWhole(v){ const n = num(v); return isFinite(n) && Math.floor(n) === n; }
 
 /**
+ * What the SERVER would refuse about the DATE of a recorded event — a day of
+ * sales, an expense — or '' when it is fine. Mirrors reqEntryDate() in Code.gs,
+ * wording included: a date in the future or before 2020 is almost always a
+ * mangled year from a half-edited field, and either would file real money
+ * where nobody looks. Checked when the field changes AND when it saves, so a
+ * partial "000X" year can never be committed anywhere.
+ */
+function entryDateError(s){
+  if (!isDateStr(s)) return 'That date is not complete. Pick the day from the calendar.';
+  if (s > todayStr()) return 'That date (' + s + ') has not happened yet. Pick today or an earlier day.';
+  if (s < '2020-01-01') return 'That date (' + s + ') is before 2020, which cannot be right. Check the year.';
+  return '';
+}
+
+/**
  * What the SERVER would refuse about an EXCLUDED sku's row — in its own words — or
  * '' when there is nothing wrong. Both rules it mirrors are in apiSaveDay, checked
  * in this order.
@@ -3334,8 +3556,13 @@ function excludedRowError(sku, row){
   // something different here would mean the phone and the sheet explain the same
   // refusal two ways, which is the kind of mismatch that makes a real message
   // look untrustworthy.
+  // Each refusal STARTS with the server's own words (so the phone and the sheet
+  // explain the same refusal the same way) and then names the way out — the
+  // stepper now on the card, and the Maintenance toggle one tap away. A refusal
+  // with no way out is a dead end, and this row used to be exactly that.
   if (!isBoxSku(sku) && num(r.cheese) !== 0){
-    return label + ' has no cheese version, so its cheese counts must be 0.';
+    return label + ' has no cheese version, so its cheese counts must be 0.' +
+      ' Take the old count on its card back to 0.';
   }
   const held = [];
   if (num(r.cheese) !== 0) held.push('cheese');
@@ -3344,7 +3571,9 @@ function excludedRowError(sku, row){
   if (held.length){
     return label + ' is kept out of the cutoff, so its money is not split into cash and GCash: its ' +
       listPhrase(held) + ' count' + (held.length > 1 ? 's' : '') +
-      ' must be 0. Its total is shown on its own line.';
+      ' must be 0. Its total is shown on its own line.' +
+      ' Take the old count' + (held.length > 1 ? 's' : '') + ' on its card back to 0 — or, if ' + label +
+      ' should still count in the cutoff, turn “Counts in the cutoff” back on under More → Maintenance.';
   }
   // An excluded sku must be `group=simple`: one plain quantity at one price. A box
   // kept out of the cutoff is a sheet that contradicts the app — savePrices refuses
@@ -3366,7 +3595,12 @@ function excludedRowError(sku, row){
    like '__proto__' cannot touch the prototype (the accumulator has none). */
 function validateBenta(){
   const errs = Object.create(null);
-  if (benta.closed) return errs;   // a closed day sends nothing to validate
+  // The DATE first, and before the closed-day return: the server refuses a
+  // future or pre-2020 date on a closed day too (reqEntryDate runs before
+  // anything else), and a partial year must never be committed either way.
+  const dateBad = entryDateError(asObj(benta).date);
+  if (dateBad) errs.date = dateBad;
+  if (benta.closed) return errs;   // a closed day sends nothing else to validate
 
   for (const r of asArr(benta.rows)){
     // A sku that has left the Prices tab counts as a box here, exactly as it
@@ -3376,15 +3610,17 @@ function validateBenta(){
     const inCut = skuInCutoff(r.sku);
     const key = 'sku:' + r.sku;
     const sod = num(r.sod), eod = num(r.eod);
-    // The buckets AS SENT (see bentaPayload): a group=simple sku has no cheese
-    // version and an excluded sku has no bucket at all, so those figures are not
-    // sent and there is no stepper for them. Validating a number that is neither
-    // shown, nor sent, nor fixable is how a day becomes permanently un-saveable.
-    // (The ONE exception is a non-zero bucket on an EXCLUDED sku, which is not a
-    // figure to ignore but money about to change — see excludedRowError below.)
-    const cheese = (isBox && inCut) ? num(r.cheese) : 0;
-    const gcash = inCut ? num(r.gcash) : 0;
-    const gcashCheese = (isBox && inCut) ? num(r.gcashCheese) : 0;
+    // The buckets AS SENT — sentBuckets(r), the same reading bentaPayload uses,
+    // so this only ever complains about a figure that would really be sent. A
+    // group=simple sku's cheese figure is not sent and has no stepper, so it is
+    // not judged (the silent-zero rule); an EXCLUDED sku's buckets ARE sent
+    // exactly as the row holds them, so a non-zero one — old money from before
+    // the flag flipped — is refused below in the server's words, with the
+    // stepper to fix it now on the card.
+    const b = sentBuckets(r);
+    const cheese = b.cheeseQty;
+    const gcash = b.gcashQty;
+    const gcashCheese = b.gcashCheeseQty;
     const sold = sod - eod;
     if (!isWhole(sod) || !isWhole(eod) || !isWhole(cheese) || !isWhole(gcash) || !isWhole(gcashCheese)){
       errs[key] = 'Use whole numbers only — half a box cannot be sold.';
@@ -3456,6 +3692,8 @@ function setErr(id, msg){
 
 function validateBentaLive(){
   const errs = validateBenta();
+  setErr('err-date', errs.date);
+  const daySnap = storedPricesFor(benta.date);
   for (const r of asArr(benta.rows)){
     setErr('err-sku-' + r.sku, errs['sku:' + r.sku]);
     const sold = num(r.sod) - num(r.eod);
@@ -3468,10 +3706,11 @@ function validateBentaLive(){
     if (split){
       // Fall back to the same placeholder renderBenta drew the card from, so a
       // sku that has left the Prices tab keeps a line consistent with its own
-      // Sold and Regular figures instead of freezing at stale numbers.
+      // Sold and Regular figures instead of freezing at stale numbers — and
+      // priced at THIS DAY's stored prices, same as the card itself.
       const pr = asArr(state.prices).find(p => isObj(p) && p.sku === r.sku)
         || { sku: r.sku, label: r.sku, group: isBox ? 'box' : 'simple', price: 0, cheese_price: 0 };
-      split.textContent = skuSplitText(pr, r);
+      split.textContent = skuSplitText(Object.assign({}, pr, priceOnDay(daySnap, pr)), r);
     }
   }
   setErr('err-custom', errs.custom);
@@ -3485,27 +3724,56 @@ function saveBenta(){
   const errs = validateBentaLive();
   if (Object.keys(errs).length){
     toast('Please fix the errors first.');
-    const firstKey = Object.keys(errs)[0];
-    // An error inside a collapsed card would otherwise be invisible: open the
-    // card first, then scroll to the message.
-    if (firstKey.indexOf('stock:') === 0 && !benta.stockOpen) toggleCollapse('stock');
-    if (firstKey === 'salary' && !benta.wageOpen) toggleCollapse('wage');
-    const el = $(errSlotId(firstKey));
+    const keys = Object.keys(errs);
+    // EVERY collapsed card holding an error opens itself before the scroll — not
+    // just the first error's card. A message inside a closed card is invisible,
+    // and finding a second one only after fixing the first is a treasure hunt.
+    if (keys.some(k => k.indexOf('stock:') === 0) && !benta.stockOpen) toggleCollapse('stock');
+    if (errs.salary && !benta.wageOpen) toggleCollapse('wage');
+    const el = $(errSlotId(keys[0]));
     if (el) el.scrollIntoView({ block:'center', behavior: prefersReduced() ? 'auto' : 'smooth' });
     return;
   }
   const p = bentaPayload();
+  // A day with NO money on it still books that day's wage at the cutoff, and it
+  // is usually a slip — Save day tapped before the counts went in, or a closed
+  // day not marked closed. One plain question, then her word is final.
+  if (!p.closed){
+    const c = computeDay(p);
+    if (c.total === 0 && c.excluded === 0){
+      const wage = (p.salary === '' || p.salary == null) ? dailySalary() : Math.max(0, num(p.salary));
+      const ask = wage > 0
+        ? 'No sales are entered for ' + fmtShort(p.date) + ' yet, but saving it still adds the ' +
+          peso(wage) + ' wage for the day. Save it anyway? If the stall did not open, use “Closed today” instead.'
+        : 'No sales are entered for ' + fmtShort(p.date) + ' yet. Save it anyway?';
+      if (!confirm(ask)) return;
+    }
+  }
   p.entryId = uuid();
   applyLocalDay(p);
   enqueue('saveDay', p);
   // The typed work is in the queue now, so the draft for this date has done its
   // job. (If the server refuses it, the needs-attention list takes over.)
   clearBentaDraft(p.date);
+  // ...and the form holds nothing unsaved any more. Anything typed FROM HERE ON
+  // — the tear-off runs ~450ms and the form stays fully editable under it —
+  // flips this back to true, and the callback below then leaves the form alone.
+  benta.dirty = false;
   persistState();
   const savedDate = p.date;
   tearReceipt(() => {
-    loadBentaForm(savedDate);
-    renderBenta();
+    // The receipt strip animated itself invisible; whichever branch runs, it
+    // must come back.
+    const wrap = $('receiptWrap');
+    if (wrap) wrap.classList.remove('tearing');
+    if (isObj(benta) && benta.date === savedDate && !benta.dirty){
+      loadBentaForm(savedDate);
+      renderPanel('benta');   // defers itself if she is typing in a field
+    } else {
+      // She kept working while the receipt tore off. Re-rendering now would
+      // throw that typing away, so the form stays exactly as she has it.
+      updateReceipt();
+    }
     // The drain may already have come back with a refusal while the receipt was
     // tearing off, so ask before speaking — never let "Saved" be the last word
     // about a day the sheet does not have.
@@ -3637,7 +3905,8 @@ function renderGastos(){
       '<input class="input money" id="gxAmount" inputmode="decimal" autocomplete="off" placeholder="0" value="' + esc(gx.amount) + '">' +
       '<p class="err" id="err-gx-amount" hidden></p></div>';
     h += '<div class="field"><label for="gxDate">Date</label>' +
-      '<input class="input" type="date" id="gxDate" value="' + gx.date + '" max="' + todayStr() + '"></div>';
+      '<input class="input" type="date" id="gxDate" value="' + esc(gx.date) + '" max="' + todayStr() + '">' +
+      '<p class="err" id="err-gx-date" hidden></p></div>';
 
     // OPTIONAL: what arrived. A delivery is money AND a quantity, and the money
     // stays here on this one row — the quantity only feeds "Stock on hand".
@@ -3703,6 +3972,15 @@ function renderGastos(){
 
 function submitGasto(){
   let ok = true;
+  // The DATE, in the server's own words: a half-edited year (a future day, or
+  // "0002-…") files real money where nobody looks, so it is refused here the
+  // same way the change handler refuses it — never only one of the two.
+  const dateBad = entryDateError(gx.date);
+  const dateEl = $('err-gx-date');
+  if (dateBad){
+    if (dateEl){ dateEl.textContent = dateBad; dateEl.hidden = false; }
+    ok = false;
+  } else if (dateEl) dateEl.hidden = true;
   const amtEl = $('err-gx-amount');
   if (!(num(gx.amount) > 0)){
     if (amtEl){ amtEl.textContent = 'Enter the amount.'; amtEl.hidden = false; }
@@ -3787,8 +4065,33 @@ let payBl = { ref:'', amount:'' };
 // Days in this period that this phone has but the SHEET does not. The preview
 // below counts them (they are real money she entered); a note generated by the
 // server would not. Say so rather than letting the two disagree in silence.
+// ONLY a server refusal counts: a 'gcash' entry is a day the sheet HOLDS whose
+// split needs re-entering — informational, so it neither claims "not in the
+// sheet" nor blocks the note — and 'dropped' is a note about one sku.
 function cutoffMissingDays(per){
-  return asArr(attention).filter(a => a.kind !== 'dropped' && isDateStr(a.date) && inPeriod(a.date, per));
+  return asArr(attention).filter(a => a.kind === 'rejected' && isDateStr(a.date) && inPeriod(a.date, per));
+}
+
+/** Whether this phone can even SEE the whole of a period. The bootstrap
+ *  snapshot covers a stated window; a period that starts before it may have
+ *  days this phone has never held (or pruned), so the preview cannot promise
+ *  to be the whole story — the note the SERVER generates always is, because it
+ *  is computed from the full sheet. Demo mode has no window: the phone is the
+ *  whole archive there. */
+function previewIncomplete(per){
+  const ws = txt(asObj(state).window_start);
+  return !!config.apiUrl && isDateStr(ws) && txt(asObj(per).start) < ws;
+}
+
+/** The date a Cutoff-screen expense (a one-tap chip, a backlog payment) lands
+ *  on: today when today is inside the period shown, the period's LAST day for
+ *  an earlier cutoff — and NOTHING for a future one, because that would date
+ *  real money into a day that has not happened and the server refuses it. */
+function cutoffExpenseDate(per){
+  const t = todayStr();
+  if (inPeriod(t, per)) return t;
+  if (txt(asObj(per).end) < t) return asObj(per).end;
+  return '';
 }
 
 /** What the line under the Split field says. Saying plainly that the figure on
@@ -3831,6 +4134,19 @@ function renderCutoff(){
       '<span class="p-sub">' + (isCurrent ? 'This cutoff' : s.y) + '</span></div>' +
     '<button type="button" class="nav-btn" data-act="cutoff-next" aria-label="Next cutoff">›</button>' +
   '</div></div>';
+
+  // A period that reaches further back than this phone can see. The preview
+  // below is built from the days on this phone, so it may be missing money —
+  // say so plainly, and say which figure to trust: the generated note is
+  // computed by the server from the whole sheet, so it is the complete one.
+  if (previewIncomplete(per)){
+    h += '<div class="card" style="border-color:var(--accent);">' +
+      '<p style="font-weight:600;">This phone cannot see the whole of this cutoff.</p>' +
+      '<p class="hint" style="margin-top:4px;">It only keeps days from ' + esc(fmtShort(state.window_start)) +
+        ', so the figures below may be missing earlier days. The note made with “Generate cutoff note” is ' +
+        'worked out from the whole Google Sheet, so it is the complete one.</p>' +
+    '</div>';
+  }
 
   // The SPLIT is an entered amount now, so it gets a field of its own — pre-filled
   // with this period's saved figure, or the usual one when nothing is saved yet.
@@ -4014,8 +4330,23 @@ async function generateNote(){
       return;
     }catch(err){
       console.error(err);
+      // The phone's own copy of a period it cannot fully see would be SHORT —
+      // real money missing from a note that looks finished. Refuse it; only the
+      // server can build this one.
+      if (previewIncomplete(per)){
+        toast(friendlyError(err, 'Please try again in a moment.') +
+          ' This phone cannot see the whole of this cutoff, so the note must come from the sheet.');
+        renderCutoff();
+        return;
+      }
       toast(friendlyError(err, 'Please try again in a moment.') + ' Showing the copy from this phone.');
     }
+  }
+  // Offline (or no API yet) with an incomplete view: same refusal, same reason.
+  if (previewIncomplete(per)){
+    toast('This phone cannot see the whole of this cutoff. Connect to the internet and try again — the note must be made from the whole sheet.');
+    renderCutoff();
+    return;
   }
   lastNote = { key:periodKey(per), text:buildNote(computeCutoff(per), per), demo:true };
   renderCutoff();
@@ -4113,10 +4444,15 @@ function payBacklog(){
   if (bl && amount > balance &&
       !confirm('That is more than the ' + peso(balance) + ' still owed on ' + payBl.ref + '. Log it anyway?')) return;
   if (err) err.hidden = true;
-  // Dated today when today is inside the period being shown, else its last day,
-  // so the payment lands in the cutoff it is being paid for.
-  const t = todayStr();
-  const date = inPeriod(t, cutoffPer) ? t : cutoffPer.end;
+  // Dated today when today is inside the period being shown, else the period's
+  // last day, so the payment lands in the cutoff it is being paid for. A FUTURE
+  // cutoff has no valid day yet — dating money into a day that has not happened
+  // is exactly what the server refuses.
+  const date = cutoffExpenseDate(cutoffPer);
+  if (!date){
+    toast('This cutoff has not started yet, so a payment cannot be dated into it. Go back to the current cutoff first.');
+    return;
+  }
   const payload = { date, category:'Backlog', item:'Backlog payment', amount:r2(amount),
     backlogRef: payBl.ref, notes:'', stockProduct:'', stockQty:'', entryId: uuid() };
   applyLocalExpense(payload);
@@ -4130,9 +4466,15 @@ function payBacklog(){
 }
 
 function addSuggestedExpense(cat, item, amount){
-  const t = todayStr();
-  const per = cutoffPer;
-  const date = inPeriod(t, per) ? t : per.end;
+  // Same date rule as payBacklog: today inside the period, the last day of an
+  // earlier one — and NEVER a day that has not happened yet. The one-tap chip
+  // used to date Mama/Electric into the future when the arrows sat on a
+  // not-yet-started cutoff, and the server refuses a future date outright.
+  const date = cutoffExpenseDate(cutoffPer);
+  if (!date){
+    toast('This cutoff has not started yet, so this cannot be added to it now.');
+    return;
+  }
   const payload = { date, category:cat, item, amount:num(amount), backlogRef:'', notes:'',
     stockProduct:'', stockQty:'', entryId:uuid() };
   applyLocalExpense(payload);
@@ -4154,8 +4496,9 @@ function renderIbapa(){
   const attnCard = attentionCardHTML();
   if (attnCard) h += '<div class="section-title" style="margin-top:4px;">Needs your attention</div>' + attnCard;
 
-  // Sync status
-  const missing = attention.filter(a => a.kind !== 'dropped').length;
+  // Sync status. Only a REFUSED entry is missing from the sheet; the other
+  // kinds are notes about entries the sheet already holds.
+  const missing = attention.filter(a => a.kind === 'rejected').length;
   const status = !config.apiUrl ? 'Demo (no API)'
     : (!navigator.onLine ? 'Offline'
     : (queue.length ? 'Waiting to sync'
@@ -4332,7 +4675,9 @@ let maintStock = null;    // product -> { unit, reorderAt, active }
 /** Load the forms from the current state. Called when the section is opened, so
  *  it always starts from what the sheet last said. */
 function maintLoad(){
-  maintPrices = {};
+  // Keyed by sku / product name — sheet data, so both maps are prototype-free:
+  // a sku spelled "__proto__" must land in the map, never on its prototype.
+  maintPrices = Object.create(null);
   for (const p of asArr(state.prices)){
     if (!isObj(p) || !txt(p.sku)) continue;
     maintPrices[p.sku] = { price: num(p.price), cheesePrice: num(p.cheese_price),
@@ -4344,7 +4689,7 @@ function maintLoad(){
     mama_per_cutoff: num(st.mama_per_cutoff), electric_per_cutoff: num(st.electric_per_cutoff),
     branch: txt(st.branch), staff: txt(st.staff)
   };
-  maintStock = {};
+  maintStock = Object.create(null);
   for (const s of asArr(state.stockItems)){
     if (!isObj(s) || !txt(s.product)) continue;
     maintStock[s.product] = { unit: txt(s.unit), reorderAt: s.reorder_at === '' ? '' : num(s.reorder_at), active: truthy(s.active) };
@@ -4735,7 +5080,12 @@ document.addEventListener('input', (ev) => {
   // Expenses fields
   else if (id === 'gxItem') gx.item = ev.target.value;
   else if (id === 'gxAmount') gx.amount = ev.target.value;
-  else if (id === 'gxDate') gx.date = ev.target.value || todayStr();
+  else if (id === 'gxDate'){
+    // Kept as typed, judged live — a half-edited year ("0002-…") shows the
+    // server's own complaint at once, and submitGasto refuses to commit it.
+    gx.date = ev.target.value || todayStr();
+    setErr('err-gx-date', ev.target.value ? entryDateError(ev.target.value) : '');
+  }
   else if (id === 'gxBacklog') gx.backlogRef = ev.target.value;
   else if (id === 'gxStockQty') gx.stockQty = ev.target.value;
 
@@ -4774,7 +5124,18 @@ document.addEventListener('change', (ev) => {
   if (id === 'gxBacklog'){ gx.backlogRef = ev.target.value; return; }
   if (id === 'bentaDate'){
     const v = ev.target.value;
-    if (v && v !== benta.date){
+    // The form NEVER moves onto a date the server would refuse: a future day, a
+    // half-edited year ("0002-…"), or a cleared field. The picker snaps back to
+    // the day it was on and the complaint uses the server's own words — checked
+    // here on change AND again in validateBenta on save, so a partial state
+    // cannot be committed from either direction.
+    const bad = v ? entryDateError(v) : 'That date is not complete. Pick the day from the calendar.';
+    if (bad){
+      ev.target.value = benta.date;
+      toast(bad);
+      return;
+    }
+    if (v !== benta.date){
       // Changing the date used to throw away everything typed, with no warning.
       // Keep it as a draft for the date it belongs to, say so, and put it back
       // the moment that date is opened again.
@@ -4783,11 +5144,23 @@ document.addEventListener('change', (ev) => {
       loadBentaForm(v);
       renderBenta();
       if (wasDirty) toast('Your numbers for ' + fmtShort(from) + ' were kept. Pick that date again to finish them.');
-    } else if (v){
+    } else {
       loadBentaForm(v); renderBenta();
     }
   }
   else if (id === 'closedToggle'){
+    // Marking a day closed BLANKS it: counts, custom order, wage — everything.
+    // With sales already on the form that is a whole night's money going, so it
+    // asks once, naming the amount, before anything is touched.
+    if (ev.target.checked && !benta.closed){
+      const c = computeDay(bentaPayload());   // benta.closed is still false here
+      const money = r2(num(c.total) + num(c.excluded));
+      if (money > 0 &&
+          !confirm('This day has ' + peso(money) + ' of sales entered. “Closed today” removes all of it. Mark the day closed anyway?')){
+        ev.target.checked = false;
+        return;
+      }
+    }
     benta.closed = ev.target.checked;
     benta.dirty = true;
     renderBenta();
