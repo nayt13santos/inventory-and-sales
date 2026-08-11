@@ -20,10 +20,10 @@ Total cost: **₱0**. You'll set up three things: the Google Sheet (database), t
 
 **Option A — GitHub Pages (recommended — this is the one that can update itself):**
 1. Create a free account at github.com if you don't have one.
-2. New repository → name `octogo-tracker` → Public → Create.
+2. New repository → name `inventory-and-sales` → Public → Create.
 3. Upload **the whole project folder** (not just `pwa/`) — it includes `.github/workflows/deploy.yml`, which is what makes future updates automatic.
 4. Repo **Settings → Pages** → Source: **GitHub Actions**.
-5. After ~1 minute your app is live at `https://<your-username>.github.io/octogo-tracker/`. Every later push republishes it on its own — see "Automatic updates" below.
+5. After ~1 minute your app is live at `https://<your-username>.github.io/inventory-and-sales/`. Every later push republishes it on its own — see "Automatic updates" below.
 
 **Option B — Cloudflare Pages:** free account → Workers & Pages → Create → Pages → Upload assets → drag the six files from `pwa/` (`index.html`, `sw.js`, `manifest.webmanifest`, `logo.png`, `icon-192.png`, `icon-512.png`) → Deploy. You get `https://<name>.pages.dev`. Simple, but you re-upload by hand each time.
 
@@ -101,7 +101,7 @@ If you ever have to redo it (new machine, revoked credential, or the token expir
 1. Turn on the Apps Script API: [script.google.com/home/usersettings](https://script.google.com/home/usersettings) → **Google Apps Script API: On**.
 2. `npm install -g @google/clasp@3` then `clasp login` (opens a browser, approve).
    > Pin **3.x**. clasp 3 writes `{"tokens":{"default":{…}}}`, which clasp 2 cannot read — it fails with `Cannot read properties of undefined (reading 'access_token')`. The workflow pins 3.3.0 to match.
-3. `gh secret set CLASPRC_JSON < ~/.clasprc.json --repo <you>/octogo-tracker`
+3. `gh secret set CLASPRC_JSON < ~/.clasprc.json --repo <you>/inventory-and-sales`
 4. `SCRIPT_ID` — Apps Script → **Project Settings → Script ID**. Container-bound scripts do **not** appear in `clasp list-scripts`, so read it from the editor.
 5. `DEPLOYMENT_ID` — run `clasp list-deployments`. You'll see two: an `@HEAD` dev deployment and your versioned web app. **Pick the versioned one** — confirm by opening its `/exec` URL; the right one returns the ping JSON, the `@HEAD` one shows a Google sign-in page.
 

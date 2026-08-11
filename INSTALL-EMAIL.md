@@ -4,7 +4,7 @@ Hi,
 
 Here's how to get the Octogo app onto your phone. It takes about five minutes and it's free — no app store, no account to create.
 
-**Link:** https://nayt13santos.github.io/octogo-tracker/
+**Link:** https://nayt13santos.github.io/inventory-and-sales/
 
 I'll send you the **access code** in a separate message. Don't worry about it until Step 3.
 
