@@ -123,3 +123,32 @@ The 14 tests of `contract.test.js` **section 17** were added in this pass to clo
 | fmt() never renders -0 | 1 — fmt never prints -0 |
 
 The three races are worth naming, because they are the campaign's critical #4 and #5: a superseded reply applied anyway stamps **old money over a correction while the pill says "Synced"**; a superseded refusal leaves a **permanent false "not in the sheet" card** whose retry replays stale figures forever; and a stale bootstrap applied after a mid-flight save **deletes the just-saved day from the phone**. Section 17's async tests hold the actual reply in the air (the wire is a promise the test releases) while the real `enqueue` coalesces past it — no simulation of the engine, the engine itself.
+
+### The v2.5.1 verifier round, mutation-proofed
+
+The independent verifier re-ran every v2.5.0 finding and five survived: the stock carry floor undoing every local reduction, a queued first save re-priced in flight, an `in_cutoff` flip restating a saved day on re-save, a drained backlog payment counted nowhere, and a cleared wage written as ₱0 — plus the fallback note printing the very line the server's refusal exists to prevent, and the split-refusal toast blaming an expense. `contract.test.js` **section 18** covers all of them (the sync ones through the real `enqueue`/`drainQueue`/`doBootstrap` against the real server; `generateNote`'s two stops are source-pinned like the other DOM-bound guards, with the byte-compare of `noteRefusal` against the live server's sentence carrying the behavioural weight).
+
+Every new behaviour was reverted **one at a time on a scratch copy of the whole repo** — never the repo itself — with both suites run after each revert (baseline 126 + 140). **All 18 reverts turned at least one test red; none survived.**
+
+| revert (one behaviour each) | reds — first test that bites |
+| --- | --- |
+| phone: reinstate the carry floor (top local sums back up to server totals) | 1 — a local stock reduction moves on-hand at once |
+| server: bootstrap stops splitting the ledger totals at window_start | 1 — deliveries older than the bootstrap window still count |
+| server: a first save ignores the payload's displayed prices | 1 — a save queued through a price change lands at the money the tin showed |
+| server: a re-save ignores the stored in_cutoff snapshot | 1 — flipping "Counts in the cutoff" cannot move a saved day |
+| server: a first save ignores the payload's inCutoff flag | 1 — same test (the queued-through-the-flip night) |
+| server: storedPricesFor drops the in_cutoff snapshot | 2 — the flip test + the v2.5.0 stepper test |
+| phone: bentaPayload stops carrying the displayed snapshot | 3 — the re-emitted-REQUEST pin, the queued-night test, the flip test |
+| phone: computeDay classifies a loaded day by the LIVE flag | 1 — the flip test (Sales screen says ₱700) |
+| phone: validateBenta judges by the LIVE flag | 1 — the flip test (refuses a day the server accepts) |
+| phone: sentBuckets reads the LIVE flag | 1 — the flip test (stray cheese silent-zero half) |
+| phone: the Sales card renders by the LIVE flag | 1 — the screens-show-nori-apart source pin |
+| phone: storedPricesFor drops the in_cutoff snapshot | 2 — the flip test + the client price-snapshot test |
+| phone: the drain no longer re-bootstraps after landing work | 1 — a drained backlog payment stays subtracted |
+| phone: a blank standing amount travels as 0 again | 1 — a cleared "Wage per day" never writes ₱0 |
+| phone: a server refusal falls back to the local note again | 1 — a refused note is refused on the phone too |
+| phone: the demo/offline note skips the local refusal | 1 — same test (the demo-build pin) |
+| phone: noteRefusal never refuses anything | 1 — same test (the byte-compare against the live server) |
+| phone: a refused split is toasted as an expense again | 1 — a refused split is announced as a split |
+
+Two of these reverts are the money-movers the round exists to prevent: "a re-save ignores the stored in_cutoff snapshot" is one Maintenance tick restating a fortnight that has already been sent the moment the day is re-saved for a note edit, and "a first save ignores the payload's displayed prices" is a queued night booked ₱100 above what is physically in the tin, with nothing said.

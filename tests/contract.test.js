@@ -206,6 +206,11 @@ return {
   // tonight", the tin, and the day validator with its excluded-sku refusals.
   rawCutoffFlag, countInCutoff, excludedTonight, tinTotal,
   validateBenta, excludedRowError, isBoxSku,
+  // v2.5.1: the day-effective flag beside the day's prices, the local applier
+  // for a deleted expense (the stock ledger must move at once), the blank-
+  // omitting settings payload, and the phone's own note refusal.
+  cutoffOnDay, storedPricesFor, priceOnDay, applyLocalDeleteExpense,
+  maintSettingsPayload, noteRefusal,
   // Live refs so a test can put the client in demo / API / still-queued states.
   // enqueue() is not in the extracted slabs, so tests push onto q directly.
   cfg: config, q: queue
@@ -235,7 +240,10 @@ const CONTRACT = {
   'bootstrap.stockUsage[]':    [['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
   // v2.3.0 stock ledger. on_hand and the three numbers behind it are COMPUTED
   // server-side, so a camelCase slip here would show the owner ₱0 of stock.
-  'bootstrap.stockItems[]':    [['on_hand', 'onHand'], ['reorder_at', 'reorderAt'], ['opening_qty', 'openingQty'], ['opening_date', 'openingDate'], ['baseline_qty', 'baselineQty'], ['baseline_date', 'baselineDate'], ['delivered_since', 'deliveredSince'], ['used_since', 'usedSince']],
+  // delivered_before/used_before (v2.5.1) are the pre-window parts the phone
+  // ADDS to its own in-window rows — a slip here silently drops every delivery
+  // older than the bootstrap window from on-hand.
+  'bootstrap.stockItems[]':    [['on_hand', 'onHand'], ['reorder_at', 'reorderAt'], ['opening_qty', 'openingQty'], ['opening_date', 'openingDate'], ['baseline_qty', 'baselineQty'], ['baseline_date', 'baselineDate'], ['delivered_since', 'deliveredSince'], ['used_since', 'usedSince'], ['delivered_before', 'deliveredBefore'], ['used_before', 'usedBefore']],
   'bootstrap.stockCounts[]':   [['counted_qty', 'countedQty'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
   'bootstrap.cutoffInputs[]':  [['split_amount', 'splitAmount'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
   // `supplies_total` is gone with the retired supplies card; dropped_skus is the
@@ -1008,9 +1016,14 @@ test('CLIENT: reopening the day re-derives the identical total / GCash / Cash', 
     'a bucket was lost on the way back into the form');
 
   const payload = app.bentaPayload();
+  // PIN MOVED (v2.5.1, deliberate): each count row now ALSO carries the
+  // price/cheesePrice/inCutoff the screen displayed (camelCase, request side),
+  // so a save that sits queued through a Maintenance change still lands at the
+  // money — and the classification — the receipt and the tin showed.
   assert.deepStrictEqual(payload.counts.find(c => c.sku === 'box4'),
-    { sku: 'box4', sod: 10, eod: 0, cheeseQty: 2, gcashQty: 2, gcashCheeseQty: 1 },
-    'the re-emitted REQUEST must stay camelCase and carry all three buckets');
+    { sku: 'box4', sod: 10, eod: 0, cheeseQty: 2, gcashQty: 2, gcashCheeseQty: 1,
+      price: 50, cheesePrice: 60, inCutoff: true },
+    'the re-emitted REQUEST must stay camelCase and carry all three buckets plus the displayed snapshot');
   assert.ok(!has(payload, 'gcash'), 'the client must not send a typed GCash figure any more');
 
   const c = app.computeDay(payload);
@@ -2549,8 +2562,12 @@ test('the Cutoff screen block matches the server: excluded apart, note untouched
 // same way the slab markers are.
 test('the screens show nori apart: card badge, receipt line, tin, cutoff block, toggle', () => {
   const render = slab('function renderBenta(){', 'const CHEV =');
-  assert.ok(/inCutoffFlag\(pr\.in_cutoff\)/.test(render),
-    'the Sales card must read the flag off the price row');
+  // PIN MOVED (v2.5.1, deliberate): the card reads THE DAY's effective flag —
+  // the loaded row's own snapshot first, then the live price-row flag — the
+  // same reading computeDay, validateBenta and the payload use, so one flip in
+  // Maintenance cannot make the card and the receipt tell two stories.
+  assert.ok(/cutoffOnDay\(daySnap,\s*pr\)/.test(render),
+    'the Sales card must read the DAY\'s effective flag (snapshot first, then the price row)');
   assert.ok(/badge-excl/.test(render), 'an excluded sku must be visibly marked on its card');
   assert.ok(/excl-note/.test(render), 'and say in one short line where its money goes');
   assert.ok(/inCut \?/.test(render), 'no payment buckets on a sku with no payment split');
@@ -2796,8 +2813,11 @@ test('the phone snapshots the flag when IT saves a day, and the server reply agr
 test('the server reply corrects a snapshot the phone guessed wrong', () => {
   const app = syncedClient(NF.boot);
   // This phone has not seen the Maintenance change yet: its price list still says
-  // nori counts IN, so its own optimistic write snapshots the wrong answer.
+  // nori counts IN. On a date it holds NO stored rows for, the live flag is all
+  // it has, so its own optimistic write snapshots the wrong answer. (With stored
+  // rows the snapshot wins instead — the v2.5.1 test below this one.)
   app.state.prices.find(p => p.sku === 'nori').in_cutoff = true;
+  delete app.state.counts[N_DAY_A];                 // a phone that never held this date
   const payload = noriDay(N_DAY_A, 'box4', 10, 2, 12, 'nori-day-a');
   app.applyLocalDay(payload);
   assert.strictEqual(app.state.counts[N_DAY_A].find(r => r.sku === 'nori').in_cutoff, true,
@@ -3073,6 +3093,10 @@ return {
   loadBentaForm, bentaPayload, computeDay, computeCutoff, validateBenta,
   entryDateError, cutoffExpenseDate, previewIncomplete, cutoffMissingDays,
   currentPeriod, periodKey, storedPricesFor, priceOnDay,
+  // v2.5.1: the server-derived figures the drain must refresh, the day-effective
+  // flag, the blank-omitting settings payload and the phone's note refusal.
+  backlogBalance, cutoffOnDay, stockStatusOf, stockStatusList,
+  maintSettingsPayload, noteRefusal,
   num, fmt, peso
 };`;
   // eslint-disable-next-line no-new-func
@@ -3303,9 +3327,10 @@ test('reopening a saved day shows the money it was SAVED at (client price snapsh
   assert.strictEqual(app.num(app.state.prices.find(p => p.sku === 'box4').price), 60,
     'precondition: the live price list moved');
 
-  // …the phone's own snapshot map still answers that date at ITS prices…
+  // …the phone's own snapshot map still answers that date at ITS prices —
+  // and carries the day's in_cutoff snapshot beside them (v2.5.1)…
   const stored = app.storedPricesFor(D);
-  assert.deepStrictEqual(stored['box4'], { price: 50, cheese_price: 60 },
+  assert.deepStrictEqual(stored['box4'], { price: 50, cheese_price: 60, in_cutoff: true },
     'storedPricesFor must read the snapshot off the count rows');
   assert.deepStrictEqual(app.priceOnDay(stored, app.state.prices.find(p => p.sku === 'box4')),
     { price: 50, cheese_price: 60 });
@@ -3454,6 +3479,405 @@ test('save day: typed work survives the tear-off, slips ask one question, error 
   assert.ok(/confirm\('This day has ' \+ peso\(money\)/.test(onToggle),
     'closing a day with sales on the form must ask, naming the amount');
   assert.ok(/ev\.target\.checked = false;/.test(onToggle), 'and a "no" leaves the day open');
+});
+
+// ---------------------------------------------------------------------------
+console.log('\n--- 18. v2.5.1: the verifier round — stock reductions, queued snapshots, drains, blanks ---');
+
+// F#1 (stock-ledger, major). The old "carry floor" topped the phone's local sums
+// back up to the server's whole-history totals, so every LOCAL REDUCTION — a
+// corrected usage, a re-closed day, a deleted delivery — was silently undone
+// until the next full bootstrap. The floor is DELETED: bootstrap now ships the
+// pre-window parts (delivered_before/used_before) and the phone adds its own
+// in-window rows, so its mirror is the truth for everything it can see.
+test('a local stock reduction moves on-hand at once — the carry floor is gone (v2.5.1)', () => {
+  const srv = loadServer();
+  const D = ymdDaysAgo(6);
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveStockItems',
+    payload: { rows: [{ product: 'Takoyaki Flour', unit: 'pack', reorderAt: 2, active: true }] } }).ok, true);
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveExpense', payload: {
+    date: D, category: 'Supplies', item: 'harina', amount: 600, backlogRef: '', notes: '',
+    stockProduct: 'Takoyaki Flour', stockQty: 6, entryId: 'st-deliv' } }).ok, true);
+  const day = { date: D, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [], stock: [{ product: 'Takoyaki Flour', qty: 5 }], entryId: 'st-day' };
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: day }).ok, true);
+
+  const app = syncedClient(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+  const flour = () => app.stockStatusList().find(s => s.product === 'Takoyaki Flour');
+  assert.strictEqual(flour().on_hand, 1, 'precondition: 0 + 6 delivered − 5 opened');
+
+  // (a) a usage typo corrected 5 -> 2: three packs come straight back.
+  app.applyLocalDay(Object.assign({}, day, { stock: [{ product: 'Takoyaki Flour', qty: 2 }] }));
+  assert.strictEqual(flour().on_hand, 4,
+    'the corrected figure was topped back up to the server total — the reduction never landed on screen');
+  assert.strictEqual(flour().used_since, 2, 'and the card explains it with the corrected figure');
+
+  // (b) the day re-saved Closed returns its units.
+  app.applyLocalDay(Object.assign({}, day, { closed: true }));
+  assert.strictEqual(flour().on_hand, 6, 'a closed day opened nothing');
+
+  // (c) the delivery deleted drops on-hand AND fires the low warning NOW.
+  app.applyLocalDeleteExpense({ entryId: 'st-deliv' });
+  assert.strictEqual(flour().on_hand, 0, 'a deleted delivery must leave the shelf');
+  assert.strictEqual(flour().low, true,
+    'reorder point 2: the warning must fire on the corrected figure, not wait for the next bootstrap');
+
+  // (d) a retyped delivery counts at its corrected size, and clears a warning
+  // that no longer holds.
+  const deliv = qty => app.applyLocalExpense({ date: D, category: 'Supplies', item: 'harina',
+    amount: 600, backlogRef: '', notes: '', stockProduct: 'Takoyaki Flour', stockQty: qty,
+    entryId: 'st-deliv' });
+  deliv(40);
+  assert.strictEqual(flour().on_hand, 40, '40 mistyped');
+  deliv(4);
+  assert.strictEqual(flour().on_hand, 4, 'retyped as 4: the mirror is the truth');
+  assert.strictEqual(flour().low, false, 'a false low must clear with the correction');
+});
+
+test('deliveries older than the bootstrap window still count — split out, never topped up (v2.5.1)', () => {
+  const srv = loadServer();
+  const OLD = ymdDaysAgo(120);                      // strictly before window_start
+  const D = ymdDaysAgo(4);
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveExpense', payload: {
+    date: OLD, category: 'Supplies', item: 'harina', amount: 1000, backlogRef: '', notes: '',
+    stockProduct: 'Takoyaki Flour', stockQty: 10, entryId: 'old-deliv' } }).ok, true);
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
+    date: D, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [], stock: [{ product: 'Takoyaki Flour', qty: 3 }], entryId: 'st-day2' } }).ok, true);
+
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} });
+  const item = boot.data.stockItems.find(x => x.product === 'Takoyaki Flour');
+  assert.strictEqual(item.delivered_before, 10, 'the pre-window part must ship split out');
+  assert.strictEqual(item.used_before, 0, 'the usage is inside the window');
+  assert.strictEqual(item.on_hand, 7, 'the server counts the whole history');
+  assert.ok(!boot.data.expenses.some(e => e.entry_id === 'old-deliv'),
+    'precondition: the old delivery is OUTSIDE the snapshot — the phone cannot see its row');
+
+  const app = syncedClient(boot.data);
+  assert.strictEqual(app.stockStatusList().find(s => s.product === 'Takoyaki Flour').on_hand, 7,
+    'delivered_before + the phone\'s own in-window rows must reach the server figure — counted once');
+
+  // A phone that still HOLDS a pre-window row (kept local history from an
+  // earlier, wider snapshot) must not count it twice — that row is already
+  // inside delivered_before.
+  app.state.expenses['old-deliv'] = { date: OLD, category: 'Supplies', item: 'harina',
+    amount: 1000, backlog_ref: '', notes: '', entry_id: 'old-deliv', updated_at: '',
+    stock_product: 'Takoyaki Flour', stock_qty: 10 };
+  assert.strictEqual(app.stockStatusList().find(s => s.product === 'Takoyaki Flour').on_hand, 7,
+    'a pre-window row this phone kept is already inside delivered_before — once, not twice');
+
+  // A NEWER local stocktake re-baselines: the pre-window parts are already
+  // inside the counted figure, so they must NOT be added a second time.
+  app.applyLocalStockCount({ date: ymdDaysAgo(2), product: 'Takoyaki Flour', qty: 9, entryId: 'st-cnt' });
+  assert.strictEqual(app.stockStatusList().find(s => s.product === 'Takoyaki Flour').on_hand, 9,
+    'a local count is an end-of-day truth — nothing before it may be re-added');
+});
+
+// F#15 repro B (money-arithmetic, major). A night entered offline is priced by
+// the phone at the prices ON SCREEN; if the queued save only reaches the sheet
+// after a Maintenance price change, the sheet must still book the money that is
+// physically in the tin. The payload now carries the displayed snapshot and the
+// server uses it for a sku's first row on the date.
+atest('a save queued through a price change lands at the money the tin showed (v2.5.1)', async () => {
+  const srv = loadServer();
+  const app = loadSyncClient();
+  app.cfg.apiUrl = 'https://api.example/exec';
+  app.cfg.token = srv.token;
+  app.applyBootstrap(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+
+  const D = ymdDaysAgo(1);
+  app.loadBentaForm(D);
+  const row = app.benta.rows.find(r => r.sku === 'box4');
+  row.sod = 10; row.cheese = 2;
+  const shown = app.computeDay(app.bentaPayload());
+  assert.strictEqual(shown.total, 520, 'precondition: the receipt and the tin said ₱520 (8×50 + 2×60)');
+  const payload = Object.assign(app.bentaPayload(), { entryId: 'queued-night' });
+  const sent = payload.counts.find(c => c.sku === 'box4');
+  assert.deepStrictEqual([sent.price, sent.cheesePrice, sent.inCutoff], [50, 60, true],
+    'the payload must carry the DISPLAYED snapshot, camelCase like every request key');
+  app.applyLocalDay(payload);
+  app.enqueue('saveDay', payload);                  // offline: it just sits queued
+
+  // The owner raises the prices while that save is still in the queue.
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box4', price: 60, cheesePrice: 70, active: true }] } }).ok, true);
+
+  app.hooks.fetch = liveWire(srv);
+  await app.drainQueue();
+  assert.strictEqual(app.queue.length, 0, 'the night must land');
+
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} });
+  assert.strictEqual(boot.data.days.find(d => d.date === D).total, 520,
+    'the sheet booked the night at the NEW prices — ₱100 more than is physically in the tin, with nothing said');
+  const line = boot.data.counts.find(c => c.date === D && c.sku === 'box4');
+  assert.strictEqual(line.price, 50, 'the stored snapshot is the price the night was SOLD at');
+  assert.strictEqual(line.cheese_price, 60);
+  // And the phone's own mirror agrees after the drain's refresh.
+  assert.strictEqual(app.state.days[D].total, 520);
+  // A fresh night after the change prices at the new list, as it should.
+  const fresh = post(srv.ctx, { token: srv.token, action: 'saveDay',
+    payload: dayPayload(ymdDaysAgo(0), 1, 'fresh-night') });
+  assert.strictEqual(fresh.data.total, 60);
+});
+
+// F#16 (money-arithmetic, major). Flipping "Counts in the cutoff" must never
+// move an already-saved day's money between the cutoff and the excluded block —
+// on the Sales screen, on the Cutoff screen, or in the sheet via a re-save.
+atest('flipping "Counts in the cutoff" cannot move a saved day — one story everywhere (v2.5.1)', async () => {
+  const srv = loadServer();
+  const D = ymdDaysAgo(2);
+  const day = { date: D, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [
+      { sku: 'box4', sod: 10, eod: 0, cheeseQty: 0, gcashQty: 0, gcashCheeseQty: 0 },
+      { sku: 'nori', sod: 8, eod: 0, cheeseQty: 0, gcashQty: 0, gcashCheeseQty: 0 }
+    ], entryId: 'flip-day' };
+  const saved = post(srv.ctx, { token: srv.token, action: 'saveDay', payload: day });
+  assert.strictEqual(saved.data.total, 500, 'precondition: box4 counted');
+  assert.strictEqual(saved.data.excluded_total, 200, 'precondition: nori kept out');
+
+  // The owner flips nori INTO the cutoff, after the night was saved.
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'savePrices',
+    payload: { rows: [{ sku: 'nori', price: 25, cheesePrice: 0, active: true, inCutoff: true }] } }).ok, true);
+
+  const app = loadSyncClient();
+  app.cfg.apiUrl = 'https://api.example/exec';
+  app.cfg.token = srv.token;
+  app.applyBootstrap(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+
+  // SALES screen: the loaded day still reads ₱500 counted + ₱200 kept out.
+  app.loadBentaForm(D);
+  const c = app.computeDay(app.bentaPayload());
+  assert.strictEqual(c.total, 500,
+    'the Sales screen re-classified a saved night by the LIVE flag — it said ₱700 while the Cutoff screen said ₱500');
+  assert.strictEqual(c.excluded, 200);
+  // CUTOFF screen: the same story.
+  const per = app.currentPeriod(D);
+  const f = app.computeCutoff(per);
+  assert.strictEqual(f.total, 500);
+  assert.strictEqual(f.excluded, 200);
+
+  // A note-only re-save writes the SAME classification back to the sheet.
+  app.benta.notes = 'left the light on';
+  const resave = Object.assign(app.bentaPayload(), { entryId: 'flip-day' });
+  assert.strictEqual(resave.counts.find(x => x.sku === 'nori').inCutoff, false,
+    'the payload carries the day\'s own snapshot, not the live flag');
+  app.applyLocalDay(resave);
+  app.enqueue('saveDay', resave);
+  app.hooks.fetch = liveWire(srv);
+  await app.drainQueue();
+  const after = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} });
+  const sheetDay = after.data.days.find(d => d.date === D);
+  assert.strictEqual(sheetDay.total, 500,
+    'a note-only re-save moved ₱200 into a cutoff figure that may already have been sent');
+  assert.strictEqual(sheetDay.excluded_total, 200);
+  // An OLD build's queued re-save carries no snapshot keys at all — the sheet's
+  // own stored snapshot must still win over the live flag.
+  const plain = post(srv.ctx, { token: srv.token, action: 'saveDay',
+    payload: Object.assign({}, day, { notes: 'sent by a v2.5.0 phone' }) });
+  assert.strictEqual(plain.ok, true, plain.error);
+  assert.strictEqual(plain.data.total, 500,
+    'a legacy re-save payload re-classified the night by the live flag');
+  assert.strictEqual(plain.data.excluded_total, 200);
+  // Tonight — a date with no stored rows — the flip applies, as it should.
+  const fresh = post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
+    date: ymdDaysAgo(0), closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'nori', sod: 4, eod: 0, cheeseQty: 0, gcashQty: 0, gcashCheeseQty: 0 }],
+    entryId: 'fresh-nori' } });
+  assert.strictEqual(fresh.data.total, 100, 'a NEW day counts nori in — that is what the flip is for');
+  assert.strictEqual(fresh.data.excluded_total, 0);
+
+  // The other direction — the old dead end: a night saved while nori counted IN
+  // (with a GCash bucket) keeps its buckets and its money after nori is
+  // excluded. No refusal, no stepper dance, nothing moves.
+  const srv2 = loadServer();
+  assert.strictEqual(post(srv2.ctx, { token: srv2.token, action: 'savePrices',
+    payload: { rows: [{ sku: 'nori', price: 25, cheesePrice: 0, active: true, inCutoff: true }] } }).ok, true);
+  const D2 = ymdDaysAgo(3);
+  const inDay = post(srv2.ctx, { token: srv2.token, action: 'saveDay', payload: {
+    date: D2, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'nori', sod: 6, eod: 0, cheeseQty: 0, gcashQty: 2, gcashCheeseQty: 0 }],
+    entryId: 'in-day' } });
+  assert.strictEqual(inDay.data.total, 150, 'precondition: nori counted in, 6 × 25');
+  assert.strictEqual(inDay.data.gcash, 50);
+
+  // A queued FIRST save crosses the flip too: this phone entered a night while
+  // its price list still said nori counts IN (with a GCash bucket), and the
+  // flip lands before its queued save does. The payload's own flag must win —
+  // judged by the live flag the server would REFUSE the bucket and bounce a
+  // legitimately sold night into a rejection card.
+  const app3 = loadSyncClient();
+  app3.cfg.apiUrl = 'https://api.example/exec';
+  app3.cfg.token = srv2.token;
+  app3.applyBootstrap(post(srv2.ctx, { token: srv2.token, action: 'bootstrap', payload: {} }).data);
+  const D3 = ymdDaysAgo(1);
+  app3.loadBentaForm(D3);
+  const n3 = app3.benta.rows.find(r => r.sku === 'nori');
+  n3.sod = 5; n3.gcash = 2;
+  const queued3 = Object.assign(app3.bentaPayload(), { entryId: 'queued-in-day' });
+  assert.strictEqual(queued3.counts.find(x => x.sku === 'nori').inCutoff, true,
+    'precondition: the payload snapshots what the screen showed');
+
+  // NOW the owner takes nori out of the cutoff…
+  assert.strictEqual(post(srv2.ctx, { token: srv2.token, action: 'savePrices',
+    payload: { rows: [{ sku: 'nori', price: 25, cheesePrice: 0, active: true, inCutoff: false }] } }).ok, true);
+
+  // …and the queued night lands AFTER the flip, telling the story it was sold in.
+  const landed3 = post(srv2.ctx, { token: srv2.token, action: 'saveDay', payload: queued3 });
+  assert.strictEqual(landed3.ok, true,
+    'the live flag refused a night sold while nori counted in: ' + landed3.error);
+  assert.strictEqual(landed3.data.total, 125, '5 × 25 in the total, as the receipt showed');
+  assert.strictEqual(landed3.data.gcash, 50, 'the GCash she actually took stays in the GCash figure');
+  assert.strictEqual(landed3.data.lines.find(l => l.sku === 'nori').in_cutoff, true,
+    'and the row snapshots the flag the night was sold under');
+  const app2 = loadSyncClient();
+  app2.cfg.apiUrl = 'https://api.example/exec';
+  app2.cfg.token = srv2.token;
+  app2.applyBootstrap(post(srv2.ctx, { token: srv2.token, action: 'bootstrap', payload: {} }).data);
+  app2.loadBentaForm(D2);
+  // The silent-zero rule follows the DAY's flag too: nori counts IN for this
+  // day, and a simple sku counting in has no cheese version — a stray draft
+  // figure is sent as 0, exactly what the server will accept.
+  const noriRow = app2.benta.rows.find(r => r.sku === 'nori');
+  noriRow.cheese = 1;
+  assert.strictEqual(app2.bentaPayload().counts.find(x => x.sku === 'nori').cheeseQty, 0,
+    'a stray cheese figure on a simple sku counting IN must be sent as 0 — judged by the day\'s flag');
+  noriRow.cheese = 0;
+  assert.deepStrictEqual(Object.keys(app2.validateBenta()), [],
+    'the phone refused a day the server accepts — the excluded-nori dead end again');
+  const re = post(srv2.ctx, { token: srv2.token, action: 'saveDay',
+    payload: Object.assign(app2.bentaPayload(), { entryId: 'in-day' }) });
+  assert.strictEqual(re.ok, true, 'the re-save must land: ' + re.error);
+  assert.strictEqual(re.data.total, 150, 'its money stays IN the cutoff, where it was saved');
+  assert.strictEqual(re.data.gcash, 50, 'its GCash bucket stays too');
+});
+
+// F#22 (offline-queue, major). A backlog payment that DRAINED successfully was
+// counted nowhere: no longer queued (so no local subtraction) and not in the
+// stale server balance. The drain now re-bootstraps after anything lands.
+atest('a drained backlog payment stays subtracted — the drain re-bootstraps (v2.5.1)', async () => {
+  const srv = loadServer();
+  const app = loadSyncClient();
+  app.cfg.apiUrl = 'https://api.example/exec';
+  app.cfg.token = srv.token;
+  app.hooks.fetch = liveWire(srv);
+  assert.strictEqual(await app.doBootstrap(), true);
+
+  const bl = app.state.backlogs.find(b => b.name === 'Deposit Ilog Mama');
+  assert.ok(bl && app.num(bl.total_amount) === 10000, 'precondition: the seeded ₱10,000 backlog');
+  assert.strictEqual(app.backlogBalance(bl), 10000);
+
+  const D = ymdDaysAgo(1);
+  for (let i = 1; i <= 4; i++){
+    const p = { date: D, category: 'Backlog', item: 'hulog ' + i, amount: 1000,
+      backlogRef: 'Deposit Ilog Mama', notes: '', stockProduct: '', stockQty: '',
+      entryId: 'blg-' + i };
+    app.applyLocalExpense(p);
+    app.enqueue('saveExpense', p);
+  }
+  assert.strictEqual(app.backlogBalance(app.state.backlogs.find(b => b.name === 'Deposit Ilog Mama')),
+    6000, 'while QUEUED the payments are subtracted locally');
+
+  await app.drainQueue();
+  assert.strictEqual(app.queue.length, 0, 'all four payments landed');
+  const fresh = app.state.backlogs.find(b => b.name === 'Deposit Ilog Mama');
+  assert.strictEqual(app.num(fresh.balance), 6000,
+    'the drain must refresh the server-computed balance in the SAME sync');
+  assert.strictEqual(app.backlogBalance(fresh), 6000,
+    'four drained payments read as if they never happened until the next app start');
+});
+
+// F#31 (config-writers, major). A cleared "Wage per day" travelled as ₱0 (num('')
+// is 0) and silently wrote daily_salary = 0 — every later day snapshotted a ₱0
+// wage and Remaining was overstated by a day's wage at a time. Blank fields are
+// now OMITTED from the payload entirely; an explicit 0 must be typed.
+test('a cleared "Wage per day" never writes ₱0 — blank means unchanged (v2.5.1)', () => {
+  const app = loadSyncClient();
+  const cleared = app.maintSettingsPayload({ daily_salary: '', split_default: 4000,
+    mama_per_cutoff: '', electric_per_cutoff: 500, branch: 'Tañong', staff: '' });
+  assert.deepStrictEqual(cleared, { branch: 'Tañong', split_default: 4000, electric_per_cutoff: 500 },
+    'a blank field must be OMITTED — not sent as 0, not sent as ""');
+  assert.strictEqual(app.maintSettingsPayload({ daily_salary: 0, branch: 'Tañong' }).daily_salary, 0,
+    'an explicit 0 is a figure ("nobody is paid") and travels');
+  assert.strictEqual(app.maintSettingsPayload({ daily_salary: '0', branch: 'Tañong' }).daily_salary, 0,
+    'typed as text too');
+  // The screen must actually build its payload from that one rule (DOM code ->
+  // source pin, like the other screen guards).
+  const save = slab('function saveMaintSettings(){', 'function saveMaintStock(){');
+  assert.ok(/maintSettingsPayload\(maintConst\)/.test(save),
+    'saveMaintSettings must send maintSettingsPayload(maintConst), nothing hand-rolled');
+
+  // End to end: the cleared field reaches the server as NO key at all, so the
+  // next day still snapshots the standing rate.
+  const srv = loadServer();
+  const r = post(srv.ctx, { token: srv.token, action: 'saveSettings',
+    payload: { settings: cleared, entryId: 'wage-clear' } });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.ok(r.data.saved.indexOf('daily_salary') === -1, 'daily_salary must not be written');
+  const dayR = post(srv.ctx, { token: srv.token, action: 'saveDay',
+    payload: dayPayload(ymdDaysAgo(1), 2, 'wage-day') });
+  assert.strictEqual(dayR.data.salary, 200,
+    'clear-then-save costed the wage: the next saved day snapshotted ₱0');
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} })
+    .data.settings.daily_salary, 200, 'the sheet keeps its figure');
+});
+
+// F#8 residual (new_defects #1). When the server REFUSES the note, the phone
+// must not build its own copy — the local note would contain exactly the line
+// the refusal exists to prevent ("Supplies - -400"). Demo/offline apply the
+// same refusal before building anything.
+test('a refused note is refused on the phone too — no local fallback, no Copy/Share (v2.5.1)', () => {
+  const srv = loadServer();
+  const D = ymdDaysAgo(3);
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay',
+    payload: dayPayload(D, 10, 'neg-day') }).ok, true);
+  // Only a hand-edited row can be negative (saveExpense refuses ≤ 0), so edit
+  // the sheet by hand exactly as the finding did.
+  srv.ss.getSheetByName('Expenses').appendRow(
+    [D, 'Supplies', 'refund', -500, '', '', 'neg-x', '2026-08-01T00:00:00', '', '']);
+
+  const app = syncedClient(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+  const per = app.currentPeriod(D);
+  const served = post(srv.ctx, { token: srv.token, action: 'cutoff',
+    payload: { start: per.start, end: per.end, dryRun: false } });
+  assert.strictEqual(served.ok, false, 'precondition: the server refuses the note');
+  assert.match(served.error, /adds up to less than zero/);
+
+  assert.strictEqual(app.noteRefusal(per), served.error,
+    'the phone must refuse its OWN copy in the server\'s sentence, byte for byte');
+  assert.strictEqual(app.noteRefusal({ start: '2020-01-01', end: '2020-01-15' }), '',
+    'a clean period builds normally');
+  // and the phone note it would otherwise have built is exactly the artifact
+  // the refusal names — proof the local guard is load-bearing, not decoration.
+  assert.match(app.buildNote(app.computeCutoff(per), per), /Supplies - -500/);
+
+  // generateNote wires both stops (it renders, so: source pins).
+  const gen = slab('async function generateNote(){', 'async function copyNote(){');
+  const srvStop = gen.indexOf('if (err && err.server)');
+  assert.ok(srvStop !== -1, 'a server refusal must be shown and STOP — no fallback note');
+  assert.ok(srvStop < gen.indexOf('Showing the copy from this phone'),
+    'checked BEFORE the network-trouble fallback can offer a local copy');
+  const localGuard = gen.indexOf('noteRefusal(per)');
+  assert.ok(localGuard !== -1 && localGuard < gen.lastIndexOf('demo:true'),
+    'the demo/offline note must apply the same refusal before it is built');
+});
+
+// The cosmetic third new_defect: a refused split was toasted as "refused an
+// expense", sending her to the wrong screen's entries.
+atest('a refused split is announced as a split, not an expense (v2.5.1)', async () => {
+  const srv = loadServer();
+  const app = loadSyncClient();
+  app.cfg.apiUrl = 'https://api.example/exec';
+  app.cfg.token = srv.token;
+  app.hooks.fetch = liveWire(srv);
+  app.enqueue('saveCutoffSplit', { start: '2026-07-16', end: '2026-07-31',
+    amount: 3000.01, entryId: 'split-centavos' });
+  await app.drainQueue();
+  assert.strictEqual(app.attention.length, 1, 'the refusal must card');
+  assert.strictEqual(app.attention[0].action, 'saveCutoffSplit');
+  const toasts = app.hooks.toasts.join(' | ');
+  assert.match(toasts, /refused the split/, 'the toast must name the split');
+  assert.ok(!/refused an expense/.test(toasts),
+    'a split refusal announced as "an expense" sends her hunting through the wrong screen');
 });
 
 // ---------------------------------------------------------------------------

@@ -43,7 +43,8 @@
  *            gcash_cheese_qty, gcash_amount, backlog_ref, total_amount,
  *            start_date, per_partner, note_text, generated_at, counted_qty,
  *            split_amount, stock_product, stock_qty, on_hand, reorder_at,
- *            baseline_qty, baseline_date, delivered_since, used_since)
+ *            baseline_qty, baseline_date, delivered_since, used_since,
+ *            delivered_before, used_before)
  *            — they mirror the sheet's own column headers and the shape the
  *            PWA persists in localStorage (state_v1). The only camelCase names
  *            a response may carry are the bootstrap/range CONTAINER keys
@@ -159,9 +160,27 @@
  *   - branch strips CR/LF on read and in saveSettings (an embedded newline
  *     would corrupt the note's line structure); doPost answers a null/absent
  *     JSON body with the friendly parse error, never a raw TypeError.
+ *
+ * WHAT CHANGED IN v2.5.1 — the verifier round (the five findings that survived
+ * the v2.5.0 pass):
+ *   - STOCK SPLIT AT THE WINDOW: bootstrap's stockItems rows gain
+ *     `delivered_before` / `used_before` — the ledger totals STRICTLY BEFORE
+ *     window_start (and strictly after the baseline). The phone adds its OWN
+ *     in-window rows on top, so a local correction/deletion moves on-hand
+ *     immediately; its old "carry floor" (topping local sums back up to the
+ *     whole-history totals) is deleted.
+ *   - SNAPSHOTS TRAVEL WITH THE FIRST SAVE: a saveDay count may carry the
+ *     `price` / `cheesePrice` / `inCutoff` the phone DISPLAYED (camelCase,
+ *     request side). They are used for a sku's FIRST row on the date, so a
+ *     save queued offline lands at the money the receipt and the tin showed.
+ *     Stored per-date snapshots still win on a re-save.
+ *   - RE-SAVE CLASSIFIES BY THE STORED in_cutoff SNAPSHOT (same precedence as
+ *     prices, incl. the bucket guards), so a Maintenance flip never moves an
+ *     already-saved day's money between the cutoff and the excluded block —
+ *     not even via a note-only re-save from an older phone's queue.
  */
 
-var VERSION = '2.5.0';
+var VERSION = '2.5.1';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -424,11 +443,14 @@ function apiBootstrap(ss, settings) {
   return {
     settings: publicSettings,
     prices: prices,
-    // Each stock item carries its COMPUTED on-hand figure and the three numbers
-    // it is made of, so the phone can show it and explain it without holding
-    // history it does not have. Deliveries and usage are counted over the WHOLE
-    // history (not the 90-day window) or on-hand would be wrong.
-    stockItems: stockItemsWithStatus(ss, expensesAll, usageAll, countsAll),
+    // Each stock item carries its COMPUTED on-hand figure and the numbers it is
+    // made of, so the phone can show it and explain it without holding history
+    // it does not have. Deliveries and usage are counted over the WHOLE history
+    // (not the 90-day window) or on-hand would be wrong — and the two totals
+    // ship SPLIT at window_start (delivered_before / used_before, v2.5.1), so
+    // the phone can add its OWN in-window rows on top of the pre-window parts
+    // and a local correction moves on-hand immediately.
+    stockItems: stockItemsWithStatus(ss, expensesAll, usageAll, countsAll, since),
     backlogs: backlogs,
     // The window this reply SPEAKS FOR. The phone needs it stated explicitly:
     // inferring the window from the dates present cannot distinguish "this date
@@ -561,6 +583,28 @@ function apiSaveDay(ss, settings, payload) {
     if (seenSkus[sku]) throw new Error('Duplicate counts for sku "' + sku + '".');
     seenSkus[sku] = true;
 
+    // --- Whether THIS LINE's money counts (v2.5.1). Resolved with the same
+    // precedence as the prices below, and BEFORE the bucket guards, because it
+    // is what they guard:
+    //   1. the snapshot already stored on this date's own row — a re-save is a
+    //      correction of that night, never a re-classification of it (a blank
+    //      legacy snapshot reads TRUE, same as everywhere else: its money
+    //      provably reached `total` when the day was saved);
+    //   2. the flag the PHONE DISPLAYED when the night was entered, carried on
+    //      the payload (`inCutoff`) — so a save queued offline lands telling
+    //      the story the receipt and the tin told, not whatever the flag
+    //      happens to say when it finally syncs;
+    //   3. the current Prices flag — all a fresh save from an older build has.
+    var stored = storedPrices[sku];
+    var inCutoff;
+    if (stored) {
+      inCutoff = countCutoffFlag(stored.in_cutoff);
+    } else if (c.inCutoff !== null && c.inCutoff !== undefined && asStr(c.inCutoff) !== '') {
+      inCutoff = asCutoffFlag(c.inCutoff);
+    } else {
+      inCutoff = p.in_cutoff;
+    }
+
     var sod = intOrThrow(c.sod, p.label + ' SOD');
     var eod = intOrThrow(c.eod, p.label + ' EOD');
     if (sod < 0) throw new Error(p.label + ': SOD cannot be negative.');
@@ -609,7 +653,10 @@ function apiSaveDay(ss, settings, payload) {
     // Refusing says so out loud, names the item and names the bucket to zero.
     // The excluded money then behaves exactly as the owner asked: one plain
     // amount he settles himself, with no cash/GCash split to get wrong.
-    if (!p.in_cutoff) {
+    // Guarded on the EFFECTIVE flag above, not the live Prices flag: a day
+    // saved while the sku counted IN keeps its buckets on a re-save after the
+    // sku was excluded, because its money is still classified IN (v2.5.1).
+    if (!inCutoff) {
       var buckets = [];
       if (cheeseQty !== 0) buckets.push('cheese');
       if (gcashQty !== 0) buckets.push('GCash');
@@ -650,13 +697,18 @@ function apiSaveDay(ss, settings, payload) {
 
     // --- The EFFECTIVE prices for this line (v2.5.0). A date being RE-SAVED
     // reuses the prices already stored on its own rows — a correction weeks
-    // later fixes the count, it does not re-price the night. A sku newly added
-    // to the day, or a legacy row whose price cells are blank, uses the current
-    // Prices tab — the only answer available, and the same one a fresh save
-    // would have used.
-    var stored = storedPrices[sku];
-    var price = (stored && asStr(stored.price) !== '') ? asNum(stored.price) : p.price;
-    var cheesePrice = (stored && asStr(stored.cheese_price) !== '') ? asNum(stored.cheese_price) : p.cheese_price;
+    // later fixes the count, it does not re-price the night. A sku's FIRST row
+    // on a date uses the prices the PHONE DISPLAYED when the night was entered,
+    // carried on the payload (`price`/`cheesePrice`, v2.5.1) — so a save queued
+    // offline lands at the money the receipt and the tin showed, never at
+    // whatever the price list says when it finally syncs. Only then the current
+    // Prices tab — the only answer left for a legacy payload or a blank cell.
+    var sentPrice = payloadPriceOrThrow(c.price, p.label + ' price');
+    var sentCheese = payloadPriceOrThrow(c.cheesePrice, p.label + ' cheese price');
+    var price = (stored && asStr(stored.price) !== '') ? asNum(stored.price)
+      : (sentPrice !== '' ? sentPrice : p.price);
+    var cheesePrice = (stored && asStr(stored.cheese_price) !== '') ? asNum(stored.cheese_price)
+      : (sentCheese !== '' ? sentCheese : p.cheese_price);
 
     // A blank/zero price on a sku that is still SELLING books the night at
     // nothing — the server-side mirror of the savePrices guard (v2.5.0). Only a
@@ -688,10 +740,12 @@ function apiSaveDay(ss, settings, payload) {
       cheese_qty: cheeseQty, gcash_qty: gcashQty, gcash_cheese_qty: gcashCheeseQty,
       regular_qty: regularQty,
       amount: round2(amount), gcash_amount: round2(gcashAmount),
-      // Whether this line's money COUNTED. Carried on the line (and returned to
-      // the phone) so the receipt can print an excluded sku below the totals
-      // instead of leaving the owner to work out why they do not add up.
-      in_cutoff: p.in_cutoff,
+      // Whether this line's money COUNTED — the EFFECTIVE flag resolved above
+      // (stored snapshot, then the payload's, then the live flag). Carried on
+      // the line (and returned to the phone) so the receipt can print an
+      // excluded sku below the totals instead of leaving the owner to work out
+      // why they do not add up.
+      in_cutoff: inCutoff,
       // The prices the money above was computed from — the rest of the snapshot.
       price: round2(price), cheese_price: round2(cheesePrice)
     });
@@ -859,10 +913,26 @@ function storedPricesFor(ss, date) {
     if (!sku || out[sku]) continue;
     out[sku] = {
       price: cellOf(r, t, 'price'),
-      cheese_price: cellOf(r, t, 'cheese_price')
+      cheese_price: cellOf(r, t, 'cheese_price'),
+      // The in_cutoff snapshot stored beside them (v2.5.1): a re-save must also
+      // reuse the CLASSIFICATION the date was saved with, or a Maintenance flip
+      // moves an already-saved day's money between the cutoff and the excluded
+      // block the moment the day is re-saved for a note edit.
+      in_cutoff: cellOf(r, t, 'in_cutoff')
     };
   }
   return out;
+}
+
+/** A price the PHONE sent on a saveDay count row (v2.5.1) — '' when the payload
+ *  does not carry one (an older build's queued save), else a validated number.
+ *  It is a price, so a negative one is refused in plain English; ₱0 is passed
+ *  through and the active-sku blank-price guard decides whether it may stand. */
+function payloadPriceOrThrow(v, label) {
+  if (v === null || v === undefined || asStr(v) === '') return '';
+  var n = numOrThrow(v, label);
+  if (n < 0) throw new Error(label + ' cannot be negative.');
+  return n;
 }
 
 function apiSaveExpense(ss, payload) {
@@ -2068,8 +2138,19 @@ function computeStockStatus(ss, expensesAll, usageAll, countsAll) {
 }
 
 /** The arithmetic itself, over an already-read item list (so one request never
- *  reads StockItems twice). See computeStockStatus for the rules. */
-function stockStatusFor(items, ss, expensesAll, usageAll, countsAll) {
+ *  reads StockItems twice). See computeStockStatus for the rules.
+ *
+ *  `since` (optional, yyyy-MM-dd) additionally SPLITS the two sums at that
+ *  date: `delivered_before`/`used_before` are the rows STRICTLY BEFORE it (and
+ *  still strictly after the baseline — a baseline dated inside the window
+ *  leaves them 0, because everything after it is inside the window). This is
+ *  what bootstrap ships (v2.5.1): the phone adds its OWN in-window rows on top
+ *  of these pre-window parts, so a local correction or deletion moves on-hand
+ *  immediately. The old alternative — shipping only the whole-history totals
+ *  and letting the phone top its local sums back up to them — could not tell
+ *  "rows this phone cannot see" from "rows this phone just corrected", and
+ *  silently undid every downward fix. */
+function stockStatusFor(items, ss, expensesAll, usageAll, countsAll, since) {
   var expenses = expensesAll || readExpenses(ss);
   var usage = usageAll || readStockUsage(ss);
   var counts = countsAll || readStockCounts(ss);
@@ -2091,13 +2172,17 @@ function stockStatusFor(items, ss, expensesAll, usageAll, countsAll) {
     var base = latest[it.product]
       ? { date: latest[it.product].date, qty: latest[it.product].counted_qty }
       : { date: it.opening_date, qty: it.opening_qty };
-    var delivered = 0;
+    var delivered = 0, deliveredBefore = 0;
     expenses.forEach(function (x) {
-      if (x.stock_product === it.product && x.date > base.date) delivered += x.stock_qty;
+      if (x.stock_product !== it.product || !(x.date > base.date)) return;
+      delivered += x.stock_qty;
+      if (since && x.date < since) deliveredBefore += x.stock_qty;
     });
-    var used = 0;
+    var used = 0, usedBefore = 0;
     usage.forEach(function (u) {
-      if (u.product === it.product && u.date > base.date) used += u.qty;
+      if (u.product !== it.product || !(u.date > base.date)) return;
+      used += u.qty;
+      if (since && u.date < since) usedBefore += u.qty;
     });
     delivered = round2(delivered);
     used = round2(used);
@@ -2111,6 +2196,9 @@ function stockStatusFor(items, ss, expensesAll, usageAll, countsAll) {
       baseline_date: base.date,
       delivered_since: delivered,
       used_since: used,
+      // The pre-window parts of the two figures above (0 without a `since`).
+      delivered_before: round2(deliveredBefore),
+      used_before: round2(usedBefore),
       on_hand: onHand,
       low: threshold > 0 && onHand <= threshold
     };
@@ -2121,12 +2209,13 @@ function stockStatusFor(items, ss, expensesAll, usageAll, countsAll) {
 /** Stock items with their computed ledger figures attached — the shape
  *  bootstrap ships so the phone can show on-hand AND explain it without
  *  holding history it does not have. */
-function stockItemsWithStatus(ss, expensesAll, usageAll, countsAll) {
+function stockItemsWithStatus(ss, expensesAll, usageAll, countsAll, since) {
   var items = readStockItems(ss).list;
-  var status = stockStatusFor(items, ss, expensesAll, usageAll, countsAll);
+  var status = stockStatusFor(items, ss, expensesAll, usageAll, countsAll, since);
   return items.map(function (it) {
     var s = status[it.product] || {
       baseline_qty: 0, baseline_date: '', delivered_since: 0, used_since: 0,
+      delivered_before: 0, used_before: 0,
       on_hand: 0, low: false
     };
     return {
@@ -2142,7 +2231,12 @@ function stockItemsWithStatus(ss, expensesAll, usageAll, countsAll) {
       baseline_qty: s.baseline_qty,
       baseline_date: s.baseline_date,
       delivered_since: s.delivered_since,
-      used_since: s.used_since
+      used_since: s.used_since,
+      // The two totals SPLIT at window_start (v2.5.1): the phone's own
+      // arithmetic is `before + its own in-window rows`, so a local correction
+      // moves on-hand immediately instead of being topped back up.
+      delivered_before: s.delivered_before,
+      used_before: s.used_before
     };
   });
 }

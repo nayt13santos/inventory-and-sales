@@ -538,7 +538,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.5.0';
+const APP_VERSION = '2.5.1';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -612,7 +612,8 @@ function freshState(){
       // same way the sheet seeds them: nothing on hand, no baseline date (which
       // means "count the whole history"), no warning until a point is set.
       opening_qty:0, opening_date:'', reorder_at:'',
-      baseline_qty:0, baseline_date:'', delivered_since:0, used_since:0
+      baseline_qty:0, baseline_date:'', delivered_since:0, used_since:0,
+      delivered_before:0, used_before:0
     })),
     backlogs:[],
     // Row maps are PROTOTYPE-FREE (Object.create(null)): they are keyed by sheet
@@ -824,7 +825,13 @@ function normStockItem(s){
     baseline_qty: (bq == null || bq === '') ? openQty : num(bq),
     baseline_date: txt(pick(s, 'baseline_date', 'baselineDate')) || openDate,
     delivered_since: num(pick(s, 'delivered_since', 'deliveredSince')),
-    used_since: num(pick(s, 'used_since', 'usedSince'))
+    used_since: num(pick(s, 'used_since', 'usedSince')),
+    // The pre-window parts of those totals (v2.5.1): what the server counted
+    // for dates BEFORE window_start. The ledger adds the phone's own in-window
+    // rows on top of these. A server too old to send them ships 0, which reads
+    // as "nothing beyond my own rows" — the honest floor, never a top-up.
+    delivered_before: num(pick(s, 'delivered_before', 'deliveredBefore')),
+    used_before: num(pick(s, 'used_before', 'usedBefore'))
   };
 }
 // StockCounts — a physical stocktake. It BECOMES that product's baseline, which
@@ -1310,15 +1317,17 @@ function splitDefault(){
 }
 
 /**
- * The price/cheese_price snapshots already stored on ONE date's count rows,
- * keyed by sku — '' where a row has no snapshot (written before v2.5.0).
- * Mirrors storedPricesFor() in Code.gs.
+ * The price/cheese_price/in_cutoff snapshots already stored on ONE date's count
+ * rows, keyed by sku — '' where a row has no snapshot (written before v2.5.0,
+ * or v2.4.1 for the flag). Mirrors storedPricesFor() in Code.gs.
  *
  * This is what makes REOPENING a saved day show the money it was saved at: a
  * correction weeks after a price change fixes the count, it does not re-price
- * the night. The rows this reads are the same ones the server sends back (its
- * own stored snapshot), so the phone and the sheet resolve a date's prices the
- * same way.
+ * the night — and does not RE-CLASSIFY it either (v2.5.1): the flag rides in
+ * the same map, so a Maintenance flip cannot move a saved day's money between
+ * the cutoff and the excluded block. The rows this reads are the same ones the
+ * server sends back (its own stored snapshot), so the phone and the sheet
+ * resolve a date's prices and classification the same way.
  */
 function storedPricesFor(date){
   const out = Object.create(null);
@@ -1328,7 +1337,8 @@ function storedPricesFor(date){
     if (!sku || out[sku]) continue;
     out[sku] = {
       price: (c.price === '' || c.price == null) ? '' : num(c.price),
-      cheese_price: (c.cheese_price === '' || c.cheese_price == null) ? '' : num(c.cheese_price)
+      cheese_price: (c.cheese_price === '' || c.cheese_price == null) ? '' : num(c.cheese_price),
+      in_cutoff: rawCutoffFlag(c.in_cutoff)
     };
   }
   return out;
@@ -1343,6 +1353,17 @@ function priceOnDay(stored, pr){
     price: (s && s.price !== '') ? s.price : num(p.price),
     cheese_price: (s && s.cheese_price !== '') ? s.cheese_price : num(p.cheese_price)
   };
+}
+/** Whether ONE sku's money counts ON THE DAY the map above was built for: the
+ *  row's own stored snapshot where there is one, else the sku's current flag —
+ *  the same precedence apiSaveDay applies on a re-save (v2.5.1), so what the
+ *  Sales screen shows for a LOADED day is what a re-save writes. A blank
+ *  snapshot falls back to the live flag, exactly as countInCutoff reads it. */
+function cutoffOnDay(stored, pr){
+  const p = asObj(pr);
+  const s = asObj(stored)[txt(p.sku)];
+  if (s && s.in_cutoff !== '' && s.in_cutoff != null) return inCutoffFlag(s.in_cutoff);
+  return inCutoffFlag(p.in_cutoff);
 }
 
 /* ============================================================
@@ -1387,7 +1408,12 @@ function computeDay(p){
       const eod = Math.max(0, num(c.eod));
       const sold = Math.max(0, sod - eod);
       const isBox = pr.group === 'box';
-      const inCutoff = inCutoffFlag(pr.in_cutoff);
+      // A LOADED day classifies by ITS OWN row's snapshot, exactly as it prices
+      // by its own stored prices (v2.5.1) — so flipping "counts in the cutoff"
+      // in Maintenance never moves a saved night's money between the total and
+      // the excluded line on this screen. A fresh date has no snapshot and uses
+      // the live flag, which is what will be snapshotted when it saves.
+      const inCutoff = cutoffOnDay(stored, pr);
       const eff = priceOnDay(stored, pr);
       const price = num(eff.price), cheesePrice = num(eff.cheese_price);
       // An EXCLUDED sku has NO variant and NO payment split at all — not cheese,
@@ -1730,6 +1756,53 @@ function buildNote(f, per){
   ].join('\n');
 }
 
+/**
+ * Why a note may NOT be built from this phone's figures — the server's own
+ * refusal, word for word — or '' when the note is fine to build (v2.5.1).
+ *
+ * Mirrors the negative-category refusal in apiCutoff: a negative category sum
+ * can only come from a hand-edited expense row (saveExpense refuses amounts
+ * ≤ 0), and a note built on it states money that never existed. The SERVER
+ * refuses to generate that note; the phone must refuse ITS OWN copy for the
+ * same period in the same sentence — a demo/offline/fallback note containing
+ * "Supplies - -400" is exactly the artifact the server's refusal exists to
+ * prevent, so building it locally would convert the refusal into the bug.
+ */
+function noteRefusal(per){
+  const f = computeCutoff(per);
+  const negCats = [];
+  if (num(f.mama) < 0) negCats.push('Mama');
+  if (num(f.supplies) < 0) negCats.push('Supplies');
+  if (num(f.octopus) < 0) negCats.push('Octopus');
+  if (num(f.electric) < 0) negCats.push('Electric');
+  if (num(f.other) < 0) negCats.push('Other payments');
+  if (!negCats.length) return '';
+  // The note-line each expense belongs to — Backlog/unknown fold into "Other
+  // payments", the same mapping computeCutoff and the server both apply.
+  const noteCat = c => {
+    const cat = normCategory(c);
+    return (cat === 'Mama' || cat === 'Supplies' || cat === 'Octopus' || cat === 'Electric')
+      ? cat : 'Other payments';
+  };
+  const offenders = [];
+  const exps = asObj(state.expenses);
+  for (const id in exps){
+    const e = asObj(exps[id]);
+    if (!inPeriod(txt(e.date), per) || !(num(e.amount) < 0)) continue;
+    if (negCats.indexOf(noteCat(e.category)) === -1) continue;
+    offenders.push(txt(e.date) + ' ' + txt(e.category) +
+      (txt(e.item) ? ' "' + txt(e.item) + '"' : '') + ' (' + fmt(e.amount) + ')');
+  }
+  return 'Cannot make the note: ' + listPhrase(negCats) +
+    (negCats.length > 1 ? ' add up to less than zero' : ' adds up to less than zero') +
+    ' for this period, because of ' +
+    (offenders.length === 1 ? 'this expense row: ' : 'these expense rows: ') +
+    offenders.join('; ') +
+    '. A negative expense is a data mistake — fix or delete ' +
+    (offenders.length === 1 ? 'that row' : 'those rows') +
+    ' in the Expenses tab, then generate the note again.';
+}
+
 /* ------------------------------------------------------------
    STOCK ON HAND — computed, never stored (the same rule as a backlog balance).
 
@@ -1746,11 +1819,15 @@ function buildNote(f, per){
 
    The arithmetic runs on the phone's OWN rows, which is what makes demo mode and
    offline work honest — and it includes anything still queued, because the local
-   appliers have already written it into the mirror. The phone keeps ~120 days
-   though, while the server counts the WHOLE history, so whatever the server
-   counted and this phone cannot see is CARRIED rather than read as zero. An
-   unsynced row the server has not seen makes that difference negative, which is
-   floored at 0 and therefore counted exactly once.
+   appliers have already written it into the mirror. The phone's window starts at
+   window_start though, while the server counts the WHOLE history, so bootstrap
+   ships each product's totals SPLIT at that date (delivered_before/used_before,
+   v2.5.1): this phone sums ONLY its own in-window rows and adds the pre-window
+   parts. Every in-window row is therefore counted from the phone's own mirror —
+   so a correction, a deletion or a re-closed day moves on-hand IMMEDIATELY. (The
+   old "carry floor" — topping the local sums back up to the server's whole-
+   history totals — could not tell "rows this phone cannot see" from "rows this
+   phone just corrected", and silently undid every downward fix.)
 
    On hand MAY BE NEGATIVE (the seeded baseline is 0, so usage against stock
    delivered before tracking began legitimately reads below zero). It is shown
@@ -1778,34 +1855,40 @@ function stockStatusOf(it){
   // just-queued "Correct the count" re-baselines immediately.
   const server = { date: txt(item.baseline_date), qty: num(item.baseline_qty) };
   let base = server;
-  let rebased = false;
   const local = latestStockCount(product);
   if (local && local.date >= server.date){
     base = { date: txt(local.date), qty: num(local.counted_qty) };
-    rebased = local.date !== server.date || num(local.counted_qty) !== server.qty;
   }
 
-  let delivered = 0;
+  // The rows this phone CANNOT see: the server's totals for dates strictly
+  // before window_start (and strictly after ITS baseline). They only apply
+  // while this phone measures from the same baseline DATE the server did — a
+  // newer local stocktake already contains everything before itself. In demo
+  // mode (no sync yet) both parts are simply 0 and every local row is summed.
+  const win = txt(asObj(state).window_start);
+  const useBefore = base.date === server.date;
+  let delivered = useBefore ? num(item.delivered_before) : 0;
+  let used = useBefore ? num(item.used_before) : 0;
+
+  // ...plus this phone's OWN in-window rows — its mirror is the truth for what
+  // it can see, so a corrected figure, a deleted delivery or a re-closed day
+  // moves on-hand at once instead of being topped back up (the deleted v2.5.0
+  // carry floor). `!win` (demo / never synced) means every local row counts.
   const exps = asObj(state.expenses);
   for (const id in exps){
     const e = asObj(exps[id]);
-    if (txt(e.stock_product) === product && txt(e.date) > base.date) delivered += num(e.stock_qty);
+    const d = txt(e.date);
+    if (txt(e.stock_product) === product && d > base.date && (!win || d >= win)) delivered += num(e.stock_qty);
   }
-  let used = 0;
   const usage = asObj(state.stockUsage);
   for (const d in usage){
-    if (!(d > base.date)) continue;
+    if (!(d > base.date) || (win && d < win)) continue;
     for (const r of asArr(usage[d])){
       if (txt(asObj(r).product) === product) used += num(asObj(r).qty);
     }
   }
-  // Rows the server counted that this phone no longer holds. Only meaningful
-  // while the baseline is still the server's: a newer local count is dated today,
-  // so everything before it is already inside the counted figure.
-  const carryD = rebased ? 0 : Math.max(0, r2(num(item.delivered_since) - delivered));
-  const carryU = rebased ? 0 : Math.max(0, r2(num(item.used_since) - used));
-  delivered = r2(delivered + carryD);
-  used = r2(used + carryU);
+  delivered = r2(delivered);
+  used = r2(used);
 
   const onHand = r2(base.qty + delivered - used);
   const reorderAt = num(item.reorder_at);
@@ -1977,7 +2060,8 @@ function applyLocalStockItems(p){
       // no money, and it starts with a zero baseline like the seeded six.
       it = { product, unit:'', active:true, sort:++maxSort,
         opening_qty:0, opening_date:'', reorder_at:'',
-        baseline_qty:0, baseline_date:'', delivered_since:0, used_since:0 };
+        baseline_qty:0, baseline_date:'', delivered_since:0, used_since:0,
+        delivered_before:0, used_before:0 };
       state.stockItems.push(it);
     }
     it.unit = txt(row.unit);
@@ -2229,6 +2313,7 @@ async function drainQueue(){
   if (syncing || !config.apiUrl || !navigator.onLine || queue.length === 0) return;
   syncing = true; updateStatus();
   let attnChanged = false;
+  let landed = false;   // did anything reach the sheet this drain?
   while (queue.length){
     const item = queue[0];
     try{
@@ -2256,6 +2341,7 @@ async function drainQueue(){
       // Either way the SHEET changed, so any bootstrap reply still in flight
       // is a picture of a sheet that no longer exists.
       bumpMutations();
+      landed = true;
       lastSyncError = '';
     }catch(err){
       // Same identity check as the success path: a refusal of a payload that
@@ -2276,9 +2362,15 @@ async function drainQueue(){
           if (i !== -1) queue.splice(i, 1);
           persistQueue();
           bumpMutations();
+          // Name WHAT was refused (a split refusal announced as "an expense"
+          // sends her hunting through the wrong screen's entries — v2.5.1).
           toast(item.action === 'saveDay' && isDateStr(item.payload.date)
             ? 'Not saved: ' + fmtShort(item.payload.date) + ' is still not in the sheet. See the red card on the Sales screen.'
-            : 'Not saved: the server refused an expense. See More.');
+            : item.action === 'saveExpense'
+              ? 'Not saved: the server refused an expense. See More.'
+              : 'Not saved: the server refused ' +
+                (ATTN_WHAT[item.action] ? 'the ' + ATTN_WHAT[item.action].thing : 'an entry') +
+                '. See More.');
         }
         lastSyncError = '';
       } else if (err && err.badResponse){
@@ -2301,6 +2393,15 @@ async function drainQueue(){
   // A new warning has to reach the screen she is actually looking at.
   if (attnChanged) renderPanel(activeTab);
   else if (activeTab === 'ibapa') renderIbapa();
+  // Anything that LANDED changed figures only the server computes — a backlog's
+  // balance, a whole-history on-hand. Re-bootstrap NOW (v2.5.1), so they are
+  // right within the same sync instead of holding the stale figure until the
+  // next app start. (Before this, a backlog payment "vanished" the moment it
+  // drained: while queued it was subtracted locally; once in the sheet it was
+  // in neither the local subtraction nor the old server balance.) doBootstrap
+  // carries its own mutation stamp, so a save typed while this reply is in the
+  // air still discards it — nothing here can roll fresh work back.
+  if (landed) await doBootstrap();
 }
 
 // The saveDay RESPONSE is snake_case (same shape we store); older deployments
@@ -2798,9 +2899,18 @@ function bentaStockRows(d){
  * back. Sending 0 while validating the raw figure was the dead end: the save
  * was refused over a number that was neither sent nor fixable.
  */
+/** Whether a sku's money counts for the day ON THE FORM: the loaded row's own
+ *  snapshot first, else the live flag — cutoffOnDay over the form's date, so the
+ *  card, the receipt, the validator and the payload all answer with one voice
+ *  (v2.5.1). A sku with no price row and no snapshot counts IN, as always. */
+function bentaRowInCutoff(sku){
+  const pr = asArr(state.prices).find(p => isObj(p) && p.sku === txt(sku));
+  return cutoffOnDay(storedPricesFor(asObj(benta).date), pr || { sku: txt(sku), in_cutoff: true });
+}
+
 function sentBuckets(r){
   const row = asObj(r);
-  if (!skuInCutoff(row.sku)){
+  if (!bentaRowInCutoff(row.sku)){
     return { cheeseQty: num(row.cheese), gcashQty: num(row.gcash), gcashCheeseQty: num(row.gcashCheese) };
   }
   const cheeseSent = isBoxSku(row.sku);
@@ -2816,6 +2926,8 @@ function bentaPayload(){
   // Clamp here so the queued payload always matches what applyLocalDay /
   // computeDay stored locally — and so it can never breach a server rule.
   const custom = closed ? 0 : Math.max(0, num(benta.custom));
+  // The date's stored snapshots, read ONCE for every row below.
+  const snap = storedPricesFor(benta.date);
   return {
     date: benta.date,
     closed,
@@ -2834,14 +2946,30 @@ function bentaPayload(){
     // so the validator only ever complains about figures that would really be
     // sent, and every figure sent was on the screen (see sentBuckets for the
     // excluded-sku rule that broke this symmetry once).
+    // Each row also carries the price/cheesePrice/inCutoff the screen DISPLAYED
+    // (v2.5.1) — the same effective values computeDay priced the receipt with.
+    // The server uses them for a sku's FIRST row on the date, so a save queued
+    // offline lands at the money the receipt and the tin showed, never at
+    // whatever the price list says when it finally syncs. On a re-save the
+    // sheet's own stored snapshots win, so a stale queued value cannot re-price
+    // a night either. A sku with no price row sends none (the server drops its
+    // counts and says so — there is nothing truthful to send).
     counts: closed ? [] : asArr(benta.rows).map(r => {
       const b = sentBuckets(r);
-      return {
+      const out = {
         sku:r.sku, sod:num(r.sod), eod:num(r.eod),
         cheeseQty: b.cheeseQty,
         gcashQty: b.gcashQty,
         gcashCheeseQty: b.gcashCheeseQty
       };
+      const pr = asArr(state.prices).find(p => isObj(p) && p.sku === r.sku);
+      if (pr){
+        const eff = priceOnDay(snap, pr);
+        out.price = num(eff.price);
+        out.cheesePrice = num(eff.cheese_price);
+        out.inCutoff = cutoffOnDay(snap, pr);
+      }
+      return out;
     }),
     // Only what was actually opened travels: the server writes non-zero rows
     // only, and a 0 for a product that has since left the sheet's list would be
@@ -3138,14 +3266,18 @@ function renderBenta(){
       let row = asArr(benta.rows).find(r => r.sku === pr.sku);
       if (!row){ row = { sku:pr.sku, sod:0, eod:0, cheese:0, gcash:0, gcashCheese:0 }; benta.rows.push(row); }
       const eff = priceOnDay(daySnap, pr);
-      const prEff = Object.assign({}, pr, eff);
       const sold = Math.max(0, num(row.sod) - num(row.eod));
       const isBox = pr.group === 'box';
       // A sku kept OUT of the cutoff is counted exactly like the others, so its
       // card looks ordinary — start count, end count, sold — with one badge and one
       // short line saying where its money goes. It has no payment split at all, so
       // no bucket steppers appear on it.
-      const inCut = inCutoffFlag(pr.in_cutoff);
+      // THE DAY's flag, not the live one (v2.5.1): a loaded row's own snapshot
+      // wins, the same way the day's stored prices do, so the card, the receipt
+      // (computeDay), the validator and a re-save all tell one story about a
+      // night that was already saved.
+      const inCut = cutoffOnDay(daySnap, pr);
+      const prEff = Object.assign({}, pr, eff, { in_cutoff: inCut });
       // An excluded sku is ALWAYS a plain quantity card: one price, no cheese, no
       // buckets — whatever its `group` says. A sheet hand-edited into box + excluded
       // is a state the server refuses outright, so showing a cheese price here (and
@@ -3607,7 +3739,12 @@ function validateBenta(){
     // renders: otherwise a loaded cheese count produces a complaint with no
     // stepper to fix it, and the day can never be saved again.
     const isBox = isBoxSku(r.sku);
-    const inCut = skuInCutoff(r.sku);
+    // The DAY's effective flag (the loaded row's snapshot, else the live flag) —
+    // the same reading the card, the receipt and the payload use, and the same
+    // precedence the server applies on a re-save. Judging by the live flag here
+    // let the phone refuse a day the server accepts (a night saved while the
+    // sku counted IN, reopened after it was excluded) and vice versa.
+    const inCut = bentaRowInCutoff(r.sku);
     const key = 'sku:' + r.sku;
     const sod = num(r.sod), eod = num(r.eod);
     // The buckets AS SENT — sentBuckets(r), the same reading bentaPayload uses,
@@ -3707,10 +3844,12 @@ function validateBentaLive(){
       // Fall back to the same placeholder renderBenta drew the card from, so a
       // sku that has left the Prices tab keeps a line consistent with its own
       // Sold and Regular figures instead of freezing at stale numbers — and
-      // priced at THIS DAY's stored prices, same as the card itself.
+      // priced at THIS DAY's stored prices AND classified by THIS DAY's stored
+      // flag, same as the card itself.
       const pr = asArr(state.prices).find(p => isObj(p) && p.sku === r.sku)
         || { sku: r.sku, label: r.sku, group: isBox ? 'box' : 'simple', price: 0, cheese_price: 0 };
-      split.textContent = skuSplitText(Object.assign({}, pr, priceOnDay(daySnap, pr)), r);
+      split.textContent = skuSplitText(Object.assign({}, pr, priceOnDay(daySnap, pr),
+        { in_cutoff: cutoffOnDay(daySnap, pr) }), r);
     }
   }
   setErr('err-custom', errs.custom);
@@ -4330,6 +4469,16 @@ async function generateNote(){
       return;
     }catch(err){
       console.error(err);
+      // The server REFUSED the note (a negative category, an unsaved split —
+      // things that make the note itself a lie). Show its sentence and STOP
+      // (v2.5.1): the phone's own copy would contain exactly the line the
+      // refusal exists to prevent, so "falling back" to it converts the
+      // refusal into the bad artifact. No note, no Copy, no Share.
+      if (err && err.server){
+        toast(err.message);
+        renderCutoff();
+        return;
+      }
       // The phone's own copy of a period it cannot fully see would be SHORT —
       // real money missing from a note that looks finished. Refuse it; only the
       // server can build this one.
@@ -4345,6 +4494,16 @@ async function generateNote(){
   // Offline (or no API yet) with an incomplete view: same refusal, same reason.
   if (previewIncomplete(per)){
     toast('This phone cannot see the whole of this cutoff. Connect to the internet and try again — the note must be made from the whole sheet.');
+    renderCutoff();
+    return;
+  }
+  // Every locally-built note — demo mode, or the copy shown after a network
+  // failure — applies the refusals the server would apply, in its words
+  // (v2.5.1). A negative category refuses the local note exactly as it refuses
+  // the real one; without this, demo mode happily printed "Supplies - -400".
+  const refused = noteRefusal(per);
+  if (refused){
+    toast(refused);
     renderCutoff();
     return;
   }
@@ -4857,6 +5016,34 @@ function priceRowError(pr, m){
   return '';
 }
 
+/**
+ * The Settings payload the "Standing amounts" card sends — built from what is
+ * TYPED, with every BLANK field left out entirely (v2.5.1).
+ *
+ * Blank means "unchanged", never ₱0: a wage field swiped clear and saved used
+ * to travel as 0 (num('') is 0), write daily_salary = 0 to the sheet, and every
+ * later day snapshotted a ₱0 wage — the note's Salary line went blank and
+ * Remaining was overstated by a day's wage at a time. An explicit 0 ("nobody is
+ * paid") must be TYPED. The server reads a blank the same way, but it never
+ * gets to see one from this screen unless the key is omitted — which is what
+ * this does. Branch/staff follow the same rule (a blank branch is separately
+ * refused before this is called: it heads the note).
+ */
+function maintSettingsPayload(mc){
+  const m = asObj(mc);
+  const settings = {};
+  const branch = txt(m.branch).trim();
+  if (branch) settings.branch = branch;
+  const staff = txt(m.staff).trim();
+  if (staff) settings.staff = staff;
+  for (const k of ['daily_salary','split_default','mama_per_cutoff','electric_per_cutoff']){
+    const raw = m[k];
+    if (raw === '' || raw == null) continue;   // blank = leave the sheet's figure alone
+    settings[k] = r2(Math.max(0, num(raw)));
+  }
+  return settings;
+}
+
 function saveMaintPrices(){
   maintTopUp();
   const rows = [];
@@ -4887,19 +5074,17 @@ function saveMaintSettings(){
     return;
   }
   for (const k of ['daily_salary','split_default','mama_per_cutoff','electric_per_cutoff']){
-    if (num(maintConst[k]) < 0){ setErr('err-maint-set', 'These amounts cannot be less than zero.'); return; }
+    const raw = maintConst[k];
+    if (raw !== '' && raw != null && num(raw) < 0){
+      setErr('err-maint-set', 'These amounts cannot be less than zero.'); return;
+    }
   }
   setErr('err-maint-set', '');
   // Only the whitelisted keys travel, and `token` is not one of them — it is
-  // never read from here, never sent, never editable on this screen.
-  const settings = {
-    daily_salary: r2(maintConst.daily_salary),
-    split_default: r2(maintConst.split_default),
-    mama_per_cutoff: r2(maintConst.mama_per_cutoff),
-    electric_per_cutoff: r2(maintConst.electric_per_cutoff),
-    branch: txt(maintConst.branch).trim(),
-    staff: txt(maintConst.staff).trim()
-  };
+  // never read from here, never sent, never editable on this screen. A BLANK
+  // field is OMITTED from the payload entirely (v2.5.1): blank means
+  // "unchanged", and an explicit ₱0 must be typed — see maintSettingsPayload.
+  const settings = maintSettingsPayload(maintConst);
   const payload = { settings, entryId: uuid() };
   applyLocalSettings(payload);
   enqueue('saveSettings', payload);
