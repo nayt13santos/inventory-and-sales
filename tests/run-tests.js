@@ -3559,6 +3559,38 @@ test('the split remembers the period: entered row, then the ARCHIVED split, then
   assert.strictEqual(r.data.figures.split, 5000);
 });
 
+test('duplicate CutoffInputs rows: the FIRST wins — the same row "Save split" rewrites', () => {
+  // Only a hand-edit can make two rows for one (start, end) — the app upserts.
+  // Before v2.6.0 the note read the LAST duplicate while saveCutoffSplit
+  // rewrote the FIRST, so a saved split appeared not to take: the owner types
+  // 2,500, the note keeps printing the stray row's 9,999 forever.
+  const { ctx, ss, token } = splitFixture();
+  assert.strictEqual(post(ctx, { token, action: 'saveCutoffSplit',
+    payload: { start: SPLIT_PERIOD.start, end: SPLIT_PERIOD.end, amount: 2000, entryId: 'dup-1' } }).ok, true);
+  // The stray duplicate, as a hand-copied row would sit in the sheet.
+  ctx.appendObjects(ss, 'CutoffInputs', [{
+    start: SPLIT_PERIOD.start, end: SPLIT_PERIOD.end, split_amount: 9999,
+    entry_id: 'dup-stray', updated_at: '2026-07-20 09:00:00' }]);
+
+  let r = cutoffFor(ctx, token, SPLIT_PERIOD.start, SPLIT_PERIOD.end);
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.data.figures.split, 2000, 'the note must be built from the first (saved) row');
+
+  // Saving a correction rewrites that SAME first row, and the note follows it.
+  assert.strictEqual(post(ctx, { token, action: 'saveCutoffSplit',
+    payload: { start: SPLIT_PERIOD.start, end: SPLIT_PERIOD.end, amount: 2500, entryId: 'dup-1' } }).ok, true);
+  r = cutoffFor(ctx, token, SPLIT_PERIOD.start, SPLIT_PERIOD.end);
+  assert.strictEqual(r.data.figures.split, 2500, 'a saved correction must take despite the stray row');
+  assert.strictEqual(r.data.figures.per_partner, 1250);
+
+  // And bootstrap ships ONE row for the period — the winning one — so the
+  // phone's Split field shows the figure the note will actually use.
+  const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
+  const rows = boot.data.cutoffInputs.filter(x => x.start === SPLIT_PERIOD.start && x.end === SPLIT_PERIOD.end);
+  assert.deepStrictEqual(rows.map(x => x.split_amount), [2500],
+    'the duplicate must not reach the phone at all');
+});
+
 test('the split is WHOLE PESOS: centavos are refused on entry and on the default', () => {
   const { ctx, ss, token } = freshSetup();
   const r = post(ctx, {

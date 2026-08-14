@@ -1469,7 +1469,7 @@ function apiCutoff(ss, settings, payload, dryRun) {
   });
   var split;
   if (entered.length > 0) {
-    split = round2(entered[entered.length - 1].split_amount);
+    split = round2(entered[0].split_amount);
   } else {
     var archived = archivedSplitFor(ss, start, end);
     split = archived === null ? splitDefaultOf(settings) : round2(archived);
@@ -2119,11 +2119,20 @@ function readCutoffInputs(ss) {
   var t = readTabOptional(ss, TAB.CUTOFF_INPUTS);
   var out = [];
   if (!t) return out;
+  // Duplicate (start, end) rows — only a hand-edit can make them, the app
+  // upserts — follow the v2.5.0 dedupe standard: the FIRST row wins,
+  // deterministically, the same row an upsert rewrites. Without this the note
+  // read the LAST duplicate while "Save split" rewrote the FIRST, so a saved
+  // split appeared not to take until the stray row was deleted by hand.
+  var seen = Object.create(null);
   for (var i = 1; i < t.values.length; i++) {
     var r = t.values[i];
     var start = asDateStr(cellOf(r, t, 'start'));
     var end = asDateStr(cellOf(r, t, 'end'));
     if (!start || !end) continue;
+    var key = start + '\u0001' + end; // same separator upsertRows uses
+    if (seen[key]) continue;
+    seen[key] = true;
     out.push({
       start: start,
       end: end,

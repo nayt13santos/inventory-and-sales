@@ -10,7 +10,7 @@ Total cost: **₱0**. You'll set up three things: the Google Sheet (database), t
 2. Menu: **Extensions → Apps Script**. A code editor opens.
 3. Delete the placeholder code. Copy the entire contents of `apps-script/Code.gs` from this project and paste it in.
 4. Click the ⚙️ **Project Settings** (left sidebar) → check **"Show appsscript.json manifest file"**. Go back to Editor, open `appsscript.json`, replace its contents with the `apps-script/appsscript.json` from this project (sets timezone to Asia/Manila and web app access).
-5. Back in the editor, select the function **`setupSheet`** in the toolbar dropdown, press **Run**. Approve the permission prompts (it asks because the script writes to your own sheet — this is normal; choose Advanced → Go to project if Google shows the "unverified" screen). When it finishes, your sheet has all tabs (Settings, Prices, DailyLog, DailyCounts, Expenses, Backlogs, Cutoffs) with seed data.
+5. Back in the editor, select the function **`setupSheet`** in the toolbar dropdown, press **Run**. Approve the permission prompts (it asks because the script writes to your own sheet — this is normal; choose Advanced → Go to project if Google shows the "unverified" screen). When it finishes, your sheet has all twelve tabs (Settings, Prices, DailyLog, DailyCounts, Expenses, Backlogs, Cutoffs, CutoffInputs, StockItems, StockUsage, StockCounts, StockDeliveries) with seed data.
 6. Open the **Settings** tab of the sheet and copy the `token` value — you'll enter it in the app later.
 7. **Deploy the API**: in the Apps Script editor, click **Deploy → New deployment** → type: **Web app** → Description "v1" → Execute as: **Me** → Who has access: **Anyone** → **Deploy**. Copy the **Web app URL** (ends in `/exec`).
 
@@ -40,8 +40,8 @@ Total cost: **₱0**. You'll set up three things: the Google Sheet (database), t
 
 Open the Google Sheet and edit these tabs directly — the app picks up changes on next sync.
 
-- **Backlogs** — your eight obligations are already seeded (₱81,352 outstanding in total): Takoyaki Flour ₱2,538, Takoyaki Sauce ₱114, Ref ₱6,700, Deposit Nayt ₱7,500, Deposit Lou ₱7,500, Deposit Mama ₱7,000, Deposit Ilog Nayt ₱40,000, Deposit Ilog Mama ₱10,000. The `description` column is blank — fill it in if you want a reminder of what each one is. When you pay a variable amount out of a cutoff's excess, log it in Gastos under category **Backlog**, pick which one, and its balance drops. All backlog payments plus anything under **Other** roll up into the note's "Other payments" line. Add or retire obligations by editing rows here (set `active` to FALSE to hide one without deleting its history).
-- **Prices** — current menu: Octobits 4/6/10 pcs at ₱50/65/105, Chizubits at ₱60/80/125. Change a price here and the app uses it for *future* days only; past days keep the price they were saved with, so history never shifts under you. To sell something new later (drinks, for example), add a row: `group` = `box` gives it start/end counts with a cheese split, `group` = `simple` gives counts with one price and no cheese.
+- **Backlogs** — your eight obligations are already seeded (₱81,352 outstanding in total): Takoyaki Flour ₱2,538, Takoyaki Sauce ₱114, Ref ₱6,700, Deposit Nayt ₱7,500, Deposit Lou ₱7,500, Deposit Mama ₱7,000, Deposit Ilog Nayt ₱40,000, Deposit Ilog Mama ₱10,000. The `description` column is blank — fill it in if you want a reminder of what each one is. When you pay a variable amount out of a cutoff's excess, log it under **Expenses** with category **Backlog**, pick which one, and its balance drops. All backlog payments plus anything under **Other** roll up into the note's "Other payments" line. Add or retire obligations by editing rows here (set `active` to FALSE to hide one without deleting its history).
+- **Prices** — current menu: Octobits 4/6/10 pcs at ₱50/65/105, Chizubits at ₱60/80/125, plus **Nori at ₱25** (seeded with "Counts in the cutoff" OFF, so its card shows a "Not in the cutoff" badge and its money stays out of the partner note — deactivate the row if you stop selling it). Change a price here and the app uses it for *future* days only; past days keep the price they were saved with, so history never shifts under you. To sell something new later (drinks, for example), add a row: `group` = `box` gives it start/end counts with a cheese split, `group` = `simple` gives counts with one price and no cheese.
 - **Settings** — `mama_per_cutoff` (₱500), `electric_per_cutoff` (₱500), `daily_salary` (₱200 — added to every day that is not marked closed), `split_default` (₱3,000, i.e. ₱1,500 each), `branch` (Tañong), and `staff` (comma-separated names if more than Mama minds the stall). **You can now edit all of these from the phone** under **More → Maintenance**, along with prices and the stock list — the sheet is no longer the only way in.
 - **StockItems** — the things you open, counted whole: Takoyaki Flour (pack), Takoyaki Sauce (gallon), Japanese Mayo (pack), Bonito (pack), Aonori (pack), Togarashi (pack). All start at 0 with no reorder point. After your first stocktake, use **More → Stock on hand → Correct the count** rather than typing figures in here; `reorder_at` is when the **Low** mark appears (leave it blank for no warning).
 
@@ -115,13 +115,13 @@ Nothing to do — the app updates itself. When a new version is published, the n
 
 It deliberately **waits** if Mama is mid-entry: a half-typed day is never interrupted, and the update applies after she saves or the next time the app is opened. Nothing queued is ever lost across an update.
 
-To confirm which version a phone is on: **More → About**. Current release: **app 2.0.0**, **script 2.0.0**.
+To confirm which version a phone is on: **More → About**. Current release: **app 2.6.0**, **script 2.6.0**.
 
 ## Updating by hand (if you skip the automation)
 
 The app has **two halves that must be updated separately** — the script in the sheet, and the files on the web host. A change to one usually needs the other, so do both. Takes about 5 minutes.
 
-Current versions: **script 2.0.0**, **app 2.0.0**. You can check what each phone is actually running under **More → About**.
+Current versions: **script 2.6.0**, **app 2.6.0**. You can check what each phone is actually running under **More → About**.
 
 ### 1. Update the script (in the sheet)
 
