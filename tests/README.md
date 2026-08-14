@@ -152,3 +152,29 @@ Every new behaviour was reverted **one at a time on a scratch copy of the whole 
 | phone: a refused split is toasted as an expense again | 1 — a refused split is announced as a split |
 
 Two of these reverts are the money-movers the round exists to prevent: "a re-save ignores the stored in_cutoff snapshot" is one Maintenance tick restating a fortnight that has already been sent the moment the day is re-saved for a note edit, and "a first save ignores the payload's displayed prices" is a queued night booked ₱100 above what is physically in the tin, with nothing said.
+
+### v2.6.0 — receiving stock is its own action, mutation-proofed
+
+Suppliers deliver on credit, so v2.6.0 separates goods arriving from money leaving: **`saveStockDelivery`** ("Stock came in" under More → Stock on hand) records a quantity with no money anywhere near it, **`saveExpense` refuses** a payload that still names stock (one plain sentence, nothing written), and legacy expense-attached rows keep counting into on-hand forever. `run-tests.js` grew 126 → 132 and `contract.test.js` 140 → 145; the two v2.5.1 stock-ledger tests now seed their deliveries through the new door — every behaviour they pinned is unchanged, and each also keeps a hand-placed legacy row in play so the old door stays covered.
+
+Every new behaviour was reverted **one at a time on a scratch copy of the whole repo** — never the repo itself — with both suites run after each revert. **All 15 reverts turned at least one test red; none survived.** Three of them only bite because the round found the hole first and the test was added before its revert: a queued delivery was silently dropped from the replay map, a delivery hand-deleted in the sheet lingered on the phone, and the app-restart restore (`sanitizeState`) rebuilt the mirror without its deliveries. (One revert had to be sharpened, not the test: keying the upsert on `updated_at` too is a no-op under the stubs' frozen clock — the honest "forgot the upsert" mutant is empty key columns, an unconditional append.)
+
+| revert (one behaviour each) | reds — first test that bites |
+| --- | --- |
+| server: saveExpense accepts stock fields again | 1 — saveExpense REFUSES new stock fields in one plain sentence |
+| server: bootstrap stops shipping stockDeliveries | 11 — a delivery with NO money raises on hand |
+| server: the ledger ignores StockDeliveries rows | 13 — a BLANK opening_date counts the WHOLE history |
+| server: the ledger ignores legacy expense-attached rows | 5 — a LEGACY delivery keeps counting forever |
+| server: deliveries no longer split at window_start | 2 — delivered_before carries BOTH doors |
+| server: a replayed delivery books twice (append, no upsert) | 1 — a replay never books a delivery twice |
+| server: a delivery of 0 accepted | 1 — at least 1 whole unit |
+| server: the reply's on_hand goes camelCase | 6 — a delivery with NO money raises on hand |
+| server: the StockDeliveries date column loses its plain-text format | 1 — setupSheet creates StockDeliveries with plain-text date columns |
+| server: hand-typed loose dates no longer normalized on read | 1 — a hand-typed loose date on a StockDeliveries row is normalized |
+| phone: the ledger ignores "Stock came in" rows | 4 — the phone computes the SAME on-hand figure the server did |
+| phone: a local delivery appends instead of upserting by entry_id | 1 — a local stock reduction moves on-hand at once |
+| phone: an app restart drops the delivery mirror (sanitizeState) | 1 — the delivery mirror survives an app restart |
+| phone: the replay map loses saveStockDelivery | 1 — a QUEUED delivery survives a bootstrap that lands before it drains |
+| phone: the bootstrap merge keeps deliveries deleted in the sheet | 4 — a delivery deleted in the sheet disappears from the phone (+3) |
+
+The money-mover here is the first revert: with it, "10 flours arrived, not paid yet" forces a price onto unpaid goods again — the exact flaw the owner reported — and the same quantity can enter on-hand through two doors at once.

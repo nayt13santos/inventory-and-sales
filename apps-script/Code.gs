@@ -48,7 +48,8 @@
  *            — they mirror the sheet's own column headers and the shape the
  *            PWA persists in localStorage (state_v1). The only camelCase names
  *            a response may carry are the bootstrap/range CONTAINER keys
- *            (stockItems, stockUsage, stockCounts, cutoffInputs, lastCutoff).
+ *            (stockItems, stockUsage, stockCounts, stockDeliveries,
+ *            cutoffInputs, lastCutoff).
  * Emitting camelCase in a response is a bug: the PWA reads snake_case, so a
  * mismatched key silently arrives as undefined and turns into 0 money.
  *
@@ -178,6 +179,24 @@
  *     prices, incl. the bucket guards), so a Maintenance flip never moves an
  *     already-saved day's money between the cutoff and the excluded block —
  *     not even via a note-only re-save from an older phone's queue.
+ *
+ * RECEIVING STOCK IS ITS OWN ACTION (bundled into the parked release; VERSION
+ * stays 2.5.1 until the owner resumes shipping — owner, 2026-08-11: "supplies
+ * adding must be separate… it's not paid yet"). Suppliers deliver on credit, so
+ * goods arriving and money leaving are two different events:
+ *   - new tab StockDeliveries (date | product | qty | entry_id | updated_at) and
+ *     new action saveStockDelivery {date, product, qty, entryId} — whole units
+ *     received, upsert by entry_id, NO MONEY ANYWHERE NEAR IT. bootstrap ships
+ *     the window's rows as `stockDeliveries`.
+ *   - on-hand's `delivered` = legacy Expenses.stock_qty + StockDeliveries.qty,
+ *     both strictly after the baseline and both split at window_start
+ *     (delivered_before includes both).
+ *   - saveExpense REFUSES new stockProduct/stockQty in one plain sentence and
+ *     no longer writes those two columns at all, so a re-save can never wipe a
+ *     legacy row's quantity. Existing sheet rows keep counting forever.
+ *   - paying the supplier later is an ordinary Supplies expense, so the note's
+ *     Supplies line keeps meaning "money actually paid this period" and an
+ *     unpaid delivery correctly never touches the cutoff.
  */
 
 var VERSION = '2.5.1';
@@ -201,6 +220,7 @@ var TAB = {
   STOCK_ITEMS: 'StockItems',
   STOCK_USAGE: 'StockUsage',
   STOCK_COUNTS: 'StockCounts',
+  STOCK_DELIVERIES: 'StockDeliveries',
   EXPENSES: 'Expenses',
   BACKLOGS: 'Backlogs',
   CUTOFF_INPUTS: 'CutoffInputs',
@@ -252,6 +272,17 @@ var SCHEMA = [
   // A physical stocktake. It BECOMES the new baseline, which is what stops
   // estimation drift (spoilage, breakage, miscounts) accumulating forever.
   { name: TAB.STOCK_COUNTS, headers: ['date', 'product', 'counted_qty', 'entry_id', 'updated_at'], textCols: ['date', 'updated_at'] },
+  // Goods ARRIVING, with no money anywhere near them (v2.6.0 — owner,
+  // 2026-08-11: "supplies adding must be separate… it's not paid yet"). His
+  // suppliers deliver on credit, so goods arriving and money leaving are two
+  // different events on two different days: the quantity lands here, and paying
+  // the supplier later is an ordinary Supplies expense with no stock attached.
+  // The old ride-along columns on Expenses (stock_product/stock_qty) stay in the
+  // sheet and existing rows keep counting into on-hand forever (never restate
+  // the past) — but saveExpense no longer ACCEPTS new stock fields, so from now
+  // on there is one door in (here), one door out (StockUsage), and one door for
+  // money (Expenses).
+  { name: TAB.STOCK_DELIVERIES, headers: ['date', 'product', 'qty', 'entry_id', 'updated_at'], textCols: ['date', 'updated_at'] },
   // stock_product / stock_qty were appended in v2.3.0: a delivery is an
   // ordinary expense row that additionally names what arrived. Money stays in
   // exactly one place (`amount`); the quantity rides along on the same row.
@@ -345,6 +376,9 @@ function doPost(e) {
       case 'saveStockCount':
         data = withLock(function () { return apiSaveStockCount(ss, payload); });
         break;
+      case 'saveStockDelivery':
+        data = withLock(function () { return apiSaveStockDelivery(ss, payload); });
+        break;
       case 'saveCutoffSplit':
         data = withLock(function () { return apiSaveCutoffSplit(ss, payload); });
         break;
@@ -406,6 +440,7 @@ function apiBootstrap(ss, settings) {
   var backlogs = readBacklogs(ss, expensesAll);
   var usageAll = readStockUsage(ss);
   var countsAll = readStockCounts(ss);
+  var deliveriesAll = readStockDeliveries(ss);
 
   // ONE window for everything the phone gets: the last 90 days, by DATE.
   //
@@ -450,7 +485,7 @@ function apiBootstrap(ss, settings) {
     // ship SPLIT at window_start (delivered_before / used_before, v2.5.1), so
     // the phone can add its OWN in-window rows on top of the pre-window parts
     // and a local correction moves on-hand immediately.
-    stockItems: stockItemsWithStatus(ss, expensesAll, usageAll, countsAll, since),
+    stockItems: stockItemsWithStatus(ss, expensesAll, usageAll, countsAll, deliveriesAll, since),
     backlogs: backlogs,
     // The window this reply SPEAKS FOR. The phone needs it stated explicitly:
     // inferring the window from the dates present cannot distinguish "this date
@@ -468,6 +503,9 @@ function apiBootstrap(ss, settings) {
     counts: readCounts(ss, priceInfo.map).filter(inWindow),
     stockUsage: usageAll.filter(inWindow),
     stockCounts: countsAll.filter(inWindow),
+    // Goods that ARRIVED (v2.6.0) — quantities only, never money. Windowed like
+    // usage: the phone adds these to delivered_before for its own on-hand.
+    stockDeliveries: deliveriesAll.filter(inWindow),
     expenses: expenses,
     // The entered Split per cutoff. Period-keyed, not date-keyed, so a period
     // that ENDS inside the window is shipped — that is every period the phone
@@ -953,45 +991,31 @@ function apiSaveExpense(ss, payload) {
   var item = asStr(payload.item);
   var notes = asStr(payload.notes);
 
-  // --- Optional delivery: what arrived, and how much of it.
-  // A delivery has two faces — money paid and quantity received — and the money
-  // stays in exactly ONE place: this row's `amount`, counted once as always.
-  // `stock_qty` feeds only the stock ledger. Leaving both blank is normal; most
-  // expenses are not tracked stock.
-  var stockProduct = asStr(payload.stockProduct);
-  var hasQty = !(payload.stockQty === null || payload.stockQty === undefined || asStr(payload.stockQty) === '');
-  var stockQty = '';
-  if (hasQty) {
-    stockQty = numOrThrow(payload.stockQty, 'The quantity that arrived');
-    if (stockQty < 0) throw new Error('The quantity that arrived cannot be negative.');
-    if (!stockProduct) {
-      throw new Error('Say what arrived: a quantity needs a product name.');
-    }
-    // A delivery arrives in the same WHOLE UNITS the day's usage is counted in —
-    // 2 gallons, never 1.5 — and it is added straight into on_hand, so a
-    // fraction here shows up in every later figure the shelf card prints.
-    // Checked AFTER the product name, so the message can say which product.
-    wholeUnitsOrThrow(stockQty, payload.stockQty, stockProduct);
-  }
-  if (stockProduct) {
-    // Unlike the day's stock list, a DELIVERY is checked against StockItems: it
-    // moves an on-hand figure, and a typo would silently credit a product that
-    // does not exist (and never show up anywhere). readTabForWrite first, so a
-    // sheet that has not been migrated by hand yet gets the tab and its seeds
-    // instead of refusing every delivery.
-    readTabForWrite(ss, TAB.STOCK_ITEMS);
-    var stockMap = readStockItems(ss).map;
-    if (!stockMap[stockProduct]) {
-      throw new Error('There is no stock product called "' + stockProduct +
-        '". Pick one from the list, or add it under Maintenance first.');
-    }
-    if (!hasQty) stockQty = 0;
+  // --- An expense carries MONEY ONLY (v2.6.0). Deliveries used to ride on this
+  // row (stock_product/stock_qty), which forced a price onto unpaid flour — his
+  // suppliers deliver on credit, so goods arriving and money leaving are two
+  // different events on two different days. Goods arriving now go through
+  // saveStockDelivery ("Stock came in" under Stock on hand), and a payload that
+  // still names stock here is REFUSED in one plain sentence — a queued row from
+  // an older phone lands on the needs-attention list saying exactly this,
+  // instead of quietly writing a delivery that "Stock came in" then double-counts.
+  // Only a NON-BLANK value refuses: every ordinary expense the phone has ever
+  // queued carries both keys as ''.
+  var hasStockField = asStr(payload.stockProduct) !== '' ||
+    !(payload.stockQty === null || payload.stockQty === undefined || asStr(payload.stockQty) === '');
+  if (hasStockField) {
+    throw new Error('Deliveries are recorded under Stock on hand now, so this expense should carry money only.');
   }
 
+  // stock_product / stock_qty are DELIBERATELY absent from this object: the two
+  // columns stay in the sheet and EXISTING rows keep counting into on-hand
+  // forever (never restate the past), so an upsert must leave those cells
+  // exactly as they are — buildRow copies the existing row first, and a column
+  // the object does not mention keeps whatever it holds. Writing '' here would
+  // let a replayed edit wipe a legacy delivery's quantity off the shelf.
   var obj = {
     date: date, category: category, item: item, amount: amount,
-    backlog_ref: backlogRef, notes: notes, entry_id: entryId, updated_at: nowStamp(),
-    stock_product: stockProduct, stock_qty: stockQty
+    backlog_ref: backlogRef, notes: notes, entry_id: entryId, updated_at: nowStamp()
   };
 
   // Upsert by entry_id: replaying the same mutation rewrites the same row.
@@ -1059,6 +1083,53 @@ function apiSaveStockCount(ss, payload) {
   // The figure the phone should now show. Recomputed from the sheet rather than
   // assumed to equal `qty`: a count backdated behind a later delivery or a
   // later usage row must land on the arithmetic, not on the number typed.
+  var status = computeStockStatus(ss)[product];
+  return {
+    entry_id: entryId,
+    product: product,
+    on_hand: status ? status.on_hand : qty
+  };
+}
+
+/** Goods ARRIVING, with no money anywhere near them (v2.6.0). Suppliers deliver
+ *  on credit, so the quantity received is its own event: it lands here, raises
+ *  on-hand, and touches no total and no note line. Paying the supplier later is
+ *  an ordinary Supplies expense with no stock attached.
+ *  Same rules as the other two ledger doors: WHOLE UNITS (the thing you open),
+ *  the product checked against StockItems (a typo would silently credit a
+ *  product that does not exist), and an event date — no future, no pre-2020.
+ *  Upsert by entry_id, so a queue replay can never book one delivery twice. */
+function apiSaveStockDelivery(ss, payload) {
+  var date = reqEntryDate(payload.date, 'date');
+  var entryId = asStr(payload.entryId);
+  if (!entryId) throw new Error('entryId is required.');
+  var product = asStr(payload.product);
+  if (!product) throw new Error('Say which product arrived.');
+  // readTabForWrite first, so a sheet that has not been migrated by hand yet
+  // gets the tab and its seeds instead of refusing every delivery.
+  readTabForWrite(ss, TAB.STOCK_ITEMS);
+  if (!readStockItems(ss).map[product]) {
+    throw new Error('There is no stock product called "' + product +
+      '". Pick one from the list, or add it under Maintenance first.');
+  }
+  var qty = numOrThrow(payload.qty, 'The quantity that arrived');
+  if (qty < 0) throw new Error('The quantity that arrived cannot be negative.');
+  // Whole units, in the same words the other two doors use; and at least ONE —
+  // a delivery of nothing is not a delivery, and a 0 row would sit in the tab
+  // saying something arrived when nothing did.
+  wholeUnitsOrThrow(qty, payload.qty, product);
+  if (qty < 1) {
+    throw new Error(product + ': a delivery must be at least 1 whole unit — for nothing arriving, there is nothing to record.');
+  }
+
+  upsertRows(ss, TAB.STOCK_DELIVERIES, [{
+    date: date, product: product, qty: qty,
+    entry_id: entryId, updated_at: nowStamp()
+  }], ['entry_id']);
+
+  // The figure the phone should now show — recomputed from the sheet, exactly
+  // as saveStockCount answers, so a backdated delivery behind a later stocktake
+  // lands on the arithmetic (a count already contains everything before it).
   var status = computeStockStatus(ss)[product];
   return {
     entry_id: entryId,
@@ -2086,6 +2157,30 @@ function readStockUsage(ss) {
   return out;
 }
 
+/** Goods that ARRIVED, per product per day — WHOLE UNITS, NEVER money (v2.6.0).
+ *  The second half of `delivered` beside the legacy expense-attached
+ *  quantities. Tolerant read like the other stock tabs: a sheet not migrated
+ *  yet has no tab and simply answers "no rows". Dates go through asDateStr, so
+ *  a hand-typed "2026/7/5" still counts. */
+function readStockDeliveries(ss) {
+  var t = readTabOptional(ss, TAB.STOCK_DELIVERIES);
+  var out = [];
+  if (!t) return out;
+  for (var i = 1; i < t.values.length; i++) {
+    var r = t.values[i];
+    var date = asDateStr(cellOf(r, t, 'date'));
+    if (!date) continue;
+    out.push({
+      date: date,
+      product: asStr(cellOf(r, t, 'product')),
+      qty: asNum(cellOf(r, t, 'qty')),
+      entry_id: asStr(cellOf(r, t, 'entry_id')),
+      updated_at: asStr(cellOf(r, t, 'updated_at'))
+    });
+  }
+  return out;
+}
+
 function readExpenses(ss) {
   var t = readTab(ss, TAB.EXPENSES);
   var out = [];
@@ -2117,10 +2212,16 @@ function readExpenses(ss) {
  *
  *   baseline   = latest StockCounts row for the product (by date, then
  *                updated_at), else { date: opening_date, qty: opening_qty }
- *   delivered  = Σ Expenses.stock_qty   for the product, date > baseline.date
+ *   delivered  = Σ Expenses.stock_qty   (legacy expense-attached rows)
+ *              + Σ StockDeliveries.qty  (v2.6.0 — the only door new arrivals
+ *                use), both for the product, date > baseline.date
  *   used       = Σ StockUsage.qty       for the product, date > baseline.date
  *   on_hand    = baseline.qty + delivered − used
  *   low        = reorder_at > 0 && on_hand <= reorder_at
+ *
+ * BOTH delivery sources count, forever: the Expenses ride-along columns are
+ * retired for NEW entries, but a quantity already in the sheet is history and
+ * history is never restated — dropping it would empty shelves that are full.
  *
  * STRICTLY AFTER the baseline date: a stocktake is an end-of-day figure that
  * already reflects that day's deliveries and usage.
@@ -2133,8 +2234,8 @@ function readExpenses(ss) {
  *
  * The row collections are passed in so one request reads each tab once.
  */
-function computeStockStatus(ss, expensesAll, usageAll, countsAll) {
-  return stockStatusFor(readStockItems(ss).list, ss, expensesAll, usageAll, countsAll);
+function computeStockStatus(ss, expensesAll, usageAll, countsAll, deliveriesAll) {
+  return stockStatusFor(readStockItems(ss).list, ss, expensesAll, usageAll, countsAll, deliveriesAll);
 }
 
 /** The arithmetic itself, over an already-read item list (so one request never
@@ -2150,10 +2251,11 @@ function computeStockStatus(ss, expensesAll, usageAll, countsAll) {
  *  and letting the phone top its local sums back up to them — could not tell
  *  "rows this phone cannot see" from "rows this phone just corrected", and
  *  silently undid every downward fix. */
-function stockStatusFor(items, ss, expensesAll, usageAll, countsAll, since) {
+function stockStatusFor(items, ss, expensesAll, usageAll, countsAll, deliveriesAll, since) {
   var expenses = expensesAll || readExpenses(ss);
   var usage = usageAll || readStockUsage(ss);
   var counts = countsAll || readStockCounts(ss);
+  var arrivals = deliveriesAll || readStockDeliveries(ss);
 
   // Latest stocktake per product: by date, then updated_at as the tie-break for
   // two counts on the same day.
@@ -2173,10 +2275,19 @@ function stockStatusFor(items, ss, expensesAll, usageAll, countsAll, since) {
       ? { date: latest[it.product].date, qty: latest[it.product].counted_qty }
       : { date: it.opening_date, qty: it.opening_qty };
     var delivered = 0, deliveredBefore = 0;
+    // BOTH doors goods ever came in through: the legacy expense-attached rows
+    // (kept counting forever) and the StockDeliveries tab (v2.6.0, the only
+    // door new arrivals use). Split identically at `since`, so the phone's
+    // delivered_before carries the pre-window part of BOTH.
     expenses.forEach(function (x) {
       if (x.stock_product !== it.product || !(x.date > base.date)) return;
       delivered += x.stock_qty;
       if (since && x.date < since) deliveredBefore += x.stock_qty;
+    });
+    arrivals.forEach(function (a) {
+      if (a.product !== it.product || !(a.date > base.date)) return;
+      delivered += a.qty;
+      if (since && a.date < since) deliveredBefore += a.qty;
     });
     var used = 0, usedBefore = 0;
     usage.forEach(function (u) {
@@ -2209,9 +2320,9 @@ function stockStatusFor(items, ss, expensesAll, usageAll, countsAll, since) {
 /** Stock items with their computed ledger figures attached — the shape
  *  bootstrap ships so the phone can show on-hand AND explain it without
  *  holding history it does not have. */
-function stockItemsWithStatus(ss, expensesAll, usageAll, countsAll, since) {
+function stockItemsWithStatus(ss, expensesAll, usageAll, countsAll, deliveriesAll, since) {
   var items = readStockItems(ss).list;
-  var status = stockStatusFor(items, ss, expensesAll, usageAll, countsAll, since);
+  var status = stockStatusFor(items, ss, expensesAll, usageAll, countsAll, deliveriesAll, since);
   return items.map(function (it) {
     var s = status[it.product] || {
       baseline_qty: 0, baseline_date: '', delivered_since: 0, used_since: 0,

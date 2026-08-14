@@ -624,6 +624,7 @@ function freshState(){
     counts: Object.create(null),        // date -> [DailyCounts rows]
     stockUsage: Object.create(null),    // date -> [StockUsage rows]   (whole units opened — NEVER money)
     stockCounts: Object.create(null),   // date -> [StockCounts rows]  (stocktakes; each becomes a baseline)
+    stockDeliveries: Object.create(null), // date -> [StockDeliveries rows] (whole units ARRIVED — NEVER money; v2.6.0)
     cutoffInputs: Object.create(null),  // "start_end" -> CutoffInputs row (the ENTERED split)
     expenses: Object.create(null),      // entry_id -> Expenses row
     // The first date the last bootstrap snapshot covered ('' before the first
@@ -870,6 +871,20 @@ function normStockUse(s, key){
     updated_at: txt(pick(s, 'updated_at', 'updatedAt'))
   };
 }
+// StockDeliveries — WHOLE UNITS ARRIVED per product per day (v2.6.0). NEVER
+// money: suppliers deliver on credit, so goods arriving and money leaving are
+// two different events — this is the arriving half, and paying the supplier
+// later is an ordinary Supplies expense with no stock attached.
+function normStockDelivery(s, key){
+  if (!isObj(s) || !txt(s.product)) return null;
+  const date = isDateStr(s.date) ? txt(s.date) : (isDateStr(key) ? txt(key) : '');
+  if (!date) return null;
+  return {
+    date, product: txt(s.product), qty: num(s.qty),
+    entry_id: txt(pick(s, 'entry_id', 'entryId')),
+    updated_at: txt(pick(s, 'updated_at', 'updatedAt'))
+  };
+}
 // The six stored expense categories. Anything else (a typo in the sheet, a
 // prototype name like "toString") folds into Other — same as the server —
 // so no amount can ever fall outside the cutoff maths.
@@ -965,6 +980,7 @@ function sanitizeState(raw){
   s.counts   = toCountsMap(raw.counts);
   s.stockUsage    = toDateListMap(raw.stockUsage, normStockUse);
   s.stockCounts   = toDateListMap(raw.stockCounts, normStockCount);
+  s.stockDeliveries = toDateListMap(raw.stockDeliveries, normStockDelivery);
   s.cutoffInputs  = toRowMap(raw.cutoffInputs, normCutoffInput, r => periodKey(r));
   s.expenses = toRowMap(raw.expenses, normExpense, r => r.entry_id);
   s.window_start = isDateStr(raw.window_start) ? txt(raw.window_start) : '';
@@ -999,7 +1015,7 @@ const SNAPSHOT_ACTIONS = Object.assign(Object.create(null),
   { savePrices:true, saveSettings:true, saveStockItems:true });
 const QUEUE_KEY_FOR = Object.assign(Object.create(null), {
   saveDay:'date', saveExpense:'entryId', deleteExpense:'entryId',
-  saveStockCount:'entryId', saveCutoffSplit:'entryId',
+  saveStockCount:'entryId', saveStockDelivery:'entryId', saveCutoffSplit:'entryId',
   savePrices:'entryId', saveSettings:'entryId', saveStockItems:'entryId'
 });
 function sanitizeQueue(raw){
@@ -1100,6 +1116,7 @@ function ensureShape(){
   if (!isObj(state.counts)) state.counts = Object.create(null);
   if (!isObj(state.stockUsage)) state.stockUsage = Object.create(null);
   if (!isObj(state.stockCounts)) state.stockCounts = Object.create(null);
+  if (!isObj(state.stockDeliveries)) state.stockDeliveries = Object.create(null);
   if (!isObj(state.cutoffInputs)) state.cutoffInputs = Object.create(null);
   if (!isObj(state.expenses)) state.expenses = Object.create(null);
   if (!isDateStr(state.window_start)) state.window_start = '';
@@ -1148,11 +1165,13 @@ function protectedDates(){
 // baseline, and a baseline can be months old — pruning it would move on hand.
 // Stock USAGE is pruned with the rest of the day's history, and stockStatusOf()
 // is what keeps that honest: it carries whatever the server counted and this
-// phone no longer holds, instead of quietly reading it as zero.
+// phone no longer holds, instead of quietly reading it as zero. Stock
+// DELIVERIES get the same treatment for the same reason: only in-window rows
+// are ever summed locally, and the server's delivered_before carries the rest.
 function pruneState(keepDays){
   const min = daysAgoStr(num(keepDays) || RETAIN_DAYS);
   const keep = protectedDates();
-  for (const map of [state.days, state.counts, state.stockUsage]){
+  for (const map of [state.days, state.counts, state.stockUsage, state.stockDeliveries]){
     if (!isObj(map)) continue;
     for (const d in map){ if (!keep[d] && (!isDateStr(d) || d < min)) delete map[d]; }
   }
@@ -1808,7 +1827,12 @@ function noteRefusal(per){
 
      baseline  = the latest stocktake known for the product (by date, then
                  updated_at), else its opening figure
-     delivered = Σ Expenses.stock_qty  for the product, date > baseline date
+     delivered = Σ Expenses.stock_qty      (legacy rows — deliveries used to
+                 ride on the expense that paid for them, and rows already in
+                 the sheet keep counting forever)
+               + Σ StockDeliveries.qty     ("Stock came in", v2.6.0 — the only
+                 door new arrivals use, no money anywhere near it)
+                 for the product, date > baseline date
      used      = Σ StockUsage.qty      for the product, date > baseline date
      on hand   = baseline + delivered − used
      low       = reorder point > 0 and on hand <= it
@@ -1879,6 +1903,16 @@ function stockStatusOf(it){
     const e = asObj(exps[id]);
     const d = txt(e.date);
     if (txt(e.stock_product) === product && d > base.date && (!win || d >= win)) delivered += num(e.stock_qty);
+  }
+  // ...and the deliveries logged through "Stock came in" (v2.6.0) — the same
+  // window rule as the legacy rows above, because the server's delivered_before
+  // already carries the pre-window part of BOTH doors.
+  const arrivals = asObj(state.stockDeliveries);
+  for (const d in arrivals){
+    if (!(d > base.date) || (win && d < win)) continue;
+    for (const r of asArr(arrivals[d])){
+      if (txt(asObj(r).product) === product) delivered += num(asObj(r).qty);
+    }
   }
   const usage = asObj(state.stockUsage);
   for (const d in usage){
@@ -1999,6 +2033,22 @@ function applyLocalStockCount(p){
   }
   (state.stockCounts[date] = asArr(state.stockCounts[date])).push(row);
 }
+/** A delivery — whole units ARRIVED, no money anywhere near it (v2.6.0). Keyed
+ *  by entry_id like the sheet and filed under its date, so the ledger finds it
+ *  and on-hand rises the moment it is saved, online or not. */
+function applyLocalStockDelivery(p){
+  ensureShape();
+  const date = txt(p.date);
+  if (!isDateStr(date)) return;
+  const row = { date, product:txt(p.product), qty:Math.max(0, num(p.qty)),
+    entry_id:txt(p.entryId), updated_at:new Date().toISOString() };
+  // Upsert by entry_id, across every date: a re-sent delivery must not become two.
+  for (const d in asObj(state.stockDeliveries)){
+    state.stockDeliveries[d] = asArr(state.stockDeliveries[d]).filter(r => txt(asObj(r).entry_id) !== row.entry_id);
+    if (!state.stockDeliveries[d].length) delete state.stockDeliveries[d];
+  }
+  (state.stockDeliveries[date] = asArr(state.stockDeliveries[date])).push(row);
+}
 /** The entered Split for one period, upserted by (start, end) like the sheet. */
 function applyLocalCutoffSplit(p){
   ensureShape();
@@ -2085,6 +2135,7 @@ const LOCAL_APPLIERS = {
   saveExpense: p => applyLocalExpense(p),
   deleteExpense: p => applyLocalDeleteExpense(p),
   saveStockCount: p => applyLocalStockCount(p),
+  saveStockDelivery: p => applyLocalStockDelivery(p),
   saveCutoffSplit: p => applyLocalCutoffSplit(p),
   savePrices: p => applyLocalPrices(p),
   saveSettings: p => applyLocalSettings(p),
@@ -2549,6 +2600,7 @@ function applyBootstrap(data){
   const countMap = data.counts != null      ? toCountsMap(data.counts)                       : null;
   const useMap   = data.stockUsage != null  ? toDateListMap(data.stockUsage, normStockUse)   : null;
   const cntMap   = data.stockCounts != null ? toDateListMap(data.stockCounts, normStockCount): null;
+  const dlvMap   = data.stockDeliveries != null ? toDateListMap(data.stockDeliveries, normStockDelivery) : null;
   // The window the snapshot speaks for. The server states it (window_start) so
   // that "older than this reply covers" and "deleted in the sheet" are
   // distinguishable: inside the window the snapshot is the truth and a row it
@@ -2566,14 +2618,15 @@ function applyBootstrap(data){
     // authoritative for EVERY collection: a date it omits was deleted. One
     // shared set is right here precisely because the reply covers all of them.
     const covered = Object.create(null);
-    for (const m of [dayMap, countMap, useMap, cntMap]){ if (m) for (const d in m) covered[d] = true; }
-    for (const store of [state.days, state.counts, state.stockUsage, state.stockCounts]){
+    for (const m of [dayMap, countMap, useMap, cntMap, dlvMap]){ if (m) for (const d in m) covered[d] = true; }
+    for (const store of [state.days, state.counts, state.stockUsage, state.stockCounts, state.stockDeliveries]){
       for (const d in asObj(store)) if (d >= winStart) covered[d] = true;
     }
     if (dayMap) replaceCovered(state.days, dayMap, covered, true);
     if (countMap) replaceCovered(state.counts, countMap, covered);
     if (useMap)   replaceCovered(state.stockUsage, useMap, covered);
     if (cntMap)   replaceCovered(state.stockCounts, cntMap, covered);
+    if (dlvMap)   replaceCovered(state.stockDeliveries, dlvMap, covered);
   } else {
     // No stated window (older deployment): stay cautious. Only touch dates the
     // reply itself mentions, each collection judged on its OWN dates — sharing
@@ -2583,6 +2636,7 @@ function applyBootstrap(data){
     if (countMap) replaceCovered(state.counts, countMap, ownDates(countMap));
     if (useMap)   replaceCovered(state.stockUsage, useMap, ownDates(useMap));
     if (cntMap)   replaceCovered(state.stockCounts, cntMap, ownDates(cntMap));
+    if (dlvMap)   replaceCovered(state.stockDeliveries, dlvMap, ownDates(dlvMap));
   }
   // The entered splits. Period-keyed, not date-keyed: every row whose period ENDS
   // inside the window ships, so inside that span the reply is authoritative and a
@@ -3123,6 +3177,7 @@ const ATTN_WHAT = {
   saveExpense:     { thing:'expense',    where:'add it again from the Expenses screen.' },
   deleteExpense:   { thing:'deletion',   where:'delete it again from the Expenses screen.' },
   saveStockCount:  { thing:'stock count', where:'count it again under More → Stock on hand.' },
+  saveStockDelivery: { thing:'delivery', where:'add it again with “Stock came in” under More → Stock on hand.' },
   saveCutoffSplit: { thing:'split',      where:'enter it again on the Cutoff screen.' },
   savePrices:      { thing:'price change', where:'change it again under More → Maintenance.' },
   saveSettings:    { thing:'settings change', where:'change it again under More → Maintenance.' },
@@ -3980,10 +4035,11 @@ function afterCountChange(sku){
    EXPENSES (gastos panel) — expenses for the current cutoff
    ============================================================ */
 const GX_CATS = EXPENSE_CATS;   // same six stored values, one source of truth
-let gx = { open:false, category:'Supplies', item:'', amount:'', date:todayStr(), backlogRef:'',
-  // The OPTIONAL delivery: what arrived, and how many whole units of it. A
-  // delivery is then one entry — the money here, the quantity in the stock ledger.
-  stockProduct:'', stockQty:'' };
+// An expense is MONEY ONLY (v2.6.0). The old optional "What arrived?" fields
+// are gone: goods arriving are their own event — "Stock came in" under More →
+// Stock on hand — because suppliers deliver on credit and the flour is not
+// paid yet. Legacy rows that carry a quantity still display it in the list.
+let gx = { open:false, category:'Supplies', item:'', amount:'', date:todayStr(), backlogRef:'' };
 // The last expense that was dated OUTSIDE the cutoff being listed. It saved
 // correctly but it cannot appear in this list, so it is named here instead of
 // seeming to vanish. { label, item, amount, date }
@@ -4047,29 +4103,10 @@ function renderGastos(){
       '<input class="input" type="date" id="gxDate" value="' + esc(gx.date) + '" max="' + todayStr() + '">' +
       '<p class="err" id="err-gx-date" hidden></p></div>';
 
-    // OPTIONAL: what arrived. A delivery is money AND a quantity, and the money
-    // stays here on this one row — the quantity only feeds "Stock on hand".
-    // Most expenses are not tracked stock, so both fields stay empty.
-    const stk = activeStockItems();
-    if (stk.length){
-      const unit = txt((stk.find(s => s.product === gx.stockProduct) || {}).unit);
-      h += '<div class="field"><label for="gxStockProduct">What arrived? (optional)</label>' +
-        '<select class="input" id="gxStockProduct">' +
-          '<option value=""' + (gx.stockProduct === '' ? ' selected' : '') + '>Nothing to count</option>' +
-          stk.map(s => '<option value="' + esc(s.product) + '"' +
-            (gx.stockProduct === s.product ? ' selected' : '') + '>' + esc(s.product) +
-            (s.unit ? ' (by the ' + esc(s.unit) + ')' : '') + '</option>').join('') +
-        '</select>' +
-        '<p class="hint" style="margin-top:6px;">Only for a delivery you want counted in your stock. Leave it as it is otherwise.</p>' +
-      '</div>';
-      if (gx.stockProduct){
-        h += '<div class="field"><label for="gxStockQty">How many ' +
-            esc(unit ? unit + 's' : 'units') + ' arrived?</label>' +
-          '<input class="input money" id="gxStockQty" inputmode="numeric" autocomplete="off" placeholder="0" value="' + esc(gx.stockQty) + '">' +
-          '<p class="hint" style="margin-top:6px;">Whole units only — the same way you count what you open.</p>' +
-          '<p class="err" id="err-gx-stock" hidden></p></div>';
-      }
-    }
+    // The old "What arrived?" fields are GONE (v2.6.0): a delivery is not an
+    // expense — it is goods arriving on credit, logged under More → Stock on
+    // hand → "Stock came in". This form carries money only.
+    h += '<p class="hint" style="margin-top:2px;">For a delivery arriving, use “Stock came in” under More → Stock on hand. This screen is for money leaving.</p>';
 
     h += '<div class="btn-row"><button type="button" class="btn" data-act="gastos-cancel">Close</button>' +
       '<button type="button" class="btn primary" data-act="gastos-submit">Add</button></div>';
@@ -4130,19 +4167,9 @@ function submitGasto(){
     if (be){ be.textContent = 'Choose which backlog you paid.'; be.hidden = false; }
     ok = false;
   }
-  // The optional delivery quantity: whole units, never negative. Same rule and
-  // the same words as the server, so the phone never queues a refusable row.
-  const stkEl = $('err-gx-stock');
-  if (gx.stockProduct && gx.stockQty !== ''){
-    const q = num(gx.stockQty);
-    const bad = q < 0 ? 'The quantity cannot be less than zero.'
-      : (!isWhole(q) ? 'Count whole units (1, 2, 3) — “' + txt(gx.stockQty) + '” is not a whole unit.' : '');
-    if (bad){
-      if (stkEl){ stkEl.textContent = bad; stkEl.hidden = false; }
-      ok = false;
-    } else if (stkEl) stkEl.hidden = true;
-  } else if (stkEl) stkEl.hidden = true;
   if (!ok) return;
+  // MONEY ONLY (v2.6.0): no stockProduct/stockQty on this payload, ever — the
+  // server refuses an expense that names stock, pointing at "Stock came in".
   const payload = {
     date: gx.date || todayStr(),
     category: gx.category,
@@ -4150,9 +4177,6 @@ function submitGasto(){
     amount: num(gx.amount),
     backlogRef: gx.category === 'Backlog' ? gx.backlogRef : '',
     notes: '',
-    // REQUEST keys are camelCase. Both are omitted-as-blank when nothing arrived.
-    stockProduct: gx.stockProduct,
-    stockQty: gx.stockProduct ? Math.max(0, num(gx.stockQty)) : '',
     entryId: uuid()
   };
   applyLocalExpense(payload);
@@ -4167,14 +4191,9 @@ function submitGasto(){
   gxElsewhere = elsewhere
     ? { label: periodLabel(itsPeriod), item: payload.item || payload.category, amount: payload.amount, date: payload.date }
     : null;
-  gx = { open:true, category:gx.category, item:'', amount:'', date:gx.date, backlogRef:'',
-    stockProduct:'', stockQty:'' };
+  gx = { open:true, category:gx.category, item:'', amount:'', date:gx.date, backlogRef:'' };
   renderGastos();
-  toast(elsewhere ? 'Saved to ' + periodLabel(itsPeriod) + '.'
-    : (payload.stockProduct && num(payload.stockQty) > 0
-        ? 'Expense added, and ' + qtyWithUnit(payload.stockQty, stockUnitOf(payload.stockProduct)) +
-          ' of ' + payload.stockProduct + ' went into your stock.'
-        : 'Expense added.'));
+  toast(elsewhere ? 'Saved to ' + periodLabel(itsPeriod) + '.' : 'Expense added.');
   drainQueue();
 }
 
@@ -4613,7 +4632,7 @@ function payBacklog(){
     return;
   }
   const payload = { date, category:'Backlog', item:'Backlog payment', amount:r2(amount),
-    backlogRef: payBl.ref, notes:'', stockProduct:'', stockQty:'', entryId: uuid() };
+    backlogRef: payBl.ref, notes:'', entryId: uuid() };
   applyLocalExpense(payload);
   enqueue('saveExpense', payload);
   persistState();
@@ -4635,7 +4654,7 @@ function addSuggestedExpense(cat, item, amount){
     return;
   }
   const payload = { date, category:cat, item, amount:num(amount), backlogRef:'', notes:'',
-    stockProduct:'', stockQty:'', entryId:uuid() };
+    entryId:uuid() };
   applyLocalExpense(payload);
   enqueue('saveExpense', payload);
   persistState();
@@ -4729,9 +4748,14 @@ function renderIbapa(){
 
 /* ---- Stock on hand. Every figure here is COMPUTED (see stockStatusOf) and the
    card says where it comes from, because a number nobody can explain is a number
-   nobody trusts. "Correct the count" is the one action that moves the baseline. ---- */
+   nobody trusts. "Correct the count" is the one action that moves the baseline.
+   "Stock came in" is the one action that records a delivery (v2.6.0): quantity
+   only, no money anywhere near it — the supplier delivers on credit, and paying
+   him later is an ordinary Supplies expense. ---- */
 let countingProduct = '';   // the product whose count field is open
 let countDraft = '';        // what is typed in it
+let arriving = false;       // whether the "Stock came in" form is open
+let arrival = { product:'', qty:'', date: todayStr() };
 
 function stockOnHandHTML(){
   let list = [];
@@ -4745,6 +4769,38 @@ function stockOnHandHTML(){
   h += '<p class="hint" style="margin-bottom:6px;">Worked out from what has arrived and what has been opened since the last count. ' +
     'A count is an END-OF-DAY figure and becomes the new starting point.</p>';
   if (anyLow) h += '<p class="hint" style="color:var(--alert); font-weight:600;">Time to buy what is marked LOW.</p>';
+
+  // "Stock came in" — record a DELIVERY: what arrived and how many whole units.
+  // No money field on purpose: it is not paid yet. Paying the supplier later is
+  // a normal Supplies expense, whenever that happens.
+  if (!arriving){
+    h += '<button type="button" class="btn block" data-act="arrive-open" style="margin:6px 0 14px;">Stock came in</button>';
+  } else {
+    const items = activeStockItems();
+    const unit = stockUnitOf(arrival.product);
+    h += '<div style="margin:6px 0 14px;">' +
+      '<div class="field"><label for="arrProduct">What arrived?</label>' +
+        '<select class="input" id="arrProduct">' +
+          '<option value=""' + (arrival.product === '' ? ' selected' : '') + '>Choose…</option>' +
+          items.map(s => '<option value="' + esc(s.product) + '"' +
+            (arrival.product === s.product ? ' selected' : '') + '>' + esc(s.product) +
+            (s.unit ? ' (by the ' + esc(s.unit) + ')' : '') + '</option>').join('') +
+        '</select></div>' +
+      '<div class="field"><label for="arrQty">How many ' + esc(unit ? unit + 's' : 'units') + ' arrived?</label>' +
+        '<div class="stepper">' +
+          '<button type="button" class="step-btn" data-act="arrive-step" data-dir="-1" aria-label="Subtract one unit">−</button>' +
+          '<input class="step-val" id="arrQty" inputmode="numeric" autocomplete="off" value="' + esc(arrival.qty) + '" aria-label="How many units arrived">' +
+          '<button type="button" class="step-btn" data-act="arrive-step" data-dir="1" aria-label="Add one unit">+</button>' +
+        '</div>' +
+        '<p class="hint" style="margin-top:6px;">Whole units only — the same way you count what you open. No money here: paying for it is a normal Supplies expense, whenever you pay.</p></div>' +
+      '<div class="field"><label for="arrDate">When did it arrive?</label>' +
+        '<input class="input" type="date" id="arrDate" value="' + esc(arrival.date) + '" max="' + todayStr() + '"></div>' +
+      '<p class="err" id="err-arrive" hidden></p>' +
+      '<div class="btn-row"><button type="button" class="btn" data-act="arrive-cancel">Close</button>' +
+        '<button type="button" class="btn primary" data-act="arrive-save">Add to stock</button></div>' +
+    '</div>';
+  }
+
   for (const s of list){
     const nm = esc(s.product);
     const isCounting = countingProduct === s.product;
@@ -4820,6 +4876,46 @@ function saveStockCountNow(product){
   countingProduct = ''; countDraft = '';
   renderIbapa();
   toast(p + ': counted ' + qtyWithUnit(qty, stockUnitOf(p)) + '. That is the new starting figure.');
+  drainQueue();
+}
+
+/** One press of the arrival stepper. Clamped at 0 (the validator asks for at
+ *  least 1) and always a whole number — the buttons can only ever step by one. */
+function arriveStep(dir){
+  const q = Math.max(0, Math.floor(num(arrival.qty)) + (num(dir) > 0 ? 1 : -1));
+  arrival.qty = String(q);
+  const f = $('arrQty');
+  if (f) f.value = arrival.qty;
+}
+
+/** Save a delivery: quantity in, no money anywhere near it (v2.6.0). The same
+ *  clamps the server applies — a real product, at least 1 whole unit, an event
+ *  date (no future, no pre-2020) — refused here in the server's own words so
+ *  the phone never queues a row the sheet will bounce. On-hand rises the
+ *  moment this returns, via the local mirror. */
+function saveArrival(){
+  const err = $('err-arrive');
+  const product = txt(arrival.product);
+  const qty = num(arrival.qty);
+  const dateBad = entryDateError(arrival.date);
+  let bad = '';
+  if (!product) bad = 'Choose what arrived.';
+  else if (dateBad) bad = dateBad;
+  else if (!isWhole(qty)) bad = 'Count whole units (1, 2, 3) — “' + txt(arrival.qty) + '” is not a whole unit.';
+  else if (arrival.qty === '' || qty < 1) bad = 'Enter how many arrived — at least 1.';
+  if (bad){
+    if (err){ err.textContent = bad; err.hidden = false; }
+    return;
+  }
+  const payload = { date: arrival.date || todayStr(), product, qty, entryId: uuid() };
+  applyLocalStockDelivery(payload);
+  enqueue('saveStockDelivery', payload);
+  persistState();
+  arriving = false;
+  arrival = { product:'', qty:'', date: todayStr() };
+  renderIbapa();
+  toast(product + ': ' + qtyWithUnit(qty, stockUnitOf(product)) +
+    ' added to your stock. Paying for it goes under Expenses as usual, whenever you pay.');
   drainQueue();
 }
 
@@ -5209,6 +5305,16 @@ document.addEventListener('click', (ev) => {
   else if (act === 'count-open') openCount(el.dataset.product);
   else if (act === 'count-cancel'){ countingProduct = ''; countDraft = ''; renderIbapa(); }
   else if (act === 'count-save') saveStockCountNow(el.dataset.product);
+  else if (act === 'arrive-open'){
+    arriving = true;
+    arrival = { product:'', qty:'', date: todayStr() };
+    renderIbapa();
+    const f = $('arrProduct');
+    if (f) f.focus();
+  }
+  else if (act === 'arrive-cancel'){ arriving = false; renderIbapa(); }
+  else if (act === 'arrive-step') arriveStep(Number(el.dataset.dir));
+  else if (act === 'arrive-save') saveArrival();
 
   // Maintenance
   else if (act === 'maint-open'){ maintOpen = true; maintLoad(); renderIbapa(); }
@@ -5272,7 +5378,9 @@ document.addEventListener('input', (ev) => {
     setErr('err-gx-date', ev.target.value ? entryDateError(ev.target.value) : '');
   }
   else if (id === 'gxBacklog') gx.backlogRef = ev.target.value;
-  else if (id === 'gxStockQty') gx.stockQty = ev.target.value;
+
+  // More: the "Stock came in" fields (the quantity types like any stepper's box)
+  else if (id === 'arrQty'){ arrival.qty = ev.target.value; }
 
   // Cutoff fields. The split's residual follows the field as it is typed; only
   // the four figures it moves are rewritten, so the keyboard stays put.
@@ -5299,10 +5407,13 @@ document.addEventListener('change', (ev) => {
   if (ds.mactive != null){ if (maintPrices[ds.mactive]) maintPrices[ds.mactive].active = ev.target.checked; return; }
   if (ds.mcutoff != null){ if (maintPrices[ds.mcutoff]) maintPrices[ds.mcutoff].inCutoff = ev.target.checked; return; }
   if (ds.mstockactive != null){ if (maintStock[ds.mstockactive]) maintStock[ds.mstockactive].active = ev.target.checked; return; }
-  if (id === 'gxStockProduct'){
-    gx.stockProduct = ev.target.value;
-    if (!gx.stockProduct) gx.stockQty = '';
-    renderGastos();          // shows (or hides) the quantity field
+  if (id === 'arrProduct'){ arrival.product = ev.target.value; renderIbapa(); return; }
+  if (id === 'arrDate'){
+    // The same clamps every event date gets: kept as typed, judged live in the
+    // server's own words, and never committed while it is wrong (saveArrival
+    // checks again). A cleared field falls back to today.
+    arrival.date = ev.target.value || todayStr();
+    setErr('err-arrive', ev.target.value ? entryDateError(ev.target.value) : '');
     return;
   }
   if (id === 'payBlRef'){ payBl.ref = ev.target.value; return; }

@@ -1901,16 +1901,36 @@ function useStock(ctx, token, date, product, qty, id) {
   const r = saveDay(ctx, token, { date: date, counts: [], stock: [{ product: product, qty: qty }], entryId: id });
   assert.strictEqual(r.ok, true, r.error);
 }
+/** The v2.6.0 delivery flow: the QUANTITY through saveStockDelivery (its own
+ *  event — the goods arrive on credit), and the MONEY, when the test gives one,
+ *  as an ordinary expense with no stock attached (the payment, later). */
 function deliver(ctx, token, date, product, qty, amount, id, category) {
-  const r = post(ctx, {
-    token, action: 'saveExpense',
-    payload: {
-      date: date, category: category || 'Supplies', item: 'delivery', amount: amount,
-      backlogRef: '', notes: '', stockProduct: product, stockQty: qty, entryId: id
-    }
+  const d = post(ctx, {
+    token, action: 'saveStockDelivery',
+    payload: { date: date, product: product, qty: qty, entryId: id }
   });
-  assert.strictEqual(r.ok, true, r.error);
-  return r;
+  assert.strictEqual(d.ok, true, d.error);
+  if (amount) {
+    const r = post(ctx, {
+      token, action: 'saveExpense',
+      payload: { date: date, category: category || 'Supplies', item: 'delivery paid',
+        amount: amount, backlogRef: '', notes: '', entryId: id + '-pay' }
+    });
+    assert.strictEqual(r.ok, true, r.error);
+  }
+  return d;
+}
+
+/** A LEGACY delivery row — a pre-v2.6.0 expense carrying stock_product /
+ *  stock_qty. saveExpense refuses NEW rows like this, so tests write one the
+ *  only way it exists in the wild: already sitting in the sheet. Placed by
+ *  header name via Code.gs's own appendObjects. */
+function legacyDeliver(ctx, ss, date, product, qty, amount, id, category) {
+  ctx.appendObjects(ss, 'Expenses', [{
+    date: date, category: category || 'Supplies', item: 'delivery (legacy)',
+    amount: amount, backlog_ref: '', notes: '', entry_id: id,
+    updated_at: '2026-07-01 20:00:00', stock_product: product, stock_qty: qty
+  }]);
 }
 
 test('a BLANK opening_date counts the WHOLE history, not just today', () => {
@@ -1939,28 +1959,44 @@ test('on hand may be NEGATIVE before the first stocktake, and is shown as-is', (
   assert.strictEqual(it.low, false, 'with no reorder point there is no warning to give');
 });
 
-test('a delivery logged as an expense moves on hand, and its money counts once', () => {
+test('a delivery with NO money raises on hand; the LATER payment touches Supplies and never stock', () => {
   const { ctx, token } = freshSetup();
   const before = onHand(ctx, token, 'Takoyaki Flour');
   assert.strictEqual(before.on_hand, 0);
 
-  deliver(ctx, token, '2026-07-20', 'Takoyaki Flour', 10, 2500, 'deliv-1');
+  // The goods arrive first — on credit, so there is no money to log yet.
+  const arr = post(ctx, { token, action: 'saveStockDelivery',
+    payload: { date: '2026-07-20', product: 'Takoyaki Flour', qty: 10, entryId: 'deliv-1' } });
+  assert.strictEqual(arr.ok, true, arr.error);
+  assert.strictEqual(arr.data.on_hand, 10, 'the reply already carries the recomputed shelf figure');
   const after = onHand(ctx, token, 'Takoyaki Flour');
   assert.strictEqual(after.delivered_since, 10);
   assert.strictEqual(after.on_hand, 10);
 
-  // The peso amount is an ordinary Supplies expense — counted ONCE, as always.
-  const cut = post(ctx, { token, action: 'cutoff', payload: { start: '2026-07-16', end: '2026-07-31', dryRun: true } });
-  assert.strictEqual(cut.data.figures.supplies, 2500);
-  // ...and the quantity is not money anywhere.
+  // NO money moved: the unpaid delivery touches no cutoff figure and no note line.
+  let cut = post(ctx, { token, action: 'cutoff', payload: { start: '2026-07-16', end: '2026-07-31', dryRun: true } });
+  assert.strictEqual(cut.data.figures.supplies, 0, 'an unpaid delivery must not appear as money paid');
   assert.strictEqual(cut.data.figures.total, 0);
+  assert.match(cut.data.note_text, /\nSupplies - \n/, 'the note line stays blank');
+
+  // The supplier is paid days later: an ORDINARY Supplies expense, money only.
+  assert.strictEqual(post(ctx, { token, action: 'saveExpense',
+    payload: { date: '2026-07-25', category: 'Supplies', item: 'binayaran ang harina', amount: 2500,
+      backlogRef: '', notes: '', entryId: 'deliv-1-pay' } }).ok, true);
+  cut = post(ctx, { token, action: 'cutoff', payload: { start: '2026-07-16', end: '2026-07-31', dryRun: true } });
+  assert.strictEqual(cut.data.figures.supplies, 2500, 'the payment is counted once, when it is paid');
   assert.ok(!Object.prototype.hasOwnProperty.call(cut.data.figures, 'stock'));
 
-  // Octopus deliveries land on their own note line but still move stock.
+  // ...and the payment moved NOTHING on the shelf.
   const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
-  const row = boot.data.expenses.find(x => x.entry_id === 'deliv-1');
-  assert.strictEqual(row.stock_product, 'Takoyaki Flour', 'snake_case on the wire');
-  assert.strictEqual(row.stock_qty, 10);
+  assert.strictEqual(boot.data.stockItems.find(x => x.product === 'Takoyaki Flour').on_hand, 10,
+    'money leaving is not goods arriving');
+  const pay = boot.data.expenses.find(x => x.entry_id === 'deliv-1-pay');
+  assert.strictEqual(pay.stock_product, '', 'the payment row carries no stock');
+  assert.strictEqual(pay.stock_qty, 0);
+  // The delivery ships in its own windowed collection, snake_case rows.
+  assert.deepStrictEqual(boot.data.stockDeliveries.map(r => [r.date, r.product, r.qty, r.entry_id]),
+    [['2026-07-20', 'Takoyaki Flour', 10, 'deliv-1']]);
 });
 
 test('a stocktake becomes the new baseline; that day is already inside it', () => {
@@ -2058,22 +2094,19 @@ test('deliveries and counts are CHECKED against the product list, unlike usage',
   const { ctx, token } = freshSetup();
   // A typo here would credit a product that never shows up anywhere.
   let r = post(ctx, {
-    token, action: 'saveExpense',
-    payload: { date: '2026-07-20', category: 'Supplies', item: 'x', amount: 100,
-      stockProduct: 'Bonitoo', stockQty: 2, entryId: 'bad-1' }
+    token, action: 'saveStockDelivery',
+    payload: { date: '2026-07-20', product: 'Bonitoo', qty: 2, entryId: 'bad-1' }
   });
   assert.strictEqual(r.ok, false); assert.match(r.error, /no stock product called "Bonitoo"/);
   // A quantity with nothing named is meaningless.
   r = post(ctx, {
-    token, action: 'saveExpense',
-    payload: { date: '2026-07-20', category: 'Supplies', item: 'x', amount: 100,
-      stockQty: 2, entryId: 'bad-2' }
+    token, action: 'saveStockDelivery',
+    payload: { date: '2026-07-20', qty: 2, entryId: 'bad-2' }
   });
-  assert.strictEqual(r.ok, false); assert.match(r.error, /Say what arrived/);
+  assert.strictEqual(r.ok, false); assert.match(r.error, /which product arrived/);
   r = post(ctx, {
-    token, action: 'saveExpense',
-    payload: { date: '2026-07-20', category: 'Supplies', item: 'x', amount: 100,
-      stockProduct: 'Bonito', stockQty: -1, entryId: 'bad-3' }
+    token, action: 'saveStockDelivery',
+    payload: { date: '2026-07-20', product: 'Bonito', qty: -1, entryId: 'bad-3' }
   });
   assert.strictEqual(r.ok, false); assert.match(r.error, /cannot be negative/);
   // An ordinary expense with neither is completely normal.
@@ -2105,17 +2138,16 @@ test('a fractional delivery and a fractional stocktake are refused, like usage',
   // half a gallon on the shelf and contradicts every screen that says otherwise.
   const { ctx, ss, token } = freshSetup();
 
-  // You receive 2 gallons, never 1.5, and stock_qty is added straight into on hand.
+  // You receive 2 gallons, never 1.5, and the quantity goes straight into on hand.
   let r = post(ctx, {
-    token, action: 'saveExpense',
-    payload: { date: '2026-07-20', category: 'Supplies', item: 'sauce', amount: 1600,
-      stockProduct: 'Takoyaki Sauce', stockQty: 1.5, entryId: 'frac-deliv' }
+    token, action: 'saveStockDelivery',
+    payload: { date: '2026-07-20', product: 'Takoyaki Sauce', qty: 1.5, entryId: 'frac-deliv' }
   });
   assert.strictEqual(r.ok, false);
   assert.match(r.error, /whole unit/, 'the same plain English saveDay already uses');
   assert.match(r.error, /Takoyaki Sauce/, 'and which product it is about');
-  assert.strictEqual(ss.getSheetByName('Expenses').getDataRange().getValues().length - 1, 0,
-    'and the MONEY must not land either — the quantity rides on that same row');
+  assert.strictEqual(ss.getSheetByName('StockDeliveries').getDataRange().getValues().length - 1, 0,
+    'nothing fractional may land in the tab');
 
   // A stocktake BECOMES the baseline, so a 2.5 typed here is not one bad row:
   // every on-hand figure for that product carries the half until the next count.
@@ -2145,9 +2177,8 @@ test('a fractional delivery and a fractional stocktake are refused, like usage',
   });
   assert.strictEqual(r.ok, false); assert.match(r.error, /cannot be negative/);
   r = post(ctx, {
-    token, action: 'saveExpense',
-    payload: { date: '2026-07-21', category: 'Supplies', item: 'x', amount: 10,
-      stockProduct: 'Bonito', stockQty: -0.5, entryId: 'neg-deliv' }
+    token, action: 'saveStockDelivery',
+    payload: { date: '2026-07-21', product: 'Bonito', qty: -0.5, entryId: 'neg-deliv' }
   });
   assert.strictEqual(r.ok, false); assert.match(r.error, /cannot be negative/);
 });
@@ -2327,9 +2358,8 @@ test('an inherited property name is not a whitelisted setting or a product', () 
 
   // Same trap on the product lookups a delivery and a stocktake go through.
   r = post(ctx, {
-    token, action: 'saveExpense',
-    payload: { date: '2026-07-20', category: 'Supplies', item: 'x', amount: 10,
-      stockProduct: 'toString', stockQty: 1, entryId: 'proto-1' }
+    token, action: 'saveStockDelivery',
+    payload: { date: '2026-07-20', product: 'toString', qty: 1, entryId: 'proto-1' }
   });
   assert.strictEqual(r.ok, false); assert.match(r.error, /no stock product called "toString"/);
   r = post(ctx, {
@@ -3709,6 +3739,153 @@ test('the DailyLog row is written LAST: a mid-save crash leaves no day that look
   assert.strictEqual(ss.getSheetByName('DailyLog').getDataRange().getValues().slice(1)
     .filter(x => x[0] === '2026-07-25').length, 0,
     'no DailyLog row may claim a day whose counts were never written — the retry rewrites cleanly');
+});
+
+// ---------------------------------------------------------------------------
+// 22. Receiving stock is its OWN action (v2.6.0). Suppliers deliver on credit:
+// goods arriving (StockDeliveries) and money leaving (Expenses) are two events
+// on two days. One door in, one door out, one door for money — and the legacy
+// expense-attached rows keep counting into on-hand forever.
+// ---------------------------------------------------------------------------
+console.log('\n--- 22. Receiving stock is its OWN action (v2.6.0) ---');
+
+// The refusal, byte for byte. The phone shows this sentence on the red card, so
+// the wording is part of the contract.
+const EXPENSE_STOCK_REFUSAL =
+  'Deliveries are recorded under Stock on hand now, so this expense should carry money only.';
+
+test('saveExpense REFUSES new stock fields in one plain sentence, and writes nothing', () => {
+  const { ctx, ss, token } = freshSetup();
+  const attempts = [
+    { stockProduct: 'Takoyaki Flour', stockQty: 4 },   // the old delivery shape
+    { stockProduct: 'Takoyaki Flour' },                // a product with no quantity
+    { stockQty: 4 },                                   // a quantity with no product
+    { stockProduct: 'Bonitoo', stockQty: 0 }           // even a zero, even a typo
+  ];
+  attempts.forEach((extra, i) => {
+    const r = post(ctx, { token, action: 'saveExpense',
+      payload: Object.assign({ date: '2026-07-20', category: 'Supplies', item: 'harina',
+        amount: 500, backlogRef: '', notes: '', entryId: 'refuse-' + i }, extra) });
+    assert.strictEqual(r.ok, false, 'attempt ' + i + ' must be refused');
+    assert.strictEqual(r.error, EXPENSE_STOCK_REFUSAL,
+      'the sentence must point at Stock came in, byte for byte');
+  });
+  assert.strictEqual(ss.getSheetByName('Expenses').getDataRange().getValues().length - 1, 0,
+    'no half-expense may land: the money goes with the refusal');
+  // BLANK stock fields are what every ordinary queued expense carries — normal.
+  const ok = post(ctx, { token, action: 'saveExpense',
+    payload: { date: '2026-07-20', category: 'Supplies', item: 'harina', amount: 500,
+      backlogRef: '', notes: '', stockProduct: '', stockQty: '', entryId: 'plain-ok' } });
+  assert.strictEqual(ok.ok, true, ok.error);
+});
+
+test('a LEGACY expense-attached delivery keeps counting forever — even through a re-save', () => {
+  const { ctx, ss, token } = freshSetup();
+  legacyDeliver(ctx, ss, '2026-07-10', 'Takoyaki Sauce', 3, 900, 'leg-1');
+  assert.strictEqual(onHand(ctx, token, 'Takoyaki Sauce').on_hand, 3,
+    'a quantity already in the sheet is history, and history is never restated');
+
+  // Mixed doors: a new-flow delivery adds on TOP of the legacy row.
+  assert.strictEqual(post(ctx, { token, action: 'saveStockDelivery',
+    payload: { date: '2026-07-20', product: 'Takoyaki Sauce', qty: 2, entryId: 'leg-new' } }).ok, true);
+  const it = onHand(ctx, token, 'Takoyaki Sauce');
+  assert.strictEqual(it.delivered_since, 5, 'legacy 3 + new 2, both doors');
+  assert.strictEqual(it.on_hand, 5);
+
+  // A replayed EDIT of that legacy row (money only — the new shape) must not
+  // wipe its stock cells: saveExpense no longer writes those two columns at all.
+  assert.strictEqual(post(ctx, { token, action: 'saveExpense',
+    payload: { date: '2026-07-10', category: 'Supplies', item: 'delivery (legacy, edited)',
+      amount: 950, backlogRef: '', notes: '', entryId: 'leg-1' } }).ok, true);
+  const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
+  const row = boot.data.expenses.find(x => x.entry_id === 'leg-1');
+  assert.strictEqual(row.amount, 950, 'the money edit lands');
+  assert.strictEqual(row.stock_product, 'Takoyaki Sauce',
+    're-saving the expense wiped the legacy stock cells — the shelf just lost 3 gallons');
+  assert.strictEqual(row.stock_qty, 3);
+  assert.strictEqual(boot.data.stockItems.find(x => x.product === 'Takoyaki Sauce').on_hand, 5);
+});
+
+test('saveStockDelivery: at least 1 whole unit, and a replay never books a delivery twice', () => {
+  const { ctx, ss, token } = freshSetup();
+  // Zero is not a delivery.
+  let r = post(ctx, { token, action: 'saveStockDelivery',
+    payload: { date: '2026-07-20', product: 'Bonito', qty: 0, entryId: 'zero-1' } });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /at least 1 whole unit/);
+  // The event-date clamps, same words as every other recorded event.
+  r = post(ctx, { token, action: 'saveStockDelivery',
+    payload: { date: '2027-01-01', product: 'Bonito', qty: 1, entryId: 'fut-1' } });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /has not happened yet/);
+  r = post(ctx, { token, action: 'saveStockDelivery',
+    payload: { date: '2019-12-31', product: 'Bonito', qty: 1, entryId: 'old-1' } });
+  assert.strictEqual(r.ok, false); assert.match(r.error, /before 2020/);
+
+  // Idempotent replay: the same entryId converges on ONE row...
+  const payload = { date: '2026-07-20', product: 'Bonito', qty: 4, entryId: 'replay-1' };
+  const r1 = post(ctx, { token, action: 'saveStockDelivery', payload });
+  const r2 = post(ctx, { token, action: 'saveStockDelivery', payload });
+  assert.strictEqual(r1.ok, true, r1.error);
+  assert.deepStrictEqual(r1.data, r2.data, 'a replay must answer the same figure');
+  assert.strictEqual(r1.data.on_hand, 4);
+  assert.strictEqual(ss.getSheetByName('StockDeliveries').getDataRange().getValues().length - 1, 1,
+    'a queue replay must not put the same gallons on the shelf twice');
+  // ...and a corrected re-send moves the figure instead of adding to it.
+  const fixed = post(ctx, { token, action: 'saveStockDelivery',
+    payload: { date: '2026-07-20', product: 'Bonito', qty: 2, entryId: 'replay-1' } });
+  assert.strictEqual(fixed.data.on_hand, 2, 'a correction replaces, never accumulates');
+  assert.strictEqual(onHand(ctx, token, 'Bonito').on_hand, 2);
+});
+
+test('delivered_before carries BOTH doors, and bootstrap ships only the window', () => {
+  const { ctx, ss, token } = freshSetup();
+  const OLD_LEGACY = ymdDaysAgo(120);   // both strictly before the 90-day window
+  const OLD_NEW = ymdDaysAgo(100);
+  const RECENT = ymdDaysAgo(5);
+  legacyDeliver(ctx, ss, OLD_LEGACY, 'Takoyaki Flour', 3, 600, 'win-leg');
+  assert.strictEqual(post(ctx, { token, action: 'saveStockDelivery',
+    payload: { date: OLD_NEW, product: 'Takoyaki Flour', qty: 2, entryId: 'win-old' } }).ok, true);
+  assert.strictEqual(post(ctx, { token, action: 'saveStockDelivery',
+    payload: { date: RECENT, product: 'Takoyaki Flour', qty: 4, entryId: 'win-new' } }).ok, true);
+  useStock(ctx, token, ymdDaysAgo(4), 'Takoyaki Flour', 1, 'win-use');
+
+  const r = post(ctx, { token, action: 'bootstrap', payload: {} });
+  const flour = r.data.stockItems.find(x => x.product === 'Takoyaki Flour');
+  assert.strictEqual(flour.delivered_since, 9, '3 legacy + 2 old + 4 recent — the whole history');
+  assert.strictEqual(flour.delivered_before, 5,
+    'the pre-window part must carry BOTH doors: the legacy 3 AND the StockDeliveries 2');
+  assert.strictEqual(flour.on_hand, 8, '0 + 9 − 1');
+  assert.deepStrictEqual(r.data.stockDeliveries.map(x => [x.date, x.qty]), [[RECENT, 4]],
+    'only in-window delivery rows ship — the phone adds them on top of delivered_before');
+});
+
+test('a hand-typed loose date on a StockDeliveries row is normalized on read', () => {
+  const { ctx, ss, token } = freshSetup();
+  // The owner types straight into the tab: slash date, no leading zeros.
+  const inWin = ymdDaysAgo(10);                       // e.g. 2026-07-22
+  const loose = inWin.replace(/-0?(\d+)-0?(\d+)$/, '/$1/$2'); // -> 2026/7/22
+  ctx.appendObjects(ss, 'StockDeliveries', [{
+    date: loose, product: 'Aonori', qty: 6, entry_id: 'hand-dlv', updated_at: ''
+  }]);
+  const r = post(ctx, { token, action: 'bootstrap', payload: {} });
+  assert.deepStrictEqual(r.data.stockDeliveries.map(x => [x.date, x.product, x.qty]),
+    [[inWin, 'Aonori', 6]], 'the loose date must arrive canonical, not invisible');
+  assert.strictEqual(r.data.stockItems.find(x => x.product === 'Aonori').on_hand, 6,
+    'hand-typed goods still reach the shelf');
+});
+
+test('setupSheet creates StockDeliveries with plain-text date columns, append-only', () => {
+  const { ss } = freshSetup();
+  const sh = ss.getSheetByName('StockDeliveries');
+  assert.ok(sh, 'the tab must exist after migration');
+  assert.deepStrictEqual(
+    sh.getRange(1, 1, 1, 5).getValues()[0],
+    ['date', 'product', 'qty', 'entry_id', 'updated_at']);
+  // date (col 1) and updated_at (col 5) are "@" so Sheets never coerces the
+  // yyyy-MM-dd strings into locale-dependent Date cells.
+  assert.strictEqual(sh.columnFormats[1], '@', 'date column must be plain text');
+  assert.strictEqual(sh.columnFormats[5], '@', 'updated_at column must be plain text');
+  assert.strictEqual(sh.frozenRows, 1);
 });
 
 // ---------------------------------------------------------------------------

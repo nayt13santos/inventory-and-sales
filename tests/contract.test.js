@@ -184,7 +184,9 @@ return {
   set attention(v){ attention = v; },
   get splitEdits(){ return splitEdits; },
   pick, normPrice, normBacklog, normDay, normCount, normExpense, normStockItem,
+  normStockDelivery, sanitizeQueue, sanitizeState,
   applyBootstrap, applyLocalDay, applyLocalExpense, applyLocalStockCount,
+  applyLocalStockDelivery,
   applyLocalCutoffSplit, applyLocalPrices, applyServerDay, reapplyQueue,
   backlogBalance,
   loadBentaForm, bentaPayload, computeDay, computeCutoff, buildNote,
@@ -245,6 +247,9 @@ const CONTRACT = {
   // older than the bootstrap window from on-hand.
   'bootstrap.stockItems[]':    [['on_hand', 'onHand'], ['reorder_at', 'reorderAt'], ['opening_qty', 'openingQty'], ['opening_date', 'openingDate'], ['baseline_qty', 'baselineQty'], ['baseline_date', 'baselineDate'], ['delivered_since', 'deliveredSince'], ['used_since', 'usedSince'], ['delivered_before', 'deliveredBefore'], ['used_before', 'usedBefore']],
   'bootstrap.stockCounts[]':   [['counted_qty', 'countedQty'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
+  // v2.6.0: goods arriving are their own rows now. A camelCase slip here would
+  // read as 0 delivered on the phone — a full shelf shown empty.
+  'bootstrap.stockDeliveries[]': [['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
   'bootstrap.cutoffInputs[]':  [['split_amount', 'splitAmount'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
   // `supplies_total` is gone with the retired supplies card; dropped_skus is the
   // saveDay key the phone still has to read. excluded_total is the day's money
@@ -255,6 +260,7 @@ const CONTRACT = {
   'saveDay.lines[]':       [['cheese_qty', 'cheeseQty'], ['regular_qty', 'regularQty'], ['gcash_qty', 'gcashQty'], ['gcash_cheese_qty', 'gcashCheeseQty'], ['gcash_amount', 'gcashAmount'], ['in_cutoff', 'inCutoff']],
   'saveExpense':           [['entry_id', 'entryId']],
   'saveStockCount':        [['entry_id', 'entryId'], ['on_hand', 'onHand']],
+  'saveStockDelivery':     [['entry_id', 'entryId'], ['on_hand', 'onHand']],
   'saveCutoffSplit':       [['entry_id', 'entryId'], ['split_amount', 'splitAmount'], ['per_partner', 'perPartner']],
   'cutoff':                [['note_text', 'noteText']],
   // excluded_lines is the DISPLAY-ONLY block under the note. It enters no other
@@ -287,7 +293,8 @@ function assertPairs(where, sample, pairs) {
 // range CONTAINER keys named in SPEC.md. Everything inside a row must be
 // snake_case, because rows are stored verbatim in state_v1.
 const CAMEL_CONTAINERS = {
-  stockItems: true, stockUsage: true, stockCounts: true, cutoffInputs: true, lastCutoff: true
+  stockItems: true, stockUsage: true, stockCounts: true, stockDeliveries: true,
+  cutoffInputs: true, lastCutoff: true
 };
 
 /** Walk a whole response tree and fail on ANY camelCase key. This is the guard
@@ -367,11 +374,26 @@ const BACKLOG_PAYLOAD = {
   date: '2026-07-20', category: 'Backlog', item: 'hulog', amount: 700,
   backlogRef: 'Ref', notes: '', entryId: 'seam-exp-1'
 };
-// A delivery: money on the expense row, quantity riding along on it.
+// A delivery is its OWN event now (v2.6.0): the QUANTITY through
+// saveStockDelivery — no money anywhere near it, because the goods arrive on
+// credit — and the PAYMENT, days or weeks later, as an ordinary Supplies
+// expense with no stock attached.
 const DELIVERY_PAYLOAD = {
-  date: '2026-07-22', category: 'Supplies', item: 'sako ng harina', amount: 500,
-  backlogRef: '', notes: '', stockProduct: 'Takoyaki Flour', stockQty: 4,
-  entryId: 'seam-deliv-1'
+  date: '2026-07-22', product: 'Takoyaki Flour', qty: 4, entryId: 'seam-deliv-1'
+};
+const PAYMENT_PAYLOAD = {
+  date: '2026-07-22', category: 'Supplies', item: 'sako ng harina (paid)', amount: 500,
+  backlogRef: '', notes: '', entryId: 'seam-pay-1'
+};
+// A LEGACY delivery — a pre-v2.6.0 expense row carrying stock_product/stock_qty.
+// saveExpense refuses NEW rows like this, so the fixture writes it the only way
+// it exists in the wild: already sitting in the sheet. It must keep counting
+// into on-hand forever. Dated in the PREVIOUS cutoff so EXPECT.supplies stays
+// the payment alone.
+const LEGACY_DELIVERY_ROW = {
+  date: '2026-07-08', category: 'Supplies', item: 'delivery (legacy)', amount: 350,
+  backlog_ref: '', notes: '', entry_id: 'seam-legacy-1',
+  updated_at: '2026-07-08 20:00:00', stock_product: 'Japanese Mayo', stock_qty: 2
 };
 const COUNT_PAYLOAD = {
   date: '2026-07-24', product: 'Bonito', qty: 3, entryId: 'seam-count-1'
@@ -385,7 +407,7 @@ const EXPECT = {
   box6Amount: 275,
   total: 1045, gcash: 250, cash: 795, custom: 250, customGcash: 250,
   salary: 200,            // one open day inside PERIOD, at the seeded ₱200
-  supplies: 500,          // the delivery's peso amount, counted once
+  supplies: 500,          // the PAYMENT's peso amount, counted once, when paid
   split: 2000, perPartner: 1000,
   remaining: 1045 - 2000 - 500 - 200 - 700,
   refTotal: 6700, refPaid: 700, refBalance: 6000,
@@ -400,8 +422,12 @@ function buildFixture() {
   assert.strictEqual(stockDay.ok, true, 'saveDay (stock) failed: ' + stockDay.error);
   const saveExpense = post(ctx, { token, action: 'saveExpense', payload: BACKLOG_PAYLOAD });
   assert.strictEqual(saveExpense.ok, true, 'saveExpense failed: ' + saveExpense.error);
-  const delivery = post(ctx, { token, action: 'saveExpense', payload: DELIVERY_PAYLOAD });
-  assert.strictEqual(delivery.ok, true, 'saveExpense (delivery) failed: ' + delivery.error);
+  const delivery = post(ctx, { token, action: 'saveStockDelivery', payload: DELIVERY_PAYLOAD });
+  assert.strictEqual(delivery.ok, true, 'saveStockDelivery failed: ' + delivery.error);
+  const payment = post(ctx, { token, action: 'saveExpense', payload: PAYMENT_PAYLOAD });
+  assert.strictEqual(payment.ok, true, 'saveExpense (payment) failed: ' + payment.error);
+  // The legacy expense-attached delivery, hand-placed by header name.
+  ctx.appendObjects(ss, 'Expenses', [LEGACY_DELIVERY_ROW]);
   const stockCount = post(ctx, { token, action: 'saveStockCount', payload: COUNT_PAYLOAD });
   assert.strictEqual(stockCount.ok, true, 'saveStockCount failed: ' + stockCount.error);
   const split = post(ctx, { token, action: 'saveCutoffSplit', payload: SPLIT_PAYLOAD });
@@ -413,7 +439,7 @@ function buildFixture() {
   return {
     ctx, ss, token,
     saveDay: saveDay.data, stockDay: stockDay.data,
-    saveExpense: saveExpense.data, delivery: delivery.data,
+    saveExpense: saveExpense.data, delivery: delivery.data, payment: payment.data,
     stockCount: stockCount.data, split: split.data,
     cutoff: cutoff.data, boot: boot.data
   };
@@ -630,11 +656,11 @@ test('the phone computes the SAME on-hand figure the server did', () => {
 
 test('a delivery then a unit opened leaves the right figure, with no server at all', () => {
   // Demo mode / a brand-new phone: no bootstrap, so every figure here is the
-  // phone's own arithmetic. This is the owner's own worked example.
+  // phone's own arithmetic. This is the owner's own worked example — through
+  // "Stock came in" (v2.6.0), with no money anywhere in it.
   const app = loadClient();
-  app.applyLocalExpense({ date: '2026-08-01', category: 'Supplies', item: 'sauce',
-    amount: 900, backlogRef: '', notes: '',
-    stockProduct: 'Takoyaki Sauce', stockQty: 2, entryId: 'demo-deliv' });
+  app.applyLocalStockDelivery({ date: '2026-08-01', product: 'Takoyaki Sauce', qty: 2,
+    entryId: 'demo-deliv' });
   let sauce = app.stockStatusList().find(s => s.product === 'Takoyaki Sauce');
   assert.strictEqual(sauce.on_hand, 2, 'the delivery did not reach the ledger');
   app.applyLocalDay({ date: '2026-08-02', closed: false, staff: 'Mama', customAmount: 0,
@@ -664,20 +690,50 @@ test('on hand may read NEGATIVE on the phone too, never clamped', () => {
     'usage against a zero baseline must read honestly negative, not 0');
 });
 
-test('a delivery keeps its quantity on the expense row that paid for it', () => {
-  const row = F.boot.expenses.find(e => e.entry_id === DELIVERY_PAYLOAD.entryId);
-  assert.strictEqual(row.stock_product, 'Takoyaki Flour');
-  assert.strictEqual(row.stock_qty, 4);
-  assert.strictEqual(row.amount, DELIVERY_PAYLOAD.amount, 'the money is on the same row');
+test('a delivery is quantity only; a legacy expense-attached row keeps counting (v2.6.0)', () => {
+  // The NEW door: the delivery ships as its own row, no money anywhere on it.
+  assert.deepStrictEqual(
+    F.boot.stockDeliveries.map(r => [r.date, r.product, r.qty, r.entry_id]),
+    [[DELIVERY_PAYLOAD.date, 'Takoyaki Flour', 4, DELIVERY_PAYLOAD.entryId]]);
+  assert.strictEqual(F.delivery.on_hand, 2, 'the reply carries the recomputed shelf figure (4 in − 2 opened)');
+  // The PAYMENT is an ordinary expense with blank stock cells.
+  const pay = F.boot.expenses.find(e => e.entry_id === PAYMENT_PAYLOAD.entryId);
+  assert.strictEqual(pay.amount, PAYMENT_PAYLOAD.amount);
+  assert.strictEqual(pay.stock_product, '', 'money leaving is not goods arriving');
+  assert.strictEqual(pay.stock_qty, 0);
+  // The LEGACY door: a pre-v2.6.0 row still carries its quantity AND its money,
+  // and both still count — history is never restated.
+  const legacy = F.boot.expenses.find(e => e.entry_id === LEGACY_DELIVERY_ROW.entry_id);
+  assert.strictEqual(legacy.stock_product, 'Japanese Mayo');
+  assert.strictEqual(legacy.stock_qty, 2);
+  assert.strictEqual(legacy.amount, 350, 'the legacy money is on the same row, counted once');
+  assert.strictEqual(F.boot.stockItems.find(x => x.product === 'Japanese Mayo').on_hand, 2,
+    'a quantity already in the sheet keeps counting into on-hand forever');
   // An ordinary expense carries the keys, blank — never undefined, which the
   // phone would render as "undefined" or drop on the floor.
   const plain = F.boot.expenses.find(e => e.entry_id === BACKLOG_PAYLOAD.entryId);
   assert.strictEqual(plain.stock_product, '');
   assert.strictEqual(plain.stock_qty, 0);
-  // The client normalizer keeps the row usable either way (it is money).
+  // The client normalizers keep every row usable.
   const app = syncedClient(F.boot);
-  assert.strictEqual(app.state.expenses[DELIVERY_PAYLOAD.entryId].amount, DELIVERY_PAYLOAD.amount);
-  assert.strictEqual(app.state.expenses[DELIVERY_PAYLOAD.entryId].category, 'Supplies');
+  assert.strictEqual(app.state.expenses[PAYMENT_PAYLOAD.entryId].amount, PAYMENT_PAYLOAD.amount);
+  assert.strictEqual(app.state.expenses[PAYMENT_PAYLOAD.entryId].category, 'Supplies');
+  assert.deepStrictEqual((app.state.stockDeliveries[DELIVERY_PAYLOAD.date] || []).map(r => [r.product, r.qty]),
+    [['Takoyaki Flour', 4]], 'the delivery must survive the seam into the phone mirror');
+});
+
+test('the delivery mirror survives an app restart (state_v1 round trip) (v2.6.0)', () => {
+  // Closing and reopening the app rebuilds the whole mirror through
+  // sanitizeState. A collection dropped there under-reads on-hand on every
+  // app start until the next sync — with no error anywhere.
+  const app = syncedClient(F.boot);
+  app.applyLocalStockDelivery({ date: '2026-07-23', product: 'Takoyaki Sauce', qty: 2,
+    entryId: 'restart-dlv' });
+  const restored = app.sanitizeState(JSON.parse(JSON.stringify(app.state)));
+  assert.deepStrictEqual((restored.stockDeliveries[DELIVERY_PAYLOAD.date] || []).map(r => [r.product, r.qty]),
+    [['Takoyaki Flour', 4]], 'the synced delivery must survive the restart');
+  assert.deepStrictEqual((restored.stockDeliveries['2026-07-23'] || []).map(r => [r.product, r.qty, r.entry_id]),
+    [['Takoyaki Sauce', 2, 'restart-dlv']], 'a still-queued delivery must survive the restart too');
 });
 
 // ---------------------------------------------------------------------------
@@ -833,11 +889,13 @@ function contractSamples() {
     'bootstrap.stockUsage[]':    F.boot.stockUsage,
     'bootstrap.stockItems[]':    F.boot.stockItems,
     'bootstrap.stockCounts[]':   F.boot.stockCounts,
+    'bootstrap.stockDeliveries[]': F.boot.stockDeliveries,
     'bootstrap.cutoffInputs[]':  F.boot.cutoffInputs,
     'saveDay':              F.saveDay,
     'saveDay.lines[]':      F.saveDay.lines,
     'saveExpense':          F.saveExpense,
     'saveStockCount':       F.stockCount,
+    'saveStockDelivery':    F.delivery,
     'saveCutoffSplit':      F.split,
     'cutoff':               F.cutoff,
     'cutoff.figures':       F.cutoff.figures,
@@ -1711,6 +1769,8 @@ test('all four new fixtures ship snake_case for every contracted key', () => {
   assertPairs('bucket bootstrap.counts[]', BK.boot.counts, pairs['bootstrap.counts[]']);
   assertPairs('spec bootstrap.stockUsage[]', SP.boot.stockUsage, pairs['bootstrap.stockUsage[]']);
   assertPairs('spec bootstrap.stockItems[]', SP.boot.stockItems, pairs['bootstrap.stockItems[]']);
+  assertPairs('bootstrap.stockDeliveries[]', F.boot.stockDeliveries, pairs['bootstrap.stockDeliveries[]']);
+  assertPairs('saveStockDelivery', F.delivery, pairs['saveStockDelivery']);
   assertPairs('spec cutoff', SP.cutoff, pairs['cutoff']);
   assertPairs('spec cutoff.figures', SP.cutoff.figures, pairs['cutoff.figures']);
   // `range` returns the same row shapes as bootstrap and had no coverage at all.
@@ -1733,7 +1793,8 @@ test('NO response anywhere contains a camelCase key (only the named containers)'
   assertNoCamelKeys('bucket saveDay', BK.saveDay);
   assertNoCamelKeys('stock saveDay', F.stockDay);
   assertNoCamelKeys('saveExpense', F.saveExpense);
-  assertNoCamelKeys('delivery saveExpense', F.delivery);
+  assertNoCamelKeys('saveStockDelivery', F.delivery);
+  assertNoCamelKeys('payment saveExpense', F.payment);
   assertNoCamelKeys('saveStockCount', F.stockCount);
   assertNoCamelKeys('saveCutoffSplit', F.split);
   assertNoCamelKeys('cutoff', F.cutoff);
@@ -1839,6 +1900,16 @@ test('an expense deleted in the sheet disappears from the phone', () => {
     expenses: F.boot.expenses.filter(e => (e.entry_id || e.entryId) !== gone)
   }));
   assert.ok(!app.state.expenses[gone], 'the deleted expense must be gone');
+});
+
+test('a delivery deleted in the sheet disappears from the phone (v2.6.0)', () => {
+  const app = syncedClient(F.boot);
+  const d = DELIVERY_PAYLOAD.date;
+  assert.ok((app.state.stockDeliveries[d] || []).length, 'precondition: the phone holds the delivery');
+  assert.ok(d >= F.boot.window_start, 'precondition: inside the window');
+  app.applyBootstrap(Object.assign({}, F.boot, { stockDeliveries: [] }));
+  assert.ok(!app.state.stockDeliveries[d],
+    'a delivery removed in the sheet must leave the phone — and the shelf figure with it');
 });
 
 test('inside a stated window, an omitted day IS deleted (server is authoritative)', () => {
@@ -1973,6 +2044,23 @@ test('M1: replaying the attention list is idempotent (no doubled rows)', () => {
   app.reapplyQueue();
   const rows = (app.state.stockCounts['2026-07-26'] || []);
   assert.strictEqual(rows.length, 1, 'a replayed stocktake must upsert, never duplicate');
+});
+
+test('M1: a QUEUED delivery survives a bootstrap that lands before it drains (v2.6.0)', () => {
+  // Mama logs an arrival with no signal; a sync completes before the queue
+  // drains. The snapshot covers the date, so without a replay the delivery —
+  // and its shelf figure — would vanish until the sheet answered.
+  const app = syncedClient(F.boot);
+  const before = app.stockStatusList().find(s => s.product === 'Takoyaki Sauce').on_hand;
+  const dlv = { date: '2026-07-27', product: 'Takoyaki Sauce', qty: 3, entryId: 'q-dlv-1' };
+  app.applyLocalStockDelivery(dlv);
+  app.queue.push({ action: 'saveStockDelivery', payload: dlv, tries: 0 });
+  app.applyBootstrap(F.boot);
+  const rows = (app.state.stockDeliveries[dlv.date] || []).filter(r => r.entry_id === 'q-dlv-1');
+  assert.strictEqual(rows.length, 1, 'the queued delivery was wiped by the snapshot');
+  assert.strictEqual(rows[0].qty, 3);
+  assert.strictEqual(app.stockStatusList().find(s => s.product === 'Takoyaki Sauce').on_hand,
+    before + 3, 'the shelf must keep showing the queued arrival');
 });
 
 // --- M2: never render a note that contradicts the figures above it -----------
@@ -3086,6 +3174,7 @@ return {
   get storageFull(){ return storageFull; },
   hooks, cfg: config,
   applyBootstrap, applyLocalDay, applyLocalExpense, applyLocalStockCount,
+  applyLocalStockDelivery, applyLocalDeleteExpense, sanitizeQueue,
   applyServerDay, reapplyQueue,
   enqueue, drainQueue, doBootstrap,
   noteAttention, attentionForDate, dateNotInSheet, clearAttentionFor,
@@ -3495,9 +3584,9 @@ test('a local stock reduction moves on-hand at once — the carry floor is gone 
   const D = ymdDaysAgo(6);
   assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveStockItems',
     payload: { rows: [{ product: 'Takoyaki Flour', unit: 'pack', reorderAt: 2, active: true }] } }).ok, true);
-  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveExpense', payload: {
-    date: D, category: 'Supplies', item: 'harina', amount: 600, backlogRef: '', notes: '',
-    stockProduct: 'Takoyaki Flour', stockQty: 6, entryId: 'st-deliv' } }).ok, true);
+  // Goods arrive through their OWN door now (v2.6.0) — no money anywhere on it.
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveStockDelivery', payload: {
+    date: D, product: 'Takoyaki Flour', qty: 6, entryId: 'st-deliv' } }).ok, true);
   const day = { date: D, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
     counts: [], stock: [{ product: 'Takoyaki Flour', qty: 5 }], entryId: 'st-day' };
   assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: day }).ok, true);
@@ -3516,60 +3605,78 @@ test('a local stock reduction moves on-hand at once — the carry floor is gone 
   app.applyLocalDay(Object.assign({}, day, { closed: true }));
   assert.strictEqual(flour().on_hand, 6, 'a closed day opened nothing');
 
-  // (c) the delivery deleted drops on-hand AND fires the low warning NOW.
-  app.applyLocalDeleteExpense({ entryId: 'st-deliv' });
-  assert.strictEqual(flour().on_hand, 0, 'a deleted delivery must leave the shelf');
+  // (c) the delivery retyped (same entryId) counts at its corrected size, and
+  // the low warning fires on the corrected figure NOW — not at the next
+  // bootstrap — and clears again when the correction says it no longer holds.
+  const deliv = qty => app.applyLocalStockDelivery({ date: D, product: 'Takoyaki Flour', qty,
+    entryId: 'st-deliv' });
+  deliv(1);
+  assert.strictEqual(flour().on_hand, 1, '6 retyped as 1: five packs leave the shelf at once');
   assert.strictEqual(flour().low, true,
     'reorder point 2: the warning must fire on the corrected figure, not wait for the next bootstrap');
-
-  // (d) a retyped delivery counts at its corrected size, and clears a warning
-  // that no longer holds.
-  const deliv = qty => app.applyLocalExpense({ date: D, category: 'Supplies', item: 'harina',
-    amount: 600, backlogRef: '', notes: '', stockProduct: 'Takoyaki Flour', stockQty: qty,
-    entryId: 'st-deliv' });
   deliv(40);
   assert.strictEqual(flour().on_hand, 40, '40 mistyped');
   deliv(4);
   assert.strictEqual(flour().on_hand, 4, 'retyped as 4: the mirror is the truth');
   assert.strictEqual(flour().low, false, 'a false low must clear with the correction');
+
+  // (d) a LEGACY expense-attached delivery this phone still holds: deleting
+  // that expense takes its quantity off the shelf the moment the row goes.
+  app.state.expenses['st-legacy'] = { date: D, category: 'Supplies', item: 'harina (legacy)',
+    amount: 600, backlog_ref: '', notes: '', entry_id: 'st-legacy', updated_at: '',
+    stock_product: 'Takoyaki Flour', stock_qty: 3 };
+  assert.strictEqual(flour().on_hand, 7, 'the legacy row still counts into on-hand');
+  app.applyLocalDeleteExpense({ entryId: 'st-legacy' });
+  assert.strictEqual(flour().on_hand, 4, 'a deleted legacy delivery must leave the shelf');
 });
 
 test('deliveries older than the bootstrap window still count — split out, never topped up (v2.5.1)', () => {
   const srv = loadServer();
   const OLD = ymdDaysAgo(120);                      // strictly before window_start
   const D = ymdDaysAgo(4);
-  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveExpense', payload: {
-    date: OLD, category: 'Supplies', item: 'harina', amount: 1000, backlogRef: '', notes: '',
-    stockProduct: 'Takoyaki Flour', stockQty: 10, entryId: 'old-deliv' } }).ok, true);
+  // BOTH pre-window doors: a v2.6.0 StockDeliveries row, and a legacy
+  // expense-attached row — hand-placed, because saveExpense refuses new ones —
+  // that must keep counting forever.
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveStockDelivery', payload: {
+    date: OLD, product: 'Takoyaki Flour', qty: 10, entryId: 'old-deliv' } }).ok, true);
+  srv.ctx.appendObjects(srv.ss, 'Expenses', [{
+    date: OLD, category: 'Supplies', item: 'harina (legacy)', amount: 500,
+    backlog_ref: '', notes: '', entry_id: 'old-legacy', updated_at: OLD + ' 09:00:00',
+    stock_product: 'Takoyaki Flour', stock_qty: 5 }]);
   assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
     date: D, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
     counts: [], stock: [{ product: 'Takoyaki Flour', qty: 3 }], entryId: 'st-day2' } }).ok, true);
 
   const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} });
   const item = boot.data.stockItems.find(x => x.product === 'Takoyaki Flour');
-  assert.strictEqual(item.delivered_before, 10, 'the pre-window part must ship split out');
+  assert.strictEqual(item.delivered_before, 15, 'the pre-window part of BOTH doors must ship split out');
   assert.strictEqual(item.used_before, 0, 'the usage is inside the window');
-  assert.strictEqual(item.on_hand, 7, 'the server counts the whole history');
-  assert.ok(!boot.data.expenses.some(e => e.entry_id === 'old-deliv'),
+  assert.strictEqual(item.on_hand, 12, 'the server counts the whole history');
+  assert.ok(!boot.data.stockDeliveries.some(e => e.entry_id === 'old-deliv'),
     'precondition: the old delivery is OUTSIDE the snapshot — the phone cannot see its row');
+  assert.ok(!boot.data.expenses.some(e => e.entry_id === 'old-legacy'),
+    'precondition: the legacy row is OUTSIDE the snapshot too');
 
   const app = syncedClient(boot.data);
-  assert.strictEqual(app.stockStatusList().find(s => s.product === 'Takoyaki Flour').on_hand, 7,
+  const onHand = () => app.stockStatusList().find(s => s.product === 'Takoyaki Flour').on_hand;
+  assert.strictEqual(onHand(), 12,
     'delivered_before + the phone\'s own in-window rows must reach the server figure — counted once');
 
-  // A phone that still HOLDS a pre-window row (kept local history from an
-  // earlier, wider snapshot) must not count it twice — that row is already
+  // A phone that still HOLDS those pre-window rows (kept local history from an
+  // earlier, wider snapshot) must not count them twice — both are already
   // inside delivered_before.
-  app.state.expenses['old-deliv'] = { date: OLD, category: 'Supplies', item: 'harina',
-    amount: 1000, backlog_ref: '', notes: '', entry_id: 'old-deliv', updated_at: '',
-    stock_product: 'Takoyaki Flour', stock_qty: 10 };
-  assert.strictEqual(app.stockStatusList().find(s => s.product === 'Takoyaki Flour').on_hand, 7,
-    'a pre-window row this phone kept is already inside delivered_before — once, not twice');
+  app.state.stockDeliveries[OLD] = [{ date: OLD, product: 'Takoyaki Flour', qty: 10,
+    entry_id: 'old-deliv', updated_at: '' }];
+  app.state.expenses['old-legacy'] = { date: OLD, category: 'Supplies', item: 'harina (legacy)',
+    amount: 500, backlog_ref: '', notes: '', entry_id: 'old-legacy', updated_at: '',
+    stock_product: 'Takoyaki Flour', stock_qty: 5 };
+  assert.strictEqual(onHand(), 12,
+    'pre-window rows this phone kept are already inside delivered_before — once, not twice');
 
   // A NEWER local stocktake re-baselines: the pre-window parts are already
   // inside the counted figure, so they must NOT be added a second time.
   app.applyLocalStockCount({ date: ymdDaysAgo(2), product: 'Takoyaki Flour', qty: 9, entryId: 'st-cnt' });
-  assert.strictEqual(app.stockStatusList().find(s => s.product === 'Takoyaki Flour').on_hand, 9,
+  assert.strictEqual(onHand(), 9,
     'a local count is an end-of-day truth — nothing before it may be re-added');
 });
 
