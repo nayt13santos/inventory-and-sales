@@ -77,7 +77,7 @@ history once, and never classify the past by the present.**
   "Save day" books an empty day plus ₱200 wage with no confirmation.
 - A blank price on an active sku silently books those sales at ₱0 (server side; Maintenance
   already refuses it).
-- Full list with reproductions: `confirmed-findings.json` (kept with the test scratchpad)
+- Full list with reproductions: the per-fix revert tables in `tests/README.md` (the original `confirmed-findings.json` lived in a session scratchpad that did not survive; the README tables carry every finding with the test that bites it)
   and the two campaign outputs.
 
 ## What came back CLEAN

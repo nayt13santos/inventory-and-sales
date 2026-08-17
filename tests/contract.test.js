@@ -3177,10 +3177,11 @@ return {
   applyLocalStockDelivery, applyLocalDeleteExpense, sanitizeQueue,
   applyServerDay, reapplyQueue,
   enqueue, drainQueue, doBootstrap,
-  noteAttention, attentionForDate, dateNotInSheet, clearAttentionFor,
+  noteAttention, attentionForDate, dateNotInSheet, daySavedMessage, clearAttentionFor,
   attnCopy, persistAttention, isLegacyGcashPayload,
   loadBentaForm, bentaPayload, computeDay, computeCutoff, validateBenta,
   entryDateError, cutoffExpenseDate, previewIncomplete, cutoffMissingDays,
+  cutoffMissingMoney,
   currentPeriod, periodKey, storedPricesFor, priceOnDay,
   // v2.5.1: the server-derived figures the drain must refresh, the day-effective
   // flag, the blank-omitting settings payload and the phone's note refusal.
@@ -3398,6 +3399,88 @@ test('a legacy-GCash day is NOT "not in the sheet", and its card says so', () =>
   app.noteAttention('rejected', 'saveDay', dayPayload(D, 5, 'rej-x'), 'refused');
   assert.strictEqual(app.dateNotInSheet(D), true);
   assert.strictEqual(app.cutoffMissingDays({ start: D, end: D }).length, 1);
+});
+
+atest('a refused DELIVERY is not a missing day: nothing blocks the note (v2.6.0)', async () => {
+  // The ship gate's QXD-1: any dated rejection used to read as "a day is not
+  // in the sheet", so a refused stock delivery — no money in it at all —
+  // showed the red missing-day banner, refused the note with "the note would
+  // be short", and pointed at a Sales screen with nothing to fix. Every
+  // pre-2.6.0 phone replaying a queued stock-carrying expense would have hit
+  // this on its FIRST sync after the upgrade.
+  const srv = loadServer();
+  const D = ymdDaysAgo(3);
+  const app = loadSyncClient();
+  app.cfg.apiUrl = 'https://api.example/exec';
+  app.cfg.token = srv.token;
+  app.hooks.fetch = async (url, opts) => {
+    const reply = srv.ctx.doPost({ postData: { contents: opts.body } }).getContent();
+    return { ok: true, text: async () => reply };
+  };
+
+  // The day itself reaches the sheet.
+  const day = dayPayload(D, 10, 'qxd-day');
+  app.applyLocalDay(day);
+  app.enqueue('saveDay', day);
+  await app.drainQueue();
+  assert.strictEqual(app.attention.length, 0, 'precondition: the day saved clean');
+
+  // A delivery for a product the sheet does not know is refused by the server.
+  const dlv = { date: D, product: 'Renamed Product', qty: 3, entryId: 'qxd-dlv' };
+  app.applyLocalStockDelivery(dlv);
+  app.enqueue('saveStockDelivery', dlv);
+  await app.drainQueue();
+  assert.strictEqual(app.attention.length, 1, 'the refusal lands as a red card');
+  assert.strictEqual(app.attention[0].action, 'saveStockDelivery');
+
+  const per = { start: D, end: D };
+  assert.strictEqual(app.dateNotInSheet(D), false,
+    'the day IS in the sheet — a refused delivery must not say otherwise');
+  assert.deepStrictEqual(app.cutoffMissingDays(per), [],
+    'no missing-day banner and no note block for a refusal that carries no money');
+  assert.deepStrictEqual(app.cutoffMissingMoney(per), [],
+    'a delivery is not money either');
+  assert.match(app.daySavedMessage(D), /^Saved /,
+    'the "already saved" message stays for a day the sheet holds');
+  // And the note is provably not short: the server's own dryRun total matches
+  // the phone's preview to the peso with the refused delivery on the list.
+  const dry = post(srv.ctx, { token: srv.token, action: 'cutoff',
+    payload: { start: per.start, end: per.end, dryRun: true } });
+  assert.strictEqual(dry.ok, true, dry.error);
+  assert.strictEqual(dry.data.figures.total, app.computeCutoff(per).total);
+});
+
+test('a refused EXPENSE blocks the note as MONEY, honestly — never as a missing day', () => {
+  const app = loadSyncClient();
+  const D = ymdDaysAgo(2);
+  // Exactly what drainQueue does with a server refusal of an expense.
+  app.noteAttention('rejected', 'saveExpense', { date: D, category: 'Supplies',
+    item: 'flour (unpaid)', amount: 500, backlogRef: '', notes: '', entryId: 'qxd-exp' }, 'refused');
+  const per = { start: D, end: D };
+  assert.strictEqual(app.dateNotInSheet(D), false, 'the DAY is not what was refused');
+  assert.deepStrictEqual(app.cutoffMissingDays(per), [], 'no false missing-day claim');
+  assert.strictEqual(app.cutoffMissingMoney(per).length, 1,
+    'but the note must wait: the preview and the sheet disagree about this money');
+  // A refused stocktake joins the delivery on the no-money side.
+  app.noteAttention('rejected', 'saveStockCount', { date: D, product: 'Bonito', qty: 2,
+    entryId: 'qxd-cnt' }, 'refused');
+  assert.strictEqual(app.cutoffMissingMoney(per).length, 1, 'a stocktake is not money');
+  assert.deepStrictEqual(app.cutoffMissingDays(per), [], 'nor a day');
+  // And a refused saveDay still fires the day-missing machinery, unchanged.
+  app.noteAttention('rejected', 'saveDay', dayPayload(D, 5, 'qxd-day2'), 'refused');
+  assert.strictEqual(app.dateNotInSheet(D), true);
+  assert.strictEqual(app.cutoffMissingDays(per).length, 1);
+});
+
+test('the note waits on refused money with its own sentence (source pins)', () => {
+  // generateNote's second stop and the Cutoff screen's second banner are
+  // DOM-bound, so pin the shipped source: the guard call and both sentences.
+  assert.match(HTML, /const missingMoney = cutoffMissingMoney\(per\);/,
+    'generateNote/renderCutoff must consult the money list');
+  assert.match(HTML, /has not reached the sheet, so the note would be wrong\. Fix it from the red card under More first\./,
+    'the refusal toast names money, not a missing day');
+  assert.match(HTML, /An expense needs attention first/,
+    'the Cutoff banner names an expense, not a missing day');
 });
 
 test('reopening a saved day shows the money it was SAVED at (client price snapshot)', () => {

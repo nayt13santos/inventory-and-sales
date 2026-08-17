@@ -180,8 +180,7 @@
  *     already-saved day's money between the cutoff and the excluded block —
  *     not even via a note-only re-save from an older phone's queue.
  *
- * RECEIVING STOCK IS ITS OWN ACTION (bundled into the parked release; VERSION
- * stays 2.5.1 until the owner resumes shipping — owner, 2026-08-11: "supplies
+ * RECEIVING STOCK IS ITS OWN ACTION (v2.6.0 — owner, 2026-08-11: "supplies
  * adding must be separate… it's not paid yet"). Suppliers deliver on credit, so
  * goods arriving and money leaving are two different events:
  *   - new tab StockDeliveries (date | product | qty | entry_id | updated_at) and
@@ -199,7 +198,7 @@
  *     unpaid delivery correctly never touches the cutoff.
  */
 
-var VERSION = '2.5.1';
+var VERSION = '2.6.0';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
