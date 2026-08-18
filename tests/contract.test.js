@@ -213,6 +213,9 @@ return {
   // omitting settings payload, and the phone's own note refusal.
   cutoffOnDay, storedPricesFor, priceOnDay, applyLocalDeleteExpense,
   maintSettingsPayload, noteRefusal,
+  // v2.7.0: the SOD prefill's lookup, the one rule for the GCash card starting
+  // open, the expense form's picklist, and the two display-only builders.
+  prevEodFor, gcashHeld, supplyPicklist, cashRecapHTML, gcashSummaryText,
   // Live refs so a test can put the client in demo / API / still-queued states.
   // enqueue() is not in the extracted slabs, so tests push onto q directly.
   cfg: config, q: queue
@@ -232,11 +235,18 @@ const CONTRACT = {
   // and the phone's fallback for an unknown flag has to be "counts in", so the
   // owner's excluded sku would quietly rejoin the note.
   'bootstrap.prices[]':    [['cheese_price', 'cheesePrice'], ['in_cutoff', 'inCutoff']],
-  'bootstrap.days[]':      [['custom_amount', 'customAmount'], ['custom_gcash', 'customGcash'], ['excluded_total', 'excludedTotal'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
+  // gcash_converted (v2.7.0) is tin cash swapped for a GCash transfer — already
+  // inside the stored `gcash` and out of `cash`. lid_boxes is a plain count with
+  // no money. A camelCase slip on either would read as 0 on the phone: the
+  // receipt's converted-cash line would vanish while the split it explains stays.
+  'bootstrap.days[]':      [['custom_amount', 'customAmount'], ['custom_gcash', 'customGcash'], ['excluded_total', 'excludedTotal'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt'], ['gcash_converted', 'gcashConverted'], ['lid_boxes', 'lidBoxes']],
   // in_cutoff on a COUNT row is the v2.4.1 snapshot: what the flag said when that
   // day was saved. History is classified by it, so a camelCase slip would make
   // every row look unsnapshotted and hand the classification back to the live flag.
-  'bootstrap.counts[]':    [['cheese_qty', 'cheeseQty'], ['regular_qty', 'regularQty'], ['gcash_qty', 'gcashQty'], ['gcash_cheese_qty', 'gcashCheeseQty'], ['gcash_amount', 'gcashAmount'], ['entry_id', 'entryId'], ['in_cutoff', 'inCutoff']],
+  // custom_qty (v2.7.0) is the special-order snapshot: this row's `amount`
+  // prices sold − custom_qty units, and only the row can say so. A camelCase
+  // slip would read 0 and the receipt would re-price the order's boxes.
+  'bootstrap.counts[]':    [['cheese_qty', 'cheeseQty'], ['regular_qty', 'regularQty'], ['gcash_qty', 'gcashQty'], ['gcash_cheese_qty', 'gcashCheeseQty'], ['gcash_amount', 'gcashAmount'], ['entry_id', 'entryId'], ['in_cutoff', 'inCutoff'], ['custom_qty', 'customQty']],
   'bootstrap.expenses[]':  [['backlog_ref', 'backlogRef'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt'], ['stock_product', 'stockProduct'], ['stock_qty', 'stockQty']],
   'bootstrap.backlogs[]':  [['total_amount', 'totalAmount'], ['start_date', 'startDate']],
   'bootstrap.stockUsage[]':    [['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
@@ -256,8 +266,8 @@ const CONTRACT = {
   // from excluded skus — the receipt prints it BELOW the totals, and the cash tin
   // only reconciles as Cash + excluded_total, so a misread key is a tin that
   // never balances.
-  'saveDay':               [['dropped_skus', 'droppedSkus'], ['excluded_total', 'excludedTotal']],
-  'saveDay.lines[]':       [['cheese_qty', 'cheeseQty'], ['regular_qty', 'regularQty'], ['gcash_qty', 'gcashQty'], ['gcash_cheese_qty', 'gcashCheeseQty'], ['gcash_amount', 'gcashAmount'], ['in_cutoff', 'inCutoff']],
+  'saveDay':               [['dropped_skus', 'droppedSkus'], ['excluded_total', 'excludedTotal'], ['gcash_converted', 'gcashConverted'], ['lid_boxes', 'lidBoxes']],
+  'saveDay.lines[]':       [['cheese_qty', 'cheeseQty'], ['regular_qty', 'regularQty'], ['gcash_qty', 'gcashQty'], ['gcash_cheese_qty', 'gcashCheeseQty'], ['gcash_amount', 'gcashAmount'], ['in_cutoff', 'inCutoff'], ['custom_qty', 'customQty']],
   'saveExpense':           [['entry_id', 'entryId']],
   'saveStockCount':        [['entry_id', 'entryId'], ['on_hand', 'onHand']],
   'saveStockDelivery':     [['entry_id', 'entryId'], ['on_hand', 'onHand']],
@@ -615,12 +625,18 @@ test('the stock list reaches the phone with its unit and a COMPUTED on-hand', ()
   assert.strictEqual(flour.delivered_since, 4);
   assert.strictEqual(flour.used_since, 2);
   assert.strictEqual(flour.on_hand, 2, '0 + 4 − 2, computed on the server and shipped');
-  assert.strictEqual(flour.low, false);
+  // PIN MOVED (v2.7.0, deliberate): setupSheet backfills the owner's reorder
+  // point for flour (5), so 2 on hand is at-or-below it and the warning fires.
+  assert.strictEqual(flour.reorder_at, 5, 'the backfilled threshold ships with the row');
+  assert.strictEqual(flour.low, true, '2 on hand at a threshold of 5 must warn');
   // A blank THRESHOLD has to survive the seam for the same reason a blank
   // baseline date does: 0 is a real threshold, and the Maintenance screen hands
   // back whatever it was given — so a coerced 0 is written into the sheet on the
-  // first save and the owner's untouched cells stop being blank.
-  assert.strictEqual(flour.reorder_at, '', 'a blank reorder point must arrive blank');
+  // first save and the owner's untouched cells stop being blank. Aonori is not
+  // on the backfill list, so its cell is still the seeded blank.
+  const aonori = F.boot.stockItems.find(r => r.product === 'Aonori');
+  assert.strictEqual(aonori.reorder_at, '', 'a blank reorder point must arrive blank');
+  assert.strictEqual(aonori.low, false, 'a blank threshold warns about nothing');
   // The stocktake became Bonito's baseline, and the phone is told the figures
   // behind it so it can explain them without holding the history.
   const bonito = F.boot.stockItems.find(r => r.product === 'Bonito');
@@ -1596,21 +1612,24 @@ test('MIGRATION: setupSheet appends the new columns and moves no existing cell',
 
   const counts = ss.getSheetByName('DailyCounts').getDataRange().getValues();
   assert.deepStrictEqual(counts[0],
-    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price']),
+    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty']),
     'the new DailyCounts columns must be APPENDED, in schema order');
   const log = ss.getSheetByName('DailyLog').getDataRange().getValues();
   assert.deepStrictEqual(log[0],
-    OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total']));
-  assert.deepStrictEqual(counts[1].slice(9), ['', '', '', '', '', ''],
+    OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes']));
+  assert.deepStrictEqual(counts[1].slice(9), ['', '', '', '', '', '', ''],
     'the appended cells start blank on a historical row: "that day was all cash", ' +
     'an in_cutoff with no snapshot (which reads TRUE — the money was inside the ' +
-    'totals when saved), and prices that fall back to the current Prices tab');
+    'totals when saved), prices that fall back to the current Prices tab, and a ' +
+    'custom_qty that reads 0 — no special order drew from a pre-column row');
   // PIN MOVED (v2.5.0, deliberate): the migration BACKFILLS the salary cell of
   // every non-closed historical row with the CURRENT daily_salary — resolving
   // it at read time meant a later rate change silently re-priced history.
-  assert.deepStrictEqual(log[1].slice(10), ['', 200, ''],
-    'salary backfilled at the current rate; custom_gcash and excluded_total stay blank');
-  assert.deepStrictEqual(log[2].slice(10), ['', 200, ''],
+  // gcash_converted / lid_boxes (v2.7.0) stay blank: nothing was converted and
+  // no lids were counted on a day saved before the columns existed.
+  assert.deepStrictEqual(log[1].slice(10), ['', 200, '', '', ''],
+    'salary backfilled at the current rate; the other appended cells stay blank');
+  assert.deepStrictEqual(log[2].slice(10), ['', 200, '', '', ''],
     'every non-closed historical row gets the backfill');
   // The one appended column whose BLANK means TRUE. Asserted here, at the
   // migration itself, because this is the moment every live price row gets one.
@@ -1648,9 +1667,9 @@ test('MIGRATION: a sheet whose grid is only 9 columns wide is widened, not broke
   const ctx = loadOn(ss);
   assert.strictEqual(ctx.setupSheet(), OLD_TOKEN);
   const counts = ss.getSheetByName('DailyCounts');
-  assert.ok(counts.getMaxColumns() >= 15, 'the grid was not widened');
+  assert.ok(counts.getMaxColumns() >= 16, 'the grid was not widened');
   assert.deepStrictEqual(counts.getDataRange().getValues()[0],
-    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price']));
+    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty']));
   assert.deepStrictEqual(counts.getDataRange().getValues()[1].slice(0, 9), OLD_COUNT_ROWS[0]);
   const boot = post(ctx, { token: OLD_TOKEN, action: 'bootstrap', payload: {} });
   assert.strictEqual(boot.ok, true, boot.error);
@@ -1717,9 +1736,9 @@ test('MIGRATION: a saveDay after migrating works and leaves the legacy rows byte
     assert.deepStrictEqual(ss.getSheetByName('DailyLog').getDataRange().getValues()[i + 1].slice(0, 10), old,
       'legacy DailyLog row ' + (i + 1) + ' changed');
   });
-  // The new columns were written in their REAL positions (10-15), not guessed.
+  // The new columns were written in their REAL positions (10-16), not guessed.
   assert.deepStrictEqual(counts.slice(1).find(x => x[0] === '2026-07-28' && x[1] === 'box4'),
-    ['2026-07-28', 'box4', 10, 0, 10, 2, 5, 530, 'post-migration-1', 2, 1, 160, true, 50, 60]);
+    ['2026-07-28', 'box4', 10, 0, 10, 2, 5, 530, 'post-migration-1', 2, 1, 160, true, 50, 60, 0]);
 
   // And the phone reads the mixed-vintage sheet correctly in one bootstrap.
   const boot = post(ctx, { token: OLD_TOKEN, action: 'bootstrap', payload: {} });
@@ -4068,6 +4087,322 @@ atest('a refused split is announced as a split, not an expense (v2.5.1)', async 
   assert.match(toasts, /refused the split/, 'the toast must name the split');
   assert.ok(!/refused an expense/.test(toasts),
     'a split refusal announced as "an expense" sends her hunting through the wrong screen');
+});
+
+// ===========================================================================
+// 19. v2.7.0 across the seam: converted cash, lid boxes, special-order boxes,
+// the SOD prefill, the collapsed GCash card and the display-only cash recap.
+//
+// One night with every new figure on it. Box 4: sold 10, cheese 2, GCash 1,
+// 3 boxes into the special order -> regular 4, amount (4+1)*50 + 2*60 = 370.
+// Custom order 500 of which 100 GCash; ₱120 of tin cash converted; 4 lid boxes.
+// TOTAL 870,  GCash 50 + 100 + 120 = 270,  Cash 600.
+// ===========================================================================
+console.log('\n--- 19. v2.7.0 across the seam: converted cash, special orders, prefill ---');
+
+const V27_DAY = ymdDaysAgo(2);
+const V27_PAYLOAD = {
+  date: V27_DAY, closed: false, staff: 'Mama',
+  customAmount: 500, customGcash: 100,
+  gcashConverted: 120, lidBoxes: 4,
+  customBoxes: [{ sku: 'box4', qty: 3 }],
+  notes: '', counts: [
+    { sku: 'box4', sod: 10, eod: 0, cheeseQty: 2, gcashQty: 1, gcashCheeseQty: 0 }
+  ],
+  entryId: 'v27-day-1'
+};
+function v27Fixture() {
+  const srv = loadServer();
+  const save = post(srv.ctx, { token: srv.token, action: 'saveDay', payload: V27_PAYLOAD });
+  assert.strictEqual(save.ok, true, save.error);
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} });
+  assert.strictEqual(boot.ok, true, boot.error);
+  return { srv, save: save.data, boot: boot.data };
+}
+
+test('the new figures survive the whole seam: reply, bootstrap, form, payload, preview', () => {
+  const { srv, save, boot } = v27Fixture();
+  assert.strictEqual(save.total, 870);
+  assert.strictEqual(save.gcash, 270, 'sku 50 + custom 100 + converted 120');
+  assert.strictEqual(save.cash, 600);
+  assert.strictEqual(save.gcash_converted, 120);
+  assert.strictEqual(save.lid_boxes, 4);
+  const line = save.lines.find(l => l.sku === 'box4');
+  assert.strictEqual(line.custom_qty, 3);
+  assert.strictEqual(line.regular_qty, 4, '10 − 3 paid − 3 custom');
+  assert.strictEqual(line.amount, 370, 'the order\'s boxes carry NO menu-price money');
+  assertNoCamelKeys('saveDay', save);
+
+  // Into the phone's mirror through the real normalizers...
+  const app = syncedClient(boot);
+  const day = app.state.days[V27_DAY];
+  assert.strictEqual(day.gcash_converted, 120);
+  assert.strictEqual(day.lid_boxes, 4);
+  assert.strictEqual((app.state.counts[V27_DAY] || []).find(r => r.sku === 'box4').custom_qty, 3);
+
+  // ...back onto the form...
+  app.loadBentaForm(V27_DAY);
+  assert.strictEqual(app.num(app.benta.gcashConverted), 120);
+  assert.strictEqual(app.num(app.benta.lidBoxes), 4);
+  assert.strictEqual(app.num(app.benta.rows.find(r => r.sku === 'box4').custom), 3);
+  assert.strictEqual(app.benta.gcashOpen, true, 'a day holding GCash figures opens the card');
+
+  // ...out as the same camelCase request...
+  const payload = app.bentaPayload();
+  assert.strictEqual(payload.gcashConverted, 120);
+  assert.strictEqual(payload.lidBoxes, 4);
+  assert.deepStrictEqual(payload.customBoxes, [{ sku: 'box4', qty: 3 }],
+    'only rows holding a figure travel');
+
+  // ...priced identically by the phone's own preview...
+  const c = app.computeDay(payload);
+  assert.strictEqual(c.total, save.total);
+  assert.strictEqual(c.gcash, save.gcash);
+  assert.strictEqual(c.cash, save.cash);
+  assert.strictEqual(c.gcashConverted, 120);
+  assert.strictEqual(c.lidBoxes, 4);
+  const cl = c.lines.find(l => l.sku === 'box4');
+  assert.strictEqual(cl.custom_qty, 3);
+  assert.strictEqual(cl.regular_qty, 4);
+  assert.strictEqual(cl.amount, 370);
+
+  // ...and accepted back by the real server at the same money (a re-save).
+  payload.entryId = 'v27-resave';
+  const r2 = post(srv.ctx, { token: srv.token, action: 'saveDay', payload });
+  assert.strictEqual(r2.ok, true, r2.error);
+  ['total', 'cash', 'gcash', 'gcash_converted', 'lid_boxes', 'excluded_total'].forEach(k => {
+    assert.strictEqual(r2.data[k], save[k], k + ' moved on a no-change re-save');
+  });
+  assert.deepStrictEqual(r2.data.lines.find(l => l.sku === 'box4'), line);
+});
+
+test('normDay/normCount read the new keys snake-first, legacy camelCase second, blank as 0', () => {
+  const app = loadClient();
+  assert.strictEqual(app.normDay({ date: V27_DAY, gcash_converted: 120, lid_boxes: 4 }).gcash_converted, 120);
+  assert.strictEqual(app.normDay({ date: V27_DAY, gcash_converted: 120, lid_boxes: 4 }).lid_boxes, 4);
+  // An older still-deployed server may answer camelCase; money must not zero.
+  const legacy = app.normDay({ date: V27_DAY, gcashConverted: 120, lidBoxes: 4 });
+  assert.strictEqual(legacy.gcash_converted, 120);
+  assert.strictEqual(legacy.lid_boxes, 4);
+  // A day saved before the columns existed carries neither key: 0, never NaN.
+  const old = app.normDay({ date: V27_DAY, total: 500 });
+  assert.strictEqual(old.gcash_converted, 0);
+  assert.strictEqual(old.lid_boxes, 0);
+  assert.strictEqual(app.normCount({ date: V27_DAY, sku: 'box4', custom_qty: 3 }).custom_qty, 3);
+  assert.strictEqual(app.normCount({ date: V27_DAY, sku: 'box4', customQty: 3 }).custom_qty, 3);
+  assert.strictEqual(app.normCount({ date: V27_DAY, sku: 'box4' }).custom_qty, 0);
+});
+
+test('SOD prefill: a fresh date opens at the previous close; a saved day loads its own', () => {
+  const srv = loadServer();
+  const D1 = ymdDaysAgo(6), D2 = ymdDaysAgo(4), CLOSED = ymdDaysAgo(2), FRESH = ymdDaysAgo(3);
+  // Night one: box4 closes at 4, box6 at 5, nori (simple) at 3.
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
+    date: D1, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [
+      { sku: 'box4', sod: 10, eod: 4 }, { sku: 'box6', sod: 6, eod: 5 },
+      { sku: 'nori', sod: 4, eod: 3 }
+    ], entryId: 'pf-d1' } }).ok, true);
+  // Night two: only box4 was counted, closing at 2.
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
+    date: D2, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box4', sod: 7, eod: 2 }], entryId: 'pf-d2' } }).ok, true);
+  // A closed day after those: no counts on it, and it must not blank the chain.
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
+    date: CLOSED, closed: true, staff: '', customAmount: 0, customGcash: 0, notes: '',
+    counts: [], entryId: 'pf-closed' } }).ok, true);
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} });
+  const app = syncedClient(boot.data);
+
+  // A date with NO saved counts: each BOX sku opens at its latest prior close.
+  app.loadBentaForm(FRESH);
+  const row = sku => app.benta.rows.find(r => r.sku === sku);
+  assert.strictEqual(row('box4').sod, 2, 'the LATEST prior day (D2) wins, not the older D1');
+  assert.strictEqual(row('box6').sod, 5, 'a sku D2 did not count reaches back to D1');
+  assert.strictEqual(row('nori').sod, 0, 'a simple sku is not prefilled — boxes only');
+  assert.strictEqual(row('box4').eod, 0, 'only the SOD is prefilled — EOD is tonight\'s count');
+  // A prefill, never a lock: it is an ordinary editable figure on the row.
+  row('box4').sod = 9;
+  assert.strictEqual(app.bentaPayload().counts.find(c => c.sku === 'box4').sod, 9);
+
+  // A SAVED day always loads its own figures — never a prefill over them.
+  app.loadBentaForm(D2);
+  assert.strictEqual(row('box4').sod, 7, 'its own SOD, not D1\'s EOD');
+  assert.strictEqual(row('box4').eod, 2);
+  assert.strictEqual(row('box6').sod, 0,
+    'a saved day shows exactly what it stored — box6 was not counted that night');
+
+  // The day after the CLOSED day still opens at D2's close: a closed day has no
+  // counts and the lookup walks past it.
+  app.loadBentaForm(ymdDaysAgo(1));
+  assert.strictEqual(row('box4').sod, 2);
+
+  // The lookup itself: strictly-before, latest-first, '' when nothing prior.
+  assert.strictEqual(app.prevEodFor('box4', FRESH), 2);
+  assert.strictEqual(app.prevEodFor('box4', D2), 4, 'from D2 the prior close is D1\'s');
+  assert.strictEqual(app.prevEodFor('box4', D1), '', 'no prior day: say nothing, not 0');
+
+  // And a phone with no history at all prefills nothing.
+  const blank = loadClient();
+  blank.loadBentaForm(clientYmd(0));
+  blank.benta.rows.forEach(r => assert.strictEqual(r.sod, 0, r.sku + ' invented an opening count'));
+});
+
+test('the GCash card starts collapsed only when every figure in it is 0', () => {
+  const srv = loadServer();
+  const ALLCASH = ymdDaysAgo(5), CONV = ymdDaysAgo(4), BUCKET = ymdDaysAgo(3);
+  const day = (date, extra, id) => post(srv.ctx, { token: srv.token, action: 'saveDay',
+    payload: Object.assign({ date, closed: false, staff: 'Mama', customAmount: 0,
+      customGcash: 0, notes: '', counts: [Object.assign({ sku: 'box4', sod: 5, eod: 0 },
+      extra.count || {})], entryId: id }, extra.top || {}) });
+  assert.strictEqual(day(ALLCASH, {}, 'gc-a').ok, true);
+  assert.strictEqual(day(CONV, { top: { gcashConverted: 20 } }, 'gc-b').ok, true);
+  assert.strictEqual(day(BUCKET, { count: { gcashQty: 1 } }, 'gc-c').ok, true);
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data;
+
+  const app = syncedClient(boot);
+  app.loadBentaForm(ALLCASH);
+  assert.strictEqual(app.gcashHeld(), false, 'an all-cash night holds no GCash figure');
+  assert.strictEqual(app.benta.gcashOpen, false, 'so the card starts closed');
+  app.loadBentaForm(CONV);
+  assert.strictEqual(app.gcashHeld(), true, 'converted cash alone counts — it lives in this card');
+  assert.strictEqual(app.benta.gcashOpen, true, 'nothing already entered is ever hidden');
+  const app2 = syncedClient(boot);
+  app2.loadBentaForm(BUCKET);
+  assert.strictEqual(app2.benta.gcashOpen, true, 'a GCash bucket opens it too');
+  // The head figure is everything THIS card controls (sku GCash + conversion).
+  assert.strictEqual(app2.gcashSummaryText(app2.computeDay(app2.bentaPayload())), '₱50');
+});
+
+test('the phone refuses the conversion and the special order in the SERVER\'s own words', () => {
+  const { srv, boot } = v27Fixture();
+  // Converted cash above the day's cash: byte-compare against the live server.
+  let app = syncedClient(boot);
+  app.loadBentaForm(V27_DAY);
+  app.benta.gcashConverted = 100000;
+  const convErr = app.validateBenta().gcashConverted;
+  const p1 = app.bentaPayload();
+  p1.entryId = 'v27-conv-refuse';
+  const r1 = post(srv.ctx, { token: srv.token, action: 'saveDay', payload: p1 });
+  assert.strictEqual(r1.ok, false, 'precondition: the server refuses this day');
+  assert.strictEqual(convErr, r1.error,
+    'the inline refusal must be the server\'s sentence, byte for byte');
+  // Special-order boxes beyond sold: same rule, same words.
+  app = syncedClient(boot);
+  app.loadBentaForm(V27_DAY);
+  app.benta.rows.find(r => r.sku === 'box4').custom = 99;
+  const cboxErr = app.validateBenta()['cbox:box4'];
+  const p2 = app.bentaPayload();
+  p2.entryId = 'v27-cbox-refuse';
+  const r2 = post(srv.ctx, { token: srv.token, action: 'saveDay', payload: p2 });
+  assert.strictEqual(r2.ok, false);
+  assert.strictEqual(cboxErr, r2.error);
+  // A day the phone finds clean still lands (the validator blocks no good save).
+  app = syncedClient(boot);
+  app.loadBentaForm(V27_DAY);
+  assert.deepStrictEqual(Object.keys(app.validateBenta()), [], 'the loaded day is clean');
+});
+
+test('"Sold with cash" is display only, and the receipt says the new lines only when non-zero', () => {
+  const { boot } = v27Fixture();
+  const app = syncedClient(boot);
+  app.loadBentaForm(V27_DAY);
+  const c = app.computeDay(app.bentaPayload());
+  const recap = app.cashRecapHTML(c);
+  assert.ok(recap.indexOf('4 regular × ₱50 + 2 cheese × ₱60') !== -1,
+    'the remainder spells out its own arithmetic');
+  assert.ok(recap.indexOf('Custom order paid in cash') !== -1, '500 − 100 GCash = 400 in cash');
+  assert.ok(recap.indexOf('Converted to GCash') !== -1 && recap.indexOf('−₱120') !== -1,
+    'the conversion is shown leaving the cash');
+  assert.ok(recap.indexOf('₱600') !== -1, 'and the figure she counts the tin against');
+  assert.strictEqual(/<input|<button|data-act=/.test(recap), false,
+    'display only: nothing in this card can be typed or tapped');
+
+  // The screen order and the receipt guards are render code, so: source pins.
+  const render = slab('function renderBenta(){', 'const CHEV =');
+  const iBox = render.indexOf('>Box counts<');
+  const iGcash = render.indexOf('gcashCardHTML(');
+  const iCash = render.indexOf('id="cashRecap"');
+  assert.ok(iBox !== -1 && iGcash !== -1 && iCash !== -1, 'all three sections must render');
+  assert.ok(iBox < iGcash && iGcash < iCash, '① Box counts, ② Sold with GCash, ③ Sold with cash — in that order');
+  assert.ok(/How many were cheese\?/.test(render), '① carries the cheese FACT stepper');
+  const receipt = slab('function updateReceipt(){', 'function rLine(label, amt){');
+  assert.ok(/c\.gcashConverted > 0/.test(receipt),
+    'the converted-cash sentence prints only when non-zero');
+  assert.ok(/c\.lidBoxes > 0/.test(receipt), 'the lid count prints only when non-zero');
+  assert.ok(/less ' \+ l\.custom_qty \+ ' for the special order/.test(receipt),
+    'an affected sku says where its boxes went');
+  assert.ok(/cashRecapHTML\(/.test(receipt),
+    'the recap is rebuilt by updateReceipt — one sum, one voice');
+});
+
+test('the supplies picklist crosses the seam, and picking files under Supplies', () => {
+  const SIX = ['Takoyaki Flour', 'Takoyaki Sauce', 'Japanese Mayo', 'Bonito', 'Aonori', 'Togarashi'];
+  // Demo mode (no bootstrap ever): the chips are there from day one.
+  const demo = loadClient();
+  assert.deepStrictEqual(demo.supplyPicklist(), SIX);
+  // The seeded sheet value survives the seam.
+  const app = syncedClient(F.boot);
+  assert.deepStrictEqual(app.supplyPicklist(), SIX);
+  // An owner-edited list is split like `staff`: trimmed, empties dropped.
+  const edited = syncedClient(Object.assign({}, F.boot,
+    { settings: Object.assign({}, F.boot.settings, { supply_picklist: ' Flour , Eggs ,, ' }) }));
+  assert.deepStrictEqual(edited.supplyPicklist(), ['Flour', 'Eggs']);
+  // Empty means the plain form — the old screen, untouched.
+  const none = syncedClient(Object.assign({}, F.boot,
+    { settings: Object.assign({}, F.boot.settings, { supply_picklist: '' }) }));
+  assert.deepStrictEqual(none.supplyPicklist(), []);
+  // Maintenance sends an edit; a cleared field means leave-alone, never wipe.
+  assert.strictEqual(app.maintSettingsPayload({ supply_picklist: 'Flour, Eggs' }).supply_picklist,
+    'Flour, Eggs');
+  assert.ok(!has(app.maintSettingsPayload({ supply_picklist: '  ' }), 'supply_picklist'));
+
+  // The expense form is render code, so the category rule is pinned at source:
+  // chips hidden while the picklist is offered and "Something else" not chosen,
+  // and a picked supply files as category Supplies with the picked name.
+  const gastos = slab('function renderGastos(){', 'function submitGasto(){');
+  assert.ok(/supplyPicklist\(\)/.test(gastos), 'the form offers the picklist first');
+  assert.ok(/const showCats = !plist\.length \|\| gx\.other/.test(gastos),
+    'the category chips show only without a picklist, or on the free-text path');
+  assert.ok(/Something else/.test(gastos), 'free text must stay possible');
+  const submit = slab('function submitGasto(){', 'function deleteGasto(id){');
+  assert.ok(/picked \? 'Supplies' : gx\.category/.test(submit),
+    'a picked supply IS category Supplies — the note line depends on it');
+  assert.ok(/picked \? gx\.pick : gx\.item/.test(submit), 'and the picked name is the item');
+});
+
+atest('a queued pre-2.7.0 saveDay drains and lands byte-identical to the explicit defaults', async () => {
+  const srvA = loadServer();
+  const srvB = loadServer();
+  const D = ymdDaysAgo(5);
+  // Exactly what a pre-2.7.0 build persisted in queue_v1: no gcashConverted,
+  // no lidBoxes, no customBoxes key at all.
+  const oldPayload = {
+    date: D, closed: false, staff: 'Mama', customAmount: 250, customGcash: 50, notes: '',
+    counts: [{ sku: 'box4', sod: 8, eod: 2, cheeseQty: 1, gcashQty: 1, gcashCheeseQty: 0 }],
+    entryId: 'q-pre27-1'
+  };
+  const app = loadSyncClient();
+  app.cfg.apiUrl = 'https://api.example/exec';
+  app.cfg.token = srvA.token;
+  app.queue.push({ action: 'saveDay', payload: oldPayload, tries: 0 });
+  app.hooks.fetch = liveWire(srvA);
+  await app.drainQueue();
+  assert.strictEqual(app.queue.length, 0, 'the queued night landed');
+
+  // Control: the SAME night sent with the explicit v2.7.0 defaults.
+  const rB = post(srvB.ctx, { token: srvB.token, action: 'saveDay',
+    payload: Object.assign({}, oldPayload, { gcashConverted: 0, lidBoxes: 0, customBoxes: [] }) });
+  assert.strictEqual(rB.ok, true, rB.error);
+
+  const bootA = post(srvA.ctx, { token: srvA.token, action: 'bootstrap', payload: {} }).data;
+  const bootB = post(srvB.ctx, { token: srvB.token, action: 'bootstrap', payload: {} }).data;
+  assert.deepStrictEqual(bootA.days.find(d => d.date === D), bootB.days.find(d => d.date === D),
+    'the stored day must be byte-identical — absence means the harmless default');
+  assert.deepStrictEqual(bootA.counts.filter(c => c.date === D), bootB.counts.filter(c => c.date === D));
+  // And the phone's mirror says the same after the drain's own refresh.
+  assert.strictEqual(app.state.days[D].gcash_converted, 0);
+  assert.strictEqual(app.state.days[D].lid_boxes, 0);
 });
 
 // ---------------------------------------------------------------------------

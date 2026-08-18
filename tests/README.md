@@ -178,3 +178,27 @@ Every new behaviour was reverted **one at a time on a scratch copy of the whole 
 | phone: the bootstrap merge keeps deliveries deleted in the sheet | 4 — a delivery deleted in the sheet disappears from the phone (+3) |
 
 The money-mover here is the first revert: with it, "10 flours arrived, not paid yet" forces a price onto unpaid goods again — the exact flaw the owner reported — and the same quantity can enter on-hand through two doors at once.
+
+### v2.7.0 — the nightly screen, mutation-proofed
+
+The eight owner-locked items: reorder-point backfill, the supplies picklist (category hidden when obvious), SOD prefilled from the previous close, **`gcashConverted`** (tin cash swapped for a GCash transfer — moves the split, never the Total, refused past the day's cash), the lid-box count (never money), **`customBoxes`** (a special order draws whole boxes off the counted stack; priced qty = sold − custom), and the three-section Sales screen. `run-tests.js` grew 133 → 146 (section 23) and `contract.test.js` 148 → 156 (section 19, including the CONTRACT pairs for `gcash_converted`/`lid_boxes` on days and `custom_qty` on counts and saveDay lines, both directions). Fifteen existing pins moved with the appended columns and the backfill — each is re-anchored with a `PIN MOVED (v2.7.0, deliberate)` note, never loosened: the migration pins now assert the *wider* header rows and the still-blank appended cells byte-for-byte, and the blank-reorder-point round trip keeps its blank-stays-blank teeth on the three products the backfill does not name.
+
+Every new behaviour was reverted **one at a time on a scratch copy of the whole repo** (rsync, never the repo itself) with both suites run after each revert. **All 13 reverts turned at least one test red; none survived.**
+
+| revert (one behaviour each) | reds — first test that bites |
+| --- | --- |
+| server: gcashConverted dropped from gcash | 3 — gcashConverted moves the split only: total untouched, Total = Cash + GCash holds |
+| server: the cash-floor refusal removed | 2 — the cash floor: converted cash above the day's cash is refused naming both figures |
+| server: customBoxes stops reducing priced qty (the double-count) | 4 — special-order boxes price sold − custom, and the snapshot rides the row |
+| server: the bucket bound forgets the custom qty | 1 — the bucket bound counts the special order — and keeps the old wording when there is none |
+| server: excluded-sku customBoxes accepted | 1 — an excluded sku and a non-box sku cannot feed a special order |
+| server: lidBoxes gains money (added into total) | 3 — lidBoxes is stored and shipped, and moves no money anywhere |
+| server: the backfill overwrites a hand-set reorder_at | 2 — re-running setupSheet never resets an edited stock unit |
+| phone: the prefill reads the SAME day's EOD (`d <= date`) | 1 — SOD prefill: a fresh date opens at the previous close; a saved day loads its own |
+| phone: the picklist stops setting the category | 1 — the supplies picklist crosses the seam, and picking files under Supplies |
+| phone: normDay drops gcash_converted | 4 — the new figures survive the whole seam |
+| phone: bentaPayload stops sending customBoxes | 3 — the new figures survive the whole seam |
+| phone: gcashHeld ignores the converted cash | 1 — the GCash card starts collapsed only when every figure in it is 0 |
+| server: supply_picklist dropped from the saveSettings whitelist | 1 — supply_picklist: seeded, added on migration, whitelisted, and an edit survives setupSheet |
+
+Two of these reverts are the money-movers the release exists to prevent: "customBoxes stops reducing priced qty" books a special order's boxes **twice** — once at menu price and once as the typed amount — so the night reads richer than the tin; and "gcashConverted dropped from gcash" saves a split the GCash app will never reconcile against, on the one figure that exists to be reconciled. The old-payload guarantee has its own pins on both sides: a pre-2.7.0 saveDay computes byte-identical totals and a byte-identical note (`run-tests.js` 23), and a queued pre-2.7.0 day drains through the real `enqueue`/`drainQueue` and lands byte-identical to the explicit defaults (`contract.test.js` 19, async).

@@ -35,8 +35,9 @@
  *
  * KEY CASING — the contract is deliberately asymmetric, do not "tidy" it:
  *   REQUEST  payload keys are camelCase  (cheeseQty, gcashQty, gcashCheeseQty,
- *            customAmount, customGcash, entryId, backlogRef, stockProduct,
- *            stockQty, reorderAt, cheesePrice, dryRun)
+ *            customAmount, customGcash, gcashConverted, lidBoxes, customBoxes,
+ *            entryId, backlogRef, stockProduct, stockQty, reorderAt,
+ *            cheesePrice, dryRun)
  *            — see SPEC.md "API contract".
  *   RESPONSE keys are snake_case (cheese_price, custom_amount, custom_gcash,
  *            entry_id, updated_at, cheese_qty, regular_qty, gcash_qty,
@@ -44,7 +45,8 @@
  *            start_date, per_partner, note_text, generated_at, counted_qty,
  *            split_amount, stock_product, stock_qty, on_hand, reorder_at,
  *            baseline_qty, baseline_date, delivered_since, used_since,
- *            delivered_before, used_before)
+ *            delivered_before, used_before, gcash_converted, lid_boxes,
+ *            custom_qty)
  *            — they mirror the sheet's own column headers and the shape the
  *            PWA persists in localStorage (state_v1). The only camelCase names
  *            a response may carry are the bootstrap/range CONTAINER keys
@@ -196,6 +198,39 @@
  *   - paying the supplier later is an ordinary Supplies expense, so the note's
  *     Supplies line keeps meaning "money actually paid this period" and an
  *     unpaid delivery correctly never touches the cutoff.
+ *
+ * WHAT CHANGED IN v2.7.0 — the nightly screen, laid out the way the stall
+ * works. Every new payload key is OPTIONAL, and absent means the harmless
+ * default (0 / empty) — an old phone's queued day lands with the same totals
+ * and the same note it always produced:
+ *   - CASH CONVERTED TO GCASH: some tin cash is swapped for a GCash transfer
+ *     during the day, so the day's TOTAL is untouched and only the split moves.
+ *     saveDay gains `gcashConverted` (>= 0; REFUSED, naming both figures, when
+ *     it exceeds the day's computed cash — Cash can never go negative).
+ *     DailyLog appends `gcash_converted` (blank legacy cells read 0). The
+ *     roll-up becomes gcash = Σ per-sku gcash_amount + custom_gcash +
+ *     gcash_converted and cash = total − gcash, so Total = Cash + GCash still
+ *     holds by construction, never by argument.
+ *   - SPECIAL ORDERS DRAW THEIR BOXES FROM THE COUNTED STACK: saveDay gains
+ *     `customBoxes:[{sku, qty}]` — whole units of counted box skus the order
+ *     physically used. Per sku qty <= sold, and the sku must be group=box AND
+ *     counting in the cutoff (an excluded sku's money is settled separately, so
+ *     a special order cannot draw from it). The sku's PRICED quantity is
+ *     sold − custom qty: those boxes contribute NO menu-price money — the typed
+ *     custom amount is the order's entire value — and the four buckets describe
+ *     PRICED sales only, so they bound against sold − custom qty. DailyCounts
+ *     appends `custom_qty` (a snapshot like price/cheese_price, rewritten with
+ *     the date block; blank legacy cells read 0).
+ *   - LID BOXES: saveDay gains `lidBoxes` (whole >= 0); DailyLog appends
+ *     `lid_boxes` (blank reads 0). NO price, NO sales money, NO stock tracking,
+ *     NO note impact — twice offered, twice declined.
+ *   - Settings gains `supply_picklist` (the expense form's item picklist),
+ *     seeded from the six stock item names, whitelisted in saveSettings and
+ *     editable under Maintenance like `staff`.
+ *   - setupSheet backfills StockItems.reorder_at ONLY where the cell is BLANK
+ *     (Takoyaki Flour 5, Takoyaki Sauce 1, Japanese Mayo 1 — the owner's
+ *     figures), in the salary-backfill shape: it runs on every migration, and a
+ *     hand-set value — an explicit 0 included — is never overwritten.
  */
 
 var VERSION = '2.6.0';
@@ -250,7 +285,13 @@ var SCHEMA = [
   // excluded_total was appended in v2.4.0: that day's money from in_cutoff=FALSE
   // skus. It is stored NEXT TO the day's money, never inside it — total, cash
   // and gcash all remain the cutoff's figures alone.
-  { name: TAB.DAILY_LOG, headers: ['date', 'closed', 'staff', 'gcash', 'total', 'cash', 'custom_amount', 'notes', 'entry_id', 'updated_at', 'custom_gcash', 'salary', 'excluded_total'], textCols: ['date', 'updated_at'] },
+  // gcash_converted was appended in v2.7.0: tin cash swapped for a GCash
+  // transfer during the day. It moves the SPLIT only — it is already inside
+  // `gcash` and out of `cash`, never inside `total` — and a blank legacy cell
+  // reads 0 (no cash was converted on a day saved before the column existed).
+  // lid_boxes was appended in v2.7.0: a plain count with NO money, NO stock
+  // tracking and NO note impact anywhere. Blank reads 0.
+  { name: TAB.DAILY_LOG, headers: ['date', 'closed', 'staff', 'gcash', 'total', 'cash', 'custom_amount', 'notes', 'entry_id', 'updated_at', 'custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes'], textCols: ['date', 'updated_at'] },
   // gcash_qty / gcash_cheese_qty / gcash_amount were appended in v2.1.0.
   // in_cutoff was appended in v2.4.1: the SNAPSHOT of the sku's flag as it stood
   // when the day was saved, so flipping "counts in the cutoff" later can never
@@ -262,7 +303,12 @@ var SCHEMA = [
   // re-save of the same date reuses them, so correcting a count weeks later can
   // never re-price the night at today's prices. Blank (legacy row) falls back
   // to the current Prices tab.
-  { name: TAB.DAILY_COUNTS, headers: ['date', 'sku', 'sod', 'eod', 'sold', 'cheese_qty', 'regular_qty', 'amount', 'entry_id', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price'], textCols: ['date'] },
+  // custom_qty was appended in v2.7.0: how many of this row's sold boxes a
+  // special order physically used. Those boxes carry NO menu-price money (the
+  // typed custom amount is the order's entire value), so this row's amount was
+  // computed from sold − custom_qty. A snapshot like price/cheese_price,
+  // rewritten with the date block; a blank legacy cell reads 0.
+  { name: TAB.DAILY_COUNTS, headers: ['date', 'sku', 'sod', 'eod', 'sold', 'cheese_qty', 'regular_qty', 'amount', 'entry_id', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty'], textCols: ['date'] },
   // opening_qty / opening_date / reorder_at were appended in v2.3.0 (stock
   // ledger). opening_date is a yyyy-MM-dd string and BLANK means "count the
   // whole history" — see computeStockStatus.
@@ -302,6 +348,10 @@ var EXPENSE_CATEGORIES = ['Supplies', 'Octopus', 'Electric', 'Mama', 'Backlog', 
 var SETTABLE_SETTINGS = {
   branch: 'text',
   staff: 'text',
+  // The expense form's item picklist (v2.7.0): comma-separated item names,
+  // edited under Maintenance like `staff`. Free text — the picklist is a
+  // convenience, never a constraint on what an expense may be called.
+  supply_picklist: 'text',
   daily_salary: 'money',
   split_default: 'money',
   mama_per_cutoff: 'money',
@@ -564,6 +614,19 @@ function apiSaveDay(ss, settings, payload) {
     throw new Error('The GCash part of the custom order (' + fmtAmt(customGcash) +
       ') cannot be more than the custom order amount (' + fmtAmt(custom) + ').');
   }
+  // --- Tin cash swapped for a GCash transfer during the day (v2.7.0). It moves
+  // the SPLIT only — the day's Total is untouched — so it is validated against
+  // the day's computed cash AFTER the roll-up below, where that figure exists.
+  // Absent/blank (every payload queued before v2.7.0) means 0: nothing was
+  // converted, and the split lands exactly where it always did.
+  var gcashConverted = closed ? 0 : numOrThrow(payload.gcashConverted, 'The cash converted to GCash');
+  if (gcashConverted < 0) throw new Error('The cash converted to GCash cannot be negative.');
+  // --- Lid boxes used (v2.7.0). A plain count, whole units like everything
+  // else that is counted: NO price, NO sales money, NO stock tracking, NO note
+  // impact — it is stored, shipped back, and printed on the receipt, nothing
+  // more. Absent means 0, like the other money on an old phone's payload.
+  var lidBoxes = closed ? 0 : intOrThrow(payload.lidBoxes, 'Lid boxes used');
+  if (lidBoxes < 0) throw new Error('Lid boxes used cannot be negative.');
   // payload.gcash is DELIBERATELY IGNORED. GCash used to be typed in from the
   // GCash app; it is now computed from the buckets above. A phone that queued
   // a saveDay before this update still carries the old typed `gcash` field —
@@ -571,6 +634,26 @@ function apiSaveDay(ss, settings, payload) {
 
   var rawCounts = closed ? [] : (payload.counts || []);
   if (!Array.isArray(rawCounts)) throw new Error('counts must be an array.');
+
+  // --- Boxes a special order physically used, per sku (v2.7.0). They come off
+  // the counted stack, so each is validated against ITS count line inside the
+  // loop below (qty <= sold, group=box, counting in the cutoff) — here the
+  // payload is only given shape. Absent (every payload queued before v2.7.0)
+  // means no special order drew boxes, and every sku prices all of its sold.
+  var rawCustomBoxes = closed ? [] : (payload.customBoxes || []);
+  if (!Array.isArray(rawCustomBoxes)) throw new Error('customBoxes must be an array.');
+  var customBySku = Object.create(null);
+  rawCustomBoxes.forEach(function (cb) {
+    cb = cb || {};
+    var cbSku = asStr(cb.sku);
+    // No sku, no identity — skipped like a blank count row.
+    if (!cbSku) return;
+    if (customBySku[cbSku] !== undefined) {
+      throw new Error('Duplicate special-order boxes for sku "' + cbSku + '".');
+    }
+    customBySku[cbSku] = cb.qty;
+  });
+  var customSeen = Object.create(null);
 
   var priceInfo = readPrices(ss);
   var priceMap = priceInfo.map;
@@ -723,14 +806,48 @@ function apiSaveDay(ss, settings, payload) {
       }
     }
 
+    // --- Boxes the special order drew from THIS sku's counted stack (v2.7.0).
+    // Whole units, at most what sold, and only from a box sku whose money
+    // counts in the cutoff: an excluded sku's money is settled separately, so
+    // a special order cannot draw from it — its total would silently shrink by
+    // boxes the typed custom amount already covers. Those boxes contribute NO
+    // menu-price money (the typed custom amount is the order's entire value),
+    // so the sku's PRICED quantity below is sold − customQty.
+    var customQty = 0;
+    if (customBySku[sku] !== undefined) {
+      customSeen[sku] = true;
+      customQty = intOrThrow(customBySku[sku], p.label + ' special-order boxes');
+      if (customQty < 0) throw new Error(p.label + ': special-order boxes cannot be negative.');
+      if (customQty > 0) {
+        if (!inCutoff) {
+          throw new Error(p.label + ' is kept out of the cutoff and its money is settled ' +
+            'separately, so a special order cannot use its boxes.');
+        }
+        if (p.group !== 'box') {
+          throw new Error(p.label + ' is not a box, so a special order cannot use boxes from it.');
+        }
+        if (customQty > sold) {
+          throw new Error(p.label + ': the special order used ' + customQty +
+            ', but only ' + sold + ' were sold.');
+        }
+      }
+    }
+
+    // The four buckets describe PRICED sales only, so they bound against
+    // sold − customQty (v2.7.0) — with no special order that is `sold`, exactly
+    // the guard this always was, word for word.
     var paid = cheeseQty + gcashQty + gcashCheeseQty;
-    if (paid > sold) {
+    if (paid > sold - customQty) {
       throw new Error(p.label + ': cheese (' + cheeseQty + ') + GCash (' + gcashQty +
         ') + GCash cheese (' + gcashCheeseQty + ') adds up to ' + paid +
-        ', but only ' + sold + ' were sold. Lower one of them.');
+        ', but only ' + (sold - customQty) + ' were sold' +
+        (customQty > 0 ? ' at menu price (the special order used ' + customQty + ')' : '') +
+        '. Lower one of them.');
     }
-    // The remainder is plain cash regular — always derived, never sent.
-    var regularQty = sold - paid;
+    // The remainder is plain cash regular — always derived, never sent — and
+    // the special order's boxes are outside it, so the amounts below price
+    // exactly sold − customQty units.
+    var regularQty = sold - paid - customQty;
 
     // --- The EFFECTIVE prices for this line (v2.5.0). A date being RE-SAVED
     // reuses the prices already stored on its own rows — a correction weeks
@@ -784,9 +901,28 @@ function apiSaveDay(ss, settings, payload) {
       // why they do not add up.
       in_cutoff: inCutoff,
       // The prices the money above was computed from — the rest of the snapshot.
-      price: round2(price), cheese_price: round2(cheesePrice)
+      price: round2(price), cheese_price: round2(cheesePrice),
+      // How many of `sold` the special order used (v2.7.0). Part of the same
+      // snapshot: this row's `amount` prices sold − custom_qty units, and the
+      // row alone must be able to say so.
+      custom_qty: customQty
     });
   });
+
+  // A special-order sku the counts do not carry cannot be checked against
+  // anything it sold. A sku that was DROPPED above goes quietly with its count
+  // line (one renamed price row must never cost the whole day); anything else
+  // with a real quantity is refused in the loop's own terms — nothing sold,
+  // so nothing for a special order to use.
+  for (var cbSku in customBySku) {
+    if (customSeen[cbSku] || seenDropped[cbSku]) continue;
+    var strayQty = intOrThrow(customBySku[cbSku], cbSku + ' special-order boxes');
+    if (strayQty < 0) throw new Error(cbSku + ': special-order boxes cannot be negative.');
+    if (strayQty > 0) {
+      throw new Error(cbSku + ': the special order used ' + strayQty +
+        ', but only 0 were sold.');
+    }
+  }
 
   // payload.supplies is DELIBERATELY IGNORED (v2.3.0). The nightly "supplies
   // bought today" card is retired: purchases live in Expenses(Supplies) and
@@ -831,7 +967,19 @@ function apiSaveDay(ss, settings, payload) {
   var counted = lines.filter(function (l) { return l.in_cutoff; });
   var excludedLines = lines.filter(function (l) { return !l.in_cutoff; });
   var total = round2(counted.reduce(function (s, l) { return s + l.amount; }, 0) + custom);
-  var gcash = round2(counted.reduce(function (s, l) { return s + l.gcash_amount; }, 0) + customGcash);
+  var gcashSales = round2(counted.reduce(function (s, l) { return s + l.gcash_amount; }, 0) + customGcash);
+  // Converted cash can only move cash that EXISTS: at most the day's computed
+  // cash before the conversion, so Cash can never go negative (v2.7.0). Refused
+  // naming both figures — a cap applied silently would save a split the tin
+  // does not show.
+  var cashBefore = round2(total - gcashSales);
+  if (gcashConverted > cashBefore) {
+    throw new Error('The cash converted to GCash (' + fmtAmt(gcashConverted) +
+      ") cannot be more than the day's cash (" + fmtAmt(cashBefore) + ').');
+  }
+  // gcash = per-sku GCash + the custom order's GCash + the converted cash, and
+  // cash is the remainder — Total = Cash + GCash by construction, as ever.
+  var gcash = round2(gcashSales + gcashConverted);
   var cash = round2(total - gcash);
   var excludedTotal = round2(excludedLines.reduce(function (s, l) { return s + l.amount; }, 0));
 
@@ -859,7 +1007,10 @@ function apiSaveDay(ss, settings, payload) {
       // ...and the prices themselves (v2.5.0), completing the snapshot: the
       // amounts on this row can now always be explained from the row alone, and
       // a re-save of this date reuses these instead of today's price list.
-      price: l.price, cheese_price: l.cheese_price
+      price: l.price, cheese_price: l.cheese_price,
+      // How many of `sold` the special order used (v2.7.0) — the last piece of
+      // the snapshot: `amount` prices sold − custom_qty units.
+      custom_qty: l.custom_qty
     };
   }));
   rewriteDateBlock(ss, TAB.STOCK_USAGE, date, stockRows.map(function (r) {
@@ -881,7 +1032,8 @@ function apiSaveDay(ss, settings, payload) {
     date: date, closed: closed, staff: staff, gcash: gcash, total: total, cash: cash,
     custom_amount: custom, custom_gcash: customGcash, notes: notes,
     entry_id: entryId, updated_at: stamp, salary: salary,
-    excluded_total: excludedTotal
+    excluded_total: excludedTotal,
+    gcash_converted: gcashConverted, lid_boxes: lidBoxes
   };
   var logRow = buildRow(log, logWidth, logObj, found > 0 ? padRow(log.values[found - 1], logWidth) : null);
   if (found > 0) {
@@ -906,6 +1058,12 @@ function apiSaveDay(ss, settings, payload) {
     // own line BELOW them, because the nori cash sits in the same tin and the
     // tin equals cash + excluded_total. Always present (0 when there is none).
     excluded_total: excludedTotal,
+    // The stored snapshots the phone should show, like `salary` above (v2.7.0):
+    // the converted cash is already inside `gcash` and out of `cash`, and the
+    // receipt prints it only when non-zero; lid boxes are a plain count with no
+    // money anywhere. Always present (0 when there is none).
+    gcash_converted: gcashConverted,
+    lid_boxes: lidBoxes,
     // Always present (empty when nothing was dropped) so the client never has
     // to guess whether an older server simply omitted it.
     dropped_skus: droppedSkus,
@@ -920,7 +1078,10 @@ function apiSaveDay(ss, settings, payload) {
         in_cutoff: l.in_cutoff,
         // The prices this line's money was computed from (v2.5.0), so the
         // phone's mirror of the day matches the sheet's snapshot exactly.
-        price: l.price, cheese_price: l.cheese_price
+        price: l.price, cheese_price: l.cheese_price,
+        // How many of `sold` the special order used (v2.7.0), so the receipt
+        // can print "Box 10 ×6, less 1 for the special order" from the reply.
+        custom_qty: l.custom_qty
       };
     })
   };
@@ -1968,6 +2129,12 @@ function readDays(ss, dailySalary) {
       // Pre-v2.4.0 rows have no column at all -> 0, which is exactly right:
       // there was no excluded sku to sell.
       excluded_total: asNum(cellOf(r, t, 'excluded_total')),
+      // Tin cash swapped for a GCash transfer that day (v2.7.0). Already inside
+      // `gcash` and out of `cash` — the split, not the total. Pre-v2.7.0 rows
+      // have no column at all -> 0: nothing was converted on those days.
+      gcash_converted: asNum(cellOf(r, t, 'gcash_converted')),
+      // Lid boxes used (v2.7.0): a plain count, no money anywhere. Blank -> 0.
+      lid_boxes: asNum(cellOf(r, t, 'lid_boxes')),
       notes: asStr(cellOf(r, t, 'notes')),
       entry_id: asStr(cellOf(r, t, 'entry_id')),
       updated_at: asStr(cellOf(r, t, 'updated_at'))
@@ -2018,7 +2185,11 @@ function readCounts(ss, priceMap) {
       // snapshot, else the sku's current price. The phone shows a loaded day's
       // arithmetic with these, so editing an old night never re-prices it.
       price: asStr(rawPrice) === '' ? (p ? p.price : 0) : asNum(rawPrice),
-      cheese_price: asStr(rawCheese) === '' ? (p ? p.cheese_price : 0) : asNum(rawCheese)
+      cheese_price: asStr(rawCheese) === '' ? (p ? p.cheese_price : 0) : asNum(rawCheese),
+      // How many of `sold` a special order used (v2.7.0): this row's `amount`
+      // prices sold − custom_qty units. A blank legacy cell reads 0 — no
+      // special order ever drew from a row written before the column existed.
+      custom_qty: asNum(cellOf(r, t, 'custom_qty'))
     });
   }
   return out;
@@ -2689,6 +2860,13 @@ function setupSheet() {
   var filled = backfillSalaries(ss, dailySalaryOf(readSettings(ss)));
   if (filled > 0) changes.push('DailyLog: wrote the current daily salary onto ' + filled + ' blank row(s)');
 
+  // Backfill (v2.7.0): the owner's reorder points for the three products he
+  // named, written ONLY into BLANK reorder_at cells — the salary-backfill
+  // shape, so a threshold he has set by hand (an explicit 0 included) is never
+  // overwritten, and re-running setupSheet changes nothing the second time.
+  var thresholds = backfillReorderPoints(ss);
+  if (thresholds > 0) changes.push('StockItems: wrote reorder points onto ' + thresholds + ' blank row(s)');
+
   Logger.log('setupSheet complete (v' + VERSION + '). ' +
     (changes.length ? 'Changes: ' + changes.join('; ') : 'Nothing to change.'));
   Logger.log('API token: ' + token);
@@ -2905,6 +3083,36 @@ function backfillSalaries(ss, rate) {
   return filled;
 }
 
+/**
+ * Write the owner's reorder points (v2.7.0 — his figures, 2026-08-05) into
+ * every StockItems row for the three products below whose reorder_at cell is
+ * BLANK. The salary-backfill shape exactly: it runs on every setupSheet, and a
+ * cell that already holds a value — an explicit 0 included, which means "no
+ * warning, on purpose" — is never touched, so re-running is a no-op and a
+ * threshold the owner later edits stays his. A product not on the list keeps
+ * its blank (no warning) until he sets one himself.
+ * Returns how many cells were filled.
+ */
+function backfillReorderPoints(ss) {
+  var t = readTab(ss, TAB.STOCK_ITEMS);
+  var idx = t.col['reorder_at'];
+  if (idx === undefined) return 0; // cannot happen after migrateTab, but never throw here
+  var wanted = Object.create(null);
+  wanted['Takoyaki Flour'] = 5;
+  wanted['Takoyaki Sauce'] = 1;
+  wanted['Japanese Mayo'] = 1;
+  var filled = 0;
+  for (var i = 1; i < t.values.length; i++) {
+    var r = t.values[i];
+    var product = asStr(cellOf(r, t, 'product'));
+    if (!product || wanted[product] === undefined) continue;
+    if (asStr(cellOf(r, t, 'reorder_at')) !== '') continue; // hand-set (0 included) stands
+    t.sheet.getRange(i + 1, idx + 1).setValue(wanted[product]);
+    filled++;
+  }
+  return filled;
+}
+
 /** Seed Settings rows that are missing; generate the token if absent/blank.
  *  Returns the current token. */
 function seedSettings(ss) {
@@ -2940,7 +3148,11 @@ function seedSettings(ss) {
     // v2.3.0: the daily wage added to every non-closed day, and the Split the
     // Cutoff screen pre-fills (₱1,500 each).
     ['daily_salary', DEFAULT_DAILY_SALARY],
-    ['split_default', DEFAULT_SPLIT]
+    ['split_default', DEFAULT_SPLIT],
+    // v2.7.0: the expense form's item picklist, seeded from the six stock item
+    // names. Comma-separated, edited under Maintenance; free text stays
+    // possible on the form — the picklist only saves typing.
+    ['supply_picklist', 'Takoyaki Flour, Takoyaki Sauce, Japanese Mayo, Bonito, Aonori, Togarashi']
   ];
   defaults.forEach(function (d) {
     if (!have[d[0]]) toAppend.push({ key: d[0], value: d[1] });

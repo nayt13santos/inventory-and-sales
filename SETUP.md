@@ -49,15 +49,17 @@ Open the Google Sheet and edit these tabs directly — the app picks up changes 
 
 ## Daily / cutoff flow after setup
 
-- **Mama, at closing:** open app → **Sales** tab and work down the screen:
-  1. **Container counts** per box size — start of day, end of day. The app works out how many sold.
-  2. **Split those boxes** across three steppers: **Cheese** (paid cash), **GCash**, **GCash cheese**. Whatever's left over is plain regular paid in cash — you never type that. On a night with no cheese and no GCash, leave all three at 0.
-  3. **Custom order** amount, and **how much of it was GCash**.
-  4. **Wage for this day** — ₱200 already filled in. Lower it for a half day, or 0 if nobody was paid. It is not part of the day's sales; it comes out at the cutoff.
-  5. **Stock used today** — tap **+** once for each whole unit you OPENED: one gallon of sauce, one pack of flour. Not money, and not a weight.
-  6. **Save day.**
+- **Mama, at closing:** open app → **Sales** tab and work down the screen, laid out the way the stall works:
+  1. **Box counts** per size — start of day is **already filled in from the last close** (it's just a suggestion; change it if it's wrong), end of day, and **"How many were cheese?"** — a fact about what was made, not how it was paid. The app works out how many sold.
+  2. **Sold with GCash** — one card for the whole payment question: per size, how many went through GCash, and of those how many were cheese. It stays closed on an all-cash night. At its bottom sits **Cash converted to GCash**, for tin cash you swapped into a GCash transfer during the day — the day's total doesn't change, only the cash/GCash split moves.
+  3. **Sold with cash** — nothing to type here: the app shows what's left after GCash, with its arithmetic spelled out, so the figure you count the tin against explains itself.
+  4. **Custom order** amount, **how much of it was GCash**, and — if the order physically used boxes from tonight's counted stack — **"Boxes the order used"** (they're not priced again; the amount you typed is the order's whole value). **"Lid boxes used"** is its own counter here too: just a count, no price, no money.
+  5. **Wage for this day** — ₱200 already filled in. Lower it for a half day, or 0 if nobody was paid. It is not part of the day's sales; it comes out at the cutoff.
+  6. **Stock used today** — tap **+** once for each whole unit you OPENED: one gallon of sauce, one pack of flour. Not money, and not a weight.
+  7. **Save day.**
 
-  There is **no GCash total to type** — the app adds it up from the buckets above and shows it on the receipt, so you can check it against your GCash history. There is no "supplies bought today" card any more either: every purchase goes under **Expenses**, so nothing can be counted twice. Works with no signal; it syncs later.
+  There is **no GCash total to type** — the app adds it up from what you entered and shows it on the receipt, so you can check it against your GCash history. There is no "supplies bought today" card any more either: every purchase goes under **Expenses**, so nothing can be counted twice. Works with no signal; it syncs later.
+- **Adding an expense:** the form now offers your usual supplies as **one-tap chips** first (edit the list under More → Maintenance, like the staff list); a picked item files under **Supplies** on its own, so the category chips stay out of the way. Tap **"Something else…"** for anything not on the list — free text and the category chips, exactly as before.
 - **When a delivery arrives:** More → **Stock on hand** → **"Stock came in"** → pick the product and how many whole units arrived. Quantity only — no money, because the goods usually arrive before they are paid for. **Paying the supplier later** (whenever that happens) is a normal **Supplies** expense on the Expenses screen, like any other money leaving. Two events, two entries, and nothing can be counted twice: the quantity lives in your stock, the money in Expenses, each on the day it actually happened. (Deliveries you logged the old way — on an expense row — still count in your stock forever.)
 - **You, at cutoff:** Cutoff tab → check the preview → adjust **Split** if this fortnight is different (it remembers per cutoff, ₱1,500 each by default) → pay a backlog from the **Pay a backlog** card if there is anything left → **Generate cutoff note** → Copy or Share it to your partner. Mama ₱500 and Electric ₱500 are pre-suggested each cutoff; add Octopus under Expenses as you pay it.
 

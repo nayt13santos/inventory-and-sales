@@ -359,7 +359,10 @@ select.input{ appearance:auto; }
    line that makes the tin add up. Dashed rule so the eye sees it is outside. */
 .r-excl{ margin-top:8px; padding-top:8px; border-top:2px dashed var(--line); }
 .r-sub.excl .r-amt{ color:var(--deep); font-weight:700; }
-.r-tin{ font-size:13px; color:var(--muted); padding-top:4px; }
+/* .r-note: the same quiet voice for the receipt's non-money notes (v2.7.0 —
+   the converted-to-GCash sentence and the lid-box count). Its own name because
+   .r-tin MEANS the tin line and lives inside the excluded-money guard. */
+.r-tin, .r-note{ font-size:13px; color:var(--muted); padding-top:4px; }
 .r-empty{ text-align:center; color:var(--muted); font-size:15px; padding:8px 0 12px; }
 .r-closed{ text-align:center; font-family:var(--display); font-weight:800; font-size:22px; color:var(--alert); padding:10px 0 14px; letter-spacing:.06em; }
 .r-tear{
@@ -587,7 +590,11 @@ function freshState(){
   return {
     settings:{ branch:'Tañong', mama_per_cutoff:500, electric_per_cutoff:500,
       partners:'Nayt, Partner', staff:'Mama',
-      daily_salary:DEFAULT_DAILY_SALARY, split_default:DEFAULT_SPLIT },
+      daily_salary:DEFAULT_DAILY_SALARY, split_default:DEFAULT_SPLIT,
+      // The expense form's one-tap picklist (v2.7.0), seeded with the SAME six
+      // names seedSettings writes into the sheet — so demo mode (and a sheet not
+      // migrated yet) offers the chips from day one, exactly like the stock list.
+      supply_picklist: SEED_STOCK_ITEMS.map(p => p[0]).join(', ') },
     // EXACTLY the skus setupSheet() seeds into the Prices tab, and nothing else.
     // A seeded sku the sheet does not have is not harmless: Maintenance sends
     // every sku in this list, and the server refuses a price row it has no group
@@ -645,11 +652,12 @@ function freshConfig(){ return { apiUrl:'', token:'', sheetUrl:'' }; }
    The app must always boot into a usable screen.
 
    KEY CASING AT THE API SEAM. What we SEND is camelCase (cheeseQty, gcashQty,
-   gcashCheeseQty, customAmount, customGcash, entryId, backlogRef — the
-   documented request shape); what we STORE and what the server SENDS BACK is
-   snake_case (cheese_price, cheese_qty, gcash_qty, gcash_cheese_qty,
-   gcash_amount, custom_amount, custom_gcash, entry_id, backlog_ref,
-   total_amount, supplies_total, …).
+   gcashCheeseQty, customAmount, customGcash, gcashConverted, lidBoxes,
+   customBoxes, entryId, backlogRef — the documented request shape); what we
+   STORE and what the server SENDS BACK is snake_case (cheese_price,
+   cheese_qty, gcash_qty, gcash_cheese_qty, gcash_amount, custom_amount,
+   custom_gcash, gcash_converted, lid_boxes, custom_qty, entry_id,
+   backlog_ref, total_amount, supplies_total, …).
    Every normalizer below reads the snake_case key first and falls back to the
    camelCase spelling, so a phone on new code talking to an older still-
    deployed Apps Script cannot silently read a price or a balance as 0.
@@ -760,6 +768,14 @@ function normDay(r, key){
     // because the cash tin holds Cash PLUS this. A pre-v2.4.0 row has no column at
     // all and reads 0, which is exactly right: there was no excluded sku to sell.
     excluded_total: num(pick(r, 'excluded_total', 'excludedTotal')),
+    // Tin cash swapped for a GCash transfer during the day (v2.7.0). Already
+    // INSIDE `gcash` and out of `cash` — this is the snapshot that lets the
+    // receipt say so. A pre-v2.7.0 row has no column and reads 0: nothing was
+    // converted, which is exactly right for those days.
+    gcash_converted: num(pick(r, 'gcash_converted', 'gcashConverted')),
+    // Lid boxes used (v2.7.0): a plain count with NO price, NO money, NO stock
+    // tracking. Blank/absent reads 0 for the same reason.
+    lid_boxes: num(pick(r, 'lid_boxes', 'lidBoxes')),
     notes: txt(r.notes),
     entry_id: txt(pick(r, 'entry_id', 'entryId')),
     updated_at: txt(pick(r, 'updated_at', 'updatedAt'))
@@ -788,6 +804,11 @@ function normCount(c, key){
     // nothing the moment it was reopened.
     price: rawNum(c.price),
     cheese_price: rawNum(pick(c, 'cheese_price', 'cheesePrice')),
+    // How many of `sold` a special order physically used (v2.7.0). Part of the
+    // same snapshot: this row's `amount` prices sold − custom_qty units, and the
+    // row alone must be able to say so. Blank/absent reads 0 — no special order
+    // drew from this line, so all of `sold` was priced, exactly as it was.
+    custom_qty: num(pick(c, 'custom_qty', 'customQty')),
     entry_id: txt(pick(c, 'entry_id', 'entryId')),
     // Whether THIS row's money counted, as decided the night it was saved
     // (v2.4.1). Kept raw — '' when the row predates the column — because a blank
@@ -897,7 +918,7 @@ function normCategory(v){ const c = txt(v).trim(); return EXPENSE_CATS.indexOf(c
 // here — an API that can rewrite its own shared secret can lock the owner out of
 // his own sheet from a phone.
 const SETTABLE_SETTINGS = {
-  branch:'text', staff:'text',
+  branch:'text', staff:'text', supply_picklist:'text',
   daily_salary:'money', split_default:'money',
   mama_per_cutoff:'money', electric_per_cutoff:'money'
 };
@@ -1089,10 +1110,15 @@ function sanitizeDrafts(rawv){
     out[k] = {
       date: k, closed: !!d.closed, staff: txt(d.staff),
       custom: raw1(d.custom), customGcash: raw1(d.customGcash),
+      // The v2.7.0 fields. A draft written by an older build has none of them,
+      // so they read '' — which every reader treats as the harmless 0.
+      gcashConverted: raw1(d.gcashConverted), lidBoxes: raw1(d.lidBoxes),
       salary: raw1(d.salary), notes: txt(d.notes),
       rows: asArr(d.rows).filter(isObj).filter(r => txt(r.sku)).map(r => ({
         sku: txt(r.sku), sod: raw1(r.sod), eod: raw1(r.eod),
-        cheese: raw1(r.cheese), gcash: raw1(r.gcash), gcashCheese: raw1(r.gcashCheese)
+        cheese: raw1(r.cheese), gcash: raw1(r.gcash), gcashCheese: raw1(r.gcashCheese),
+        // Boxes the special order used from this sku (v2.7.0); '' on old drafts.
+        custom: raw1(r.custom)
       })),
       // A draft written by the old build also carries a `supplies` array. It is
       // dropped here on purpose: that card is retired, and reviving those figures
@@ -1323,6 +1349,10 @@ function isBoxSku(sku){
 }
 function activeStockItems(){ return asArr(state.stockItems).filter(s => isObj(s) && truthy(s.active)); }
 function staffList(){ return txt(asObj(state.settings).staff || 'Mama').split(',').map(s => s.trim()).filter(Boolean); }
+/** The expense form's one-tap item choices (v2.7.0): comma-separated names in
+ *  Settings `supply_picklist`, split the same way `staff` is. Empty when the
+ *  key is blank or missing — the form then behaves exactly as before. */
+function supplyPicklist(){ return txt(asObj(state.settings).supply_picklist).split(',').map(s => s.trim()).filter(Boolean); }
 /** The current daily wage and the default split, from Settings. A blank or
  *  unusable value falls back to the seeded figure — the same rule Code.gs
  *  applies, so the phone and the note can never disagree about the rate. */
@@ -1419,6 +1449,15 @@ function computeDay(p){
   // applyLocalDay rewrites the date's rows, exactly as apiSaveDay reads the
   // sheet before it rewrites the block.
   const stored = storedPricesFor(asObj(p).date);
+  // Boxes a special order physically used, per sku (v2.7.0). They come off the
+  // counted stack but contribute NO menu-price money — the typed custom amount
+  // is the order's entire value — so each sku's PRICED quantity below is
+  // sold − custom qty. First entry per sku wins, like every other reader.
+  const customBySku = Object.create(null);
+  for (const cb of asArr(asObj(p).customBoxes)){
+    const s = txt(asObj(cb).sku);
+    if (s && customBySku[s] === undefined) customBySku[s] = num(asObj(cb).qty);
+  }
   if (!p.closed){
     for (const c of asArr(p.counts)){
       const pr = asArr(state.prices).find(x => isObj(x) && x.sku === c.sku);
@@ -1451,10 +1490,18 @@ function computeDay(p){
       // the inline error said so. Each bucket may only claim what is still
       // unclaimed, so what the receipt and the strip print always sums to sold.
       // validateBenta still refuses the save; this only keeps the preview honest.
-      const cheese = (isBox && inCutoff) ? clampQty(c.cheeseQty, sold) : 0;
-      const gcashQty = inCutoff ? clampQty(c.gcashQty, sold - cheese) : 0;
-      const gcashCheese = (isBox && inCutoff) ? clampQty(c.gcashCheeseQty, sold - cheese - gcashQty) : 0;
-      const regular = Math.max(0, sold - cheese - gcashQty - gcashCheese);
+      // The special order's boxes claim FIRST (v2.7.0): they are whole boxes off
+      // this stack that the four buckets can no longer describe, so the buckets
+      // clamp against what is left — sold − custom — exactly the bound apiSaveDay
+      // enforces. Only an in-cutoff box sku can be drawn from (the server refuses
+      // the rest; here the preview reads it as 0 so the receipt stays sensible
+      // while validateBenta shows the refusal inline).
+      const customQty = (isBox && inCutoff) ? clampQty(customBySku[c.sku], sold) : 0;
+      const avail = sold - customQty;
+      const cheese = (isBox && inCutoff) ? clampQty(c.cheeseQty, avail) : 0;
+      const gcashQty = inCutoff ? clampQty(c.gcashQty, avail - cheese) : 0;
+      const gcashCheese = (isBox && inCutoff) ? clampQty(c.gcashCheeseQty, avail - cheese - gcashQty) : 0;
+      const regular = Math.max(0, avail - cheese - gcashQty - gcashCheese);
       const amount = (regular + gcashQty) * price + (cheese + gcashCheese) * cheesePrice;
       const gcashAmount = gcashQty * price + gcashCheese * cheesePrice;
       lines.push({
@@ -1462,6 +1509,10 @@ function computeDay(p){
         cheese_qty:cheese, gcash_qty:gcashQty, gcash_cheese_qty:gcashCheese, regular_qty:regular,
         amount: r2(amount), gcash_amount: r2(gcashAmount),
         price, cheese_price:cheesePrice, group:pr.group,
+        // How many of `sold` the special order used — carried on the line so the
+        // receipt can say "less N for the special order" and applyLocalDay can
+        // store the snapshot exactly as the sheet does.
+        custom_qty: customQty,
         // Did this line's money COUNT? Carried on the line so the receipt can print
         // an excluded sku apart instead of leaving the totals looking wrong.
         in_cutoff: inCutoff
@@ -1477,9 +1528,20 @@ function computeDay(p){
   const total = r2(sum + custom);
   // Cash = Total − GCash still holds; GCash is now derived from what was
   // actually entered instead of read off the GCash app.
-  const gcash = r2(gsum + customGcash);
+  const gcashSales = r2(gsum + customGcash);
+  // Tin cash swapped for a GCash transfer (v2.7.0): it moves the SPLIT only —
+  // the Total is untouched. It can only move cash that EXISTS, so it clamps at
+  // the day's cash before the conversion, exactly the bound apiSaveDay refuses
+  // over (validateBenta shows that refusal inline; this keeps the preview true).
+  const cashBefore = r2(total - gcashSales);
+  const gcashConverted = p.closed ? 0 : Math.min(cashBefore, Math.max(0, num(p.gcashConverted)));
+  const gcash = r2(gcashSales + gcashConverted);
+  // Lid boxes (v2.7.0): a plain count carried through so the receipt can print
+  // it. NO price, NO money — it touches nothing else here.
+  const lidBoxes = p.closed ? 0 : Math.max(0, num(p.lidBoxes));
   return {
     lines, total, gcash, cash: r2(total - gcash), custom, customGcash,
+    gcashConverted, lidBoxes,
     // Kept apart, never added in. `excluded` is the sum of `excludedLines`, so
     // whatever the receipt prints below the totals always adds up to itself.
     excluded: r2(xsum),
@@ -1980,12 +2042,19 @@ function applyLocalDay(p){
     // The day's money from excluded skus, stored BESIDE the day's money exactly as
     // the sheet stores it — never inside total, cash or gcash.
     excluded_total:c.excluded,
+    // The converted cash and the lid-box count (v2.7.0), stored exactly as the
+    // sheet stores them: the conversion is already inside `gcash` above, and the
+    // lid boxes touch no money at all.
+    gcash_converted:c.gcashConverted, lid_boxes:c.lidBoxes,
     notes:p.notes || '', entry_id:p.entryId, updated_at:stamp
   };
   state.counts[p.date] = c.lines.map(l => ({
     date:p.date, sku:l.sku, sod:l.sod, eod:l.eod, sold:l.sold,
     cheese_qty:l.cheese_qty, regular_qty:l.regular_qty, amount:l.amount, entry_id:p.entryId,
     gcash_qty:l.gcash_qty, gcash_cheese_qty:l.gcash_cheese_qty, gcash_amount:l.gcash_amount,
+    // How many of `sold` the special order used (v2.7.0) — the last piece of the
+    // snapshot: this row's `amount` prices sold − custom_qty units.
+    custom_qty: l.custom_qty,
     // The flag SNAPSHOTTED beside the money it decided, exactly as the sheet stores
     // it (v2.4.1). Whether this line's money counted is a fact about THIS day,
     // settled when it was saved — so a later tick of "counts in the cutoff" cannot
@@ -2477,6 +2546,13 @@ function applyServerDay(p, data){
   // phone worked out correctly for itself.
   const excl = pick(data, 'excluded_total', 'excludedTotal');
   if (excl != null && excl !== '') day.excluded_total = num(excl);
+  // The converted cash and the lid-box count the sheet stored (v2.7.0). Same
+  // guard as the rest: a deployment too old to send them leaves the phone's own
+  // figures alone instead of zeroing them.
+  const conv = pick(data, 'gcash_converted', 'gcashConverted');
+  if (conv != null && conv !== '') day.gcash_converted = num(conv);
+  const lids = pick(data, 'lid_boxes', 'lidBoxes');
+  if (lids != null && lids !== '') day.lid_boxes = num(lids);
   if (Array.isArray(data.lines)){
     const rows = asArr(asObj(state.counts)[p.date]);
     for (const l of data.lines){
@@ -2505,6 +2581,10 @@ function applyServerDay(p, data){
         if (l.price != null && l.price !== '') r.price = num(l.price);
         const chp = pick(l, 'cheese_price', 'cheesePrice');
         if (chp != null && chp !== '') r.cheese_price = num(chp);
+        // The special-order boxes the sheet stored on this line (v2.7.0) — same
+        // guard: an older deployment sends none and the phone's figure stands.
+        const cq = pick(l, 'custom_qty', 'customQty');
+        if (cq != null && cq !== '') r.custom_qty = num(cq);
       }
     }
   }
@@ -2822,7 +2902,10 @@ function loadBentaForm(date){
     sod:num(c.sod), eod:num(c.eod),
     // The three ENTERED buckets. regular_qty is not loaded: it is always
     // re-derived, so it can never fall out of step with the other three.
-    cheese:num(c.cheese_qty), gcash:num(c.gcash_qty), gcashCheese:num(c.gcash_cheese_qty)
+    cheese:num(c.cheese_qty), gcash:num(c.gcash_qty), gcashCheese:num(c.gcash_cheese_qty),
+    // Boxes the special order used from this sku (v2.7.0), loaded from the same
+    // snapshot the sheet stores. 0 on every row saved before the column existed.
+    custom:num(c.custom_qty)
   });
   for (const pr of activePrices()){
     rows.push(rowOf(pr.sku, counts.find(x => x.sku === pr.sku) || {}));
@@ -2833,6 +2916,17 @@ function loadBentaForm(date){
     seen[c.sku] = true;
     rows.push(rowOf(c.sku, c));
   }
+  // Opening = previous close (v2.7.0): a date with NO saved counts pre-fills
+  // each box sku's SOD from that sku's EOD on the latest saved day strictly
+  // before it. A prefill, never a lock — she edits it like anything typed — and
+  // a day that already has saved counts always loads its own figures above.
+  if (!counts.length){
+    for (const r of rows){
+      if (!isBoxSku(r.sku)) continue;
+      const prevEod = prevEodFor(r.sku, d);
+      if (prevEod !== '') r.sod = prevEod;
+    }
+  }
   const stock = bentaStockRows(d);
   benta = {
     date: d,
@@ -2840,6 +2934,10 @@ function loadBentaForm(date){
     staff: txt(day.staff) || (staff[0] || ''),
     custom: num(day.custom_amount),
     customGcash: num(day.custom_gcash),
+    // The v2.7.0 figures, loaded back like the custom order: 0 on a fresh date
+    // and on every day saved before the columns existed.
+    gcashConverted: num(day.gcash_converted),
+    lidBoxes: num(day.lid_boxes),
     // The day's WAGE. A saved day shows the figure it was saved with (so history
     // never moves when the rate changes); a new day starts at today's rate, and
     // it can be lowered for a half day. A CLOSED day stores 0 and hides the
@@ -2856,15 +2954,48 @@ function loadBentaForm(date){
     // is almost every night), open whenever the day carries a different figure —
     // a half day, or a day nobody was paid. Set below, once `benta` exists.
     wageOpen: !!prev.wageOpen,
+    // The "Sold with GCash" card (v2.7.0) follows the same collapsible rule:
+    // closed on an all-cash night (every figure 0), open the moment it holds
+    // anything — nothing already entered is ever hidden. Set below.
+    gcashOpen: !!prev.gcashOpen,
     saved: hasDay,
     dirty: false,       // set on any user edit; cleared on load/save
     fromDraft: false    // true when unsaved typing was restored for this date
   };
   if (wageIsCustom()) benta.wageOpen = true;
+  if (gcashHeld()) benta.gcashOpen = true;
   // Unsaved typing for this date always wins over what is stored: changing the
   // date, backgrounding the app or a reload must not cost her the numbers she
   // has already read out of the notebook.
   applyBentaDraft(drafts[d]);
+}
+
+/** ONE sku's EOD on the latest saved day strictly before `date`, from local
+ *  state — or '' when this phone holds no prior day for it. What is left on the
+ *  shelf at close is what the stall opens with, so a fresh date's SOD pre-fills
+ *  from here (v2.7.0). A prefill only: 0 stays a legitimate answer, and '' means
+ *  "say nothing" rather than "say 0". */
+function prevEodFor(sku, date){
+  let bestDate = '', best = '';
+  const byDate = asObj(state.counts);
+  for (const d in byDate){
+    if (!isDateStr(d) || !(d < txt(date)) || d < bestDate) continue;
+    for (const r of asArr(byDate[d])){
+      if (txt(asObj(r).sku) !== txt(sku)) continue;
+      bestDate = d;
+      best = num(asObj(r).eod);
+      break;
+    }
+  }
+  return bestDate ? best : '';
+}
+
+/** Whether the form holds ANY GCash figure tonight — the one rule for whether
+ *  the "Sold with GCash" card may start closed, read at load and after a draft
+ *  is restored so the two can never disagree. */
+function gcashHeld(){
+  return asArr(asObj(benta).rows).some(r => num(asObj(r).gcash) > 0 || num(asObj(r).gcashCheese) > 0) ||
+    num(asObj(benta).gcashConverted) > 0;
 }
 
 // Put a stashed draft back on the form. Rows/items are matched BY NAME, and a
@@ -2877,13 +3008,19 @@ function applyBentaDraft(dr){
   benta.custom = dr.custom;
   benta.customGcash = dr.customGcash;
   // A draft from the old build has no salary in it: keep the loaded figure rather
-  // than blanking a wage nobody chose to change.
+  // than blanking a wage nobody chose to change. The v2.7.0 fields get the same
+  // guard for the same reason — a pre-2.7.0 draft says nothing about them.
   if (dr.salary !== '' && dr.salary != null) benta.salary = dr.salary;
+  if (dr.gcashConverted !== '' && dr.gcashConverted != null) benta.gcashConverted = dr.gcashConverted;
+  if (dr.lidBoxes !== '' && dr.lidBoxes != null) benta.lidBoxes = dr.lidBoxes;
   benta.notes = txt(dr.notes);
   for (const d of asArr(dr.rows)){
     const row = benta.rows.find(r => r.sku === d.sku);
-    if (row){ row.sod = d.sod; row.eod = d.eod; row.cheese = d.cheese; row.gcash = d.gcash; row.gcashCheese = d.gcashCheese; }
-    else benta.rows.push({ sku:d.sku, sod:d.sod, eod:d.eod, cheese:d.cheese, gcash:d.gcash, gcashCheese:d.gcashCheese });
+    if (row){
+      row.sod = d.sod; row.eod = d.eod; row.cheese = d.cheese; row.gcash = d.gcash; row.gcashCheese = d.gcashCheese;
+      if (d.custom !== '' && d.custom != null) row.custom = d.custom;
+    }
+    else benta.rows.push({ sku:d.sku, sod:d.sod, eod:d.eod, cheese:d.cheese, gcash:d.gcash, gcashCheese:d.gcashCheese, custom:raw1(d.custom) });
   }
   for (const d of asArr(dr.stock)){
     const row = benta.stock.find(r => r.product === d.product);
@@ -2891,8 +3028,10 @@ function applyBentaDraft(dr){
     else benta.stock.push({ product:d.product, unit:d.unit, qty:d.qty });
   }
   if (benta.stock.some(s => num(s.qty) > 0)) benta.stockOpen = true;
-  // A restored draft must show everything it holds, the wage included.
+  // A restored draft must show everything it holds, the wage included —
+  // and any GCash figure it carries.
   if (wageIsCustom()) benta.wageOpen = true;
+  if (gcashHeld()) benta.gcashOpen = true;
   benta.dirty = true;      // it is still unsent work
   benta.fromDraft = true;
 }
@@ -2904,10 +3043,12 @@ function stashBentaDraft(){
   drafts[benta.date] = {
     date: benta.date, closed: !!benta.closed, staff: txt(benta.staff),
     custom: raw1(benta.custom), customGcash: raw1(benta.customGcash),
+    gcashConverted: raw1(benta.gcashConverted), lidBoxes: raw1(benta.lidBoxes),
     salary: raw1(benta.salary), notes: txt(benta.notes),
     rows: asArr(benta.rows).map(r => ({
       sku: txt(r.sku), sod: raw1(r.sod), eod: raw1(r.eod),
-      cheese: raw1(r.cheese), gcash: raw1(r.gcash), gcashCheese: raw1(r.gcashCheese)
+      cheese: raw1(r.cheese), gcash: raw1(r.gcash), gcashCheese: raw1(r.gcashCheese),
+      custom: raw1(r.custom)
     })),
     stock: asArr(benta.stock).map(s => ({ product: txt(s.product), unit: txt(s.unit), qty: raw1(s.qty) }))
   };
@@ -2991,6 +3132,19 @@ function bentaPayload(){
     staff: benta.staff,
     customAmount: custom,
     customGcash: closed ? 0 : Math.min(custom, Math.max(0, num(benta.customGcash))),
+    // Tin cash swapped for GCash and the lid-box count (v2.7.0). Closed day
+    // sends 0 for both, exactly as the server forces. The conversion is NOT
+    // clamped to the day's cash here: validateBenta refuses that state in the
+    // server's own sentence, so an over-large figure never queues at all.
+    gcashConverted: closed ? 0 : Math.max(0, num(benta.gcashConverted)),
+    lidBoxes: closed ? 0 : Math.max(0, num(benta.lidBoxes)),
+    // Boxes the special order used, per sku (v2.7.0) — only rows that actually
+    // hold one travel, exactly as only opened stock travels. Sent as the row
+    // holds them: a figure validateBenta refuses (an excluded sku's, a fraction)
+    // blocks the save, so nothing here can queue what the server refuses.
+    customBoxes: closed ? [] : asArr(benta.rows)
+      .filter(r => num(r.custom) > 0)
+      .map(r => ({ sku: r.sku, qty: num(r.custom) })),
     // The wage for this day. Sent as a figure so the sheet snapshots exactly what
     // is on screen; left OUT when the field is empty, which tells the server to
     // use the current rate. A closed day costs nothing and the server forces 0.
@@ -3105,7 +3259,138 @@ function skuSplitText(pr, row){
 // prototype-free itself, so "__proto__" or "toString" in a data attribute
 // cannot answer truthily either.
 const ROW_FIELDS = Object.assign(Object.create(null),
-  { sod:'sod', eod:'eod', cheese:'cheese', gcash:'gcash', gcashCheese:'gcashCheese' });
+  { sod:'sod', eod:'eod', cheese:'cheese', gcash:'gcash', gcashCheese:'gcashCheese',
+    // Boxes the special order used from this sku (v2.7.0) — customBoxes[].qty.
+    custom:'custom' });
+
+/* ---- The v2.7.0 presentation of the SAME three entered buckets. ----
+   The sheet, the payload and `benta.rows` all keep the four buckets exactly as
+   they were (cheese = cheese paid CASH, gcash = regular by GCash, gcashCheese =
+   cheese by GCash) — but the screen now asks the stall's own two questions:
+   "how many were cheese?" (a fact about what was MADE) and "how many were sold
+   with GCash, and of those how many cheese?" (the payment). Those are sums of
+   the buckets, so this is presentation only:
+     C  = cheese + gcashCheese     (all cheese, however paid)
+     G  = gcash + gcashCheese      (all GCash, whatever the filling)
+     GC = gcashCheese              (the overlap: cheese AND GCash)
+   and the buckets come straight back: gcashCheese = GC, cheese = C − GC,
+   gcash = G − GC. Every stepper below edits the buckets through this map, so a
+   queued payload, a draft and a loaded day never change meaning. */
+const UI_FIELDS = Object.assign(Object.create(null),
+  { cheeseAll:true, gcashAll:true, gcashOfCheese:true });
+function rowUI(r){
+  const row = asObj(r);
+  const gc = Math.max(0, num(row.gcashCheese));
+  return {
+    C: Math.max(0, num(row.cheese)) + gc,
+    G: Math.max(0, num(row.gcash)) + gc,
+    GC: gc
+  };
+}
+/** Reflect one row's bucket state into every UI stepper it feeds — the three
+ *  figures interlock, so a change to one can move another. The field being
+ *  typed in is left alone (rewriting it would fight the keyboard). */
+function syncRowInputs(sku, r){
+  const ui = rowUI(r);
+  const put = (f, v) => {
+    const el = $('in-' + sku + '-' + f);
+    if (el && el !== document.activeElement) el.value = v;
+  };
+  put('cheeseAll', ui.C);
+  put('gcashAll', ui.G);
+  put('gcashOfCheese', ui.GC);
+}
+/** One press of a v2.7.0 stepper. Raising a figure adds the matching bucket
+ *  (cash cheese, or regular GCash); lowering one takes from the same bucket
+ *  first and only then reclassifies the overlap, so the OTHER question's answer
+ *  never moves unless it has to. "Of those, cheese" only reclassifies boxes
+ *  already counted on both sides — the invariant is GC ≤ min(C, G), which is
+ *  exactly what keeps every bucket ≥ 0. Clamps mirror the server's bounds:
+ *  every bucket is a subset of sold − the special order's boxes. */
+function uiStep(r, field, dir){
+  const sold = Math.max(0, num(r.sod) - num(r.eod));
+  const customQty = Math.max(0, num(r.custom));
+  const ui = rowUI(r);
+  if (dir > 0 && sold === 0){
+    toast('Enter Start of day and End of day first, then split the boxes.');
+    return;
+  }
+  if (field === 'cheeseAll'){
+    if (dir > 0){
+      // paid = C + (G − GC) ≤ sold − custom, so C may grow to this room.
+      const room = Math.max(0, sold - customQty - (ui.G - ui.GC));
+      if (ui.C + 1 > room){
+        toast(room === sold
+          ? '“How many were cheese” can only go up to ' + sold + ' — that is how many were sold.'
+          : '“How many were cheese” can only go up to ' + room + ' — the other ' + (sold - room) +
+            ' of the ' + sold + ' sold are already GCash regular or the special order’s.');
+      } else r.cheese = Math.max(0, num(r.cheese)) + 1;
+    } else if (num(r.cheese) > 0) r.cheese = num(r.cheese) - 1;
+    else if (num(r.gcashCheese) > 0){
+      // The last cheese was a GCash one: it stays GCash, just not cheese.
+      r.gcashCheese = num(r.gcashCheese) - 1;
+      r.gcash = Math.max(0, num(r.gcash)) + 1;
+    }
+  } else if (field === 'gcashAll'){
+    if (dir > 0){
+      const room = Math.max(0, sold - customQty - (ui.C - ui.GC));
+      if (ui.G + 1 > room){
+        toast(room === sold
+          ? '“Sold with GCash” can only go up to ' + sold + ' — that is how many were sold.'
+          : '“Sold with GCash” can only go up to ' + room + ' — the other ' + (sold - room) +
+            ' of the ' + sold + ' sold are already cheese paid in cash or the special order’s.');
+      } else r.gcash = Math.max(0, num(r.gcash)) + 1;
+    } else if (num(r.gcash) > 0) r.gcash = num(r.gcash) - 1;
+    else if (num(r.gcashCheese) > 0){
+      // The last GCash box was a cheese one: it stays cheese, now paid in cash.
+      r.gcashCheese = num(r.gcashCheese) - 1;
+      r.cheese = Math.max(0, num(r.cheese)) + 1;
+    }
+  } else if (field === 'gcashOfCheese'){
+    if (dir > 0){
+      if (num(r.cheese) > 0 && num(r.gcash) > 0){
+        r.cheese = num(r.cheese) - 1;
+        r.gcash = num(r.gcash) - 1;
+        r.gcashCheese = num(r.gcashCheese) + 1;
+      } else {
+        toast('“Of those, cheese” can only go up to ' + Math.min(ui.C, ui.G) +
+          ' — it counts boxes that are both cheese and paid by GCash.');
+      }
+    } else if (num(r.gcashCheese) > 0){
+      r.gcashCheese = num(r.gcashCheese) - 1;
+      r.cheese = Math.max(0, num(r.cheese)) + 1;
+      r.gcash = Math.max(0, num(r.gcash)) + 1;
+    }
+  }
+  benta.dirty = true;
+  syncRowInputs(r.sku, r);
+  afterCountChange(r.sku);
+}
+/** A figure TYPED into a v2.7.0 stepper field. Kept as typed where the map
+ *  allows (validateBenta refuses the rest, as with every typed count); only the
+ *  overlap is clamped, because GC beyond min(C, G) would push a bucket below
+ *  zero — a state no payload may ever hold. */
+function uiTyped(r, field, raw){
+  const v = Math.max(0, num(raw));
+  const ui = rowUI(r);
+  if (field === 'cheeseAll'){
+    const gc = Math.min(ui.GC, v);
+    r.gcashCheese = gc;
+    r.cheese = v - gc;
+    r.gcash = Math.max(0, ui.G - gc);
+  } else if (field === 'gcashAll'){
+    const gc = Math.min(ui.GC, v);
+    r.gcashCheese = gc;
+    r.gcash = v - gc;
+    r.cheese = Math.max(0, ui.C - gc);
+  } else {
+    const gc = Math.min(v, ui.C, ui.G);
+    r.gcashCheese = gc;
+    r.cheese = ui.C - gc;
+    r.gcash = ui.G - gc;
+  }
+  syncRowInputs(r.sku, r);
+}
 // The three ENTERED buckets, with the label each one shows.
 // Labels name BOTH dimensions — variant and payment — because a bare "Cheese"
 // or "GCash" is ambiguous on its own and read as a riddle in the first cut of
@@ -3131,11 +3416,9 @@ function bucketRoom(row, sold, exceptField, isBox){
   }
   return Math.max(0, sold - used);
 }
-/** The derived fourth bucket: whatever is left is regular, paid in cash. */
-function rowRegular(row, isBox){
-  const sold = Math.max(0, num(row.sod) - num(row.eod));
-  return bucketRoom(row, sold, null, isBox);
-}
+// (The old per-card "Regular (cash)" derived figure is gone with the v2.7.0
+// layout: the cash remainder is now spelled out once, in the display-only
+// "Sold with cash" card — cashRecapHTML — instead of per row.)
 // Every place it lands in markup — attributes and ids alike — must be
 // escaped, or the tag breaks apart and the steppers stop working.
 function stepperHTML(sku, field, value, label, small){
@@ -3310,19 +3593,29 @@ function renderBenta(){
     // Count rows: active skus + skus already on the form (union) —
     // a mid-session bootstrap can activate/deactivate skus, so create a
     // placeholder row for any sku the form doesn't know yet.
-    h += '<div class="section-title">Container counts</div>';
+    // ① BOX COUNTS (v2.7.0) — the screen is laid out the way the stall works:
+    // count the boxes and say what was made here; HOW they were paid is the
+    // "Sold with GCash" card below; the cash remainder is display-only after
+    // that. Same four bucket keys travel in the payload — presentation only.
+    h += '<div class="section-title">Box counts</div>';
     const skus = bentaSkuList();
     if (!skus.length){
       h += '<div class="card"><p class="hint">No box sizes to count yet. Add them in the Prices tab of the Google Sheet, then sync.</p></div>';
     }
-    h += '<p class="hint" style="margin:-4px 0 12px;">Cheese and GCash boxes are part of what sold. Whatever is left over is regular, paid in cash.</p>';
+    h += '<p class="hint" style="margin:-4px 0 12px;">Count each size in and out. “How many were cheese” is about what was made, not how it was paid — GCash comes in its own card below.</p>';
+    // One row of a payment/variant card: a label beside a stepper (or a derived
+    // figure). Shared by the sku cards, the GCash card and the custom-order card.
+    const payRow = (label, inner, gc) =>
+      '<div class="pay-row' + (gc ? ' gc' : '') + '">' +
+        '<span class="pay-what">' + label + '</span>' + inner +
+      '</div>';
     // The prices THIS DAY counts at (v2.5.0): a saved day keeps the prices it
     // was saved with, so reopening an old night shows the money it actually
     // made — not what the same boxes would make at today's prices.
     const daySnap = storedPricesFor(benta.date);
     for (const pr of skus){
       let row = asArr(benta.rows).find(r => r.sku === pr.sku);
-      if (!row){ row = { sku:pr.sku, sod:0, eod:0, cheese:0, gcash:0, gcashCheese:0 }; benta.rows.push(row); }
+      if (!row){ row = { sku:pr.sku, sod:0, eod:0, cheese:0, gcash:0, gcashCheese:0, custom:0 }; benta.rows.push(row); }
       const eff = priceOnDay(daySnap, pr);
       const sold = Math.max(0, num(row.sod) - num(row.eod));
       const isBox = pr.group === 'box';
@@ -3343,28 +3636,21 @@ function renderBenta(){
       // will reject. It renders plain and validateBenta quotes the server inline.
       const showCheese = isBox && inCut;
       const sk = esc(pr.sku);   // sku is sheet data — escape it everywhere it enters markup
-      // Payment and variant are two separate questions, so the old flat list of
-      // "Cheese / GCash / GCash cheese" read as a riddle: "Cheese" silently
-      // meant cheese paid in CASH and "GCash" silently meant REGULAR paid by
-      // GCash. Grouping by payment method and letting the row say the variant
-      // makes every box mean exactly what its two labels say.
-      const payRow = (label, inner, gc) =>
-        '<div class="pay-row' + (gc ? ' gc' : '') + '">' +
-          '<span class="pay-what">' + label + '</span>' + inner +
-        '</div>';
       const stepFor = (field) =>
         stepperHTML(pr.sku, field, num(row[field]), fieldLabel(field) + ', ' + pr.label, true);
 
-      let buckets = '<div class="pay-group"><div class="pay-head">Paid in cash</div>';
-      // The remainder is derived, so there is nothing to <label for>.
-      buckets += payRow('Regular',
-        '<div class="derived" id="reg-' + sk + '" aria-label="Regular boxes paid in cash, ' + esc(pr.label) + '">' +
-          rowRegular(row, isBox) + '</div><span class="pay-note">the rest</span>', false);
-      if (isBox) buckets += payRow('Cheese', stepFor('cheese'), false);
-      buckets += '</div><div class="pay-group"><div class="pay-head gc">Paid by GCash</div>';
-      buckets += payRow('Regular', stepFor('gcash'), true);
-      if (isBox) buckets += payRow('Cheese', stepFor('gcashCheese'), true);
-      buckets += '</div>';
+      // "How many were cheese" is a fact about what was MADE — cheese or
+      // regular — never about payment (v2.7.0, owner's proposal). It shows the
+      // TOTAL cheese (cash cheese + GCash cheese: rowUI); the GCash card below
+      // splits the payment. Only a box sku has a cheese version at all.
+      let cheeseFact = '';
+      if (isBox && inCut){
+        cheeseFact = '<div class="buckets">' +
+          payRow('How many were cheese?',
+            stepperHTML(pr.sku, 'cheeseAll', rowUI(row).C, 'How many were cheese, ' + pr.label, true), false) +
+          '<p class="hint" style="margin-top:4px;">What was made — cheese or regular. Not payment.</p>' +
+        '</div>';
+      }
       // An EXCLUDED sku normally has no bucket steppers at all — but a LOADED
       // row can still hold one from before the sku was excluded, and the save
       // refuses the day while it does. A figure with no stepper is a dead end:
@@ -3403,27 +3689,42 @@ function renderBenta(){
         '<div class="sold-row">' +
           '<div class="sold-badge" id="soldbadge-' + sk + '">Sold: <b id="sold-' + sk + '">' + sold + '</b></div>' +
         '</div>' +
-        // No payment split on an excluded sku — its money is one plain amount that
-        // never joins the day's Cash or GCash. One short line says so. (Old
-        // bucket figures the row still holds render above it so they can be
-        // zeroed — see oldBuckets.)
+        // An in-cutoff card carries only the cheese FACT here — payment lives in
+        // the GCash card below and the cash remainder after it (v2.7.0). No
+        // payment split on an excluded sku at all: its money is one plain amount
+        // that never joins the day's Cash or GCash, its own arithmetic line says
+        // so, and old bucket figures the row still holds render so they can be
+        // zeroed — see oldBuckets.
         (inCut
-          ? '<div class="buckets">' +
-              '<div class="pay-intro">How were they paid?</div>' + buckets +
-            '</div>'
-          : oldBuckets + '<p class="excl-note">Count it as usual — its money is kept separate.</p>') +
-        // Every bucket is a SUBSET of what sold — a dearer filling, or a
-        // different way of paying — so raising one only moves a box from one
-        // bucket to another. Spelling all four out per row stops a stepper
-        // reading as "that button didn't add anything".
-        '<div class="sku-split" id="split-' + sk + '">' + skuSplitText(prEff, row) + '</div>' +
+          ? cheeseFact
+          : oldBuckets + '<p class="excl-note">Count it as usual — its money is kept separate.</p>' +
+            '<div class="sku-split" id="split-' + sk + '">' + skuSplitText(prEff, row) + '</div>') +
         '<p class="err" id="err-sku-' + sk + '" hidden></p>' +
       '</div>';
     }
 
-    // Custom order (+ how much of it was GCash) and the day note. There is NO
-    // typed GCash total any more: it is computed and shown on the receipt.
-    h += '<div class="section-title">Other sales and payments</div>';
+    // ② SOLD WITH GCASH — one collapsible card for the whole payment question,
+    // with the converted tin cash at its bottom (v2.7.0).
+    h += gcashCardHTML(skus, daySnap, payRow);
+
+    // ③ SOLD WITH CASH — display only: the derived remainder, spelled out.
+    // Filled (and kept live) by updateReceipt, exactly like the receipt strip.
+    h += '<div class="section-title">Sold with cash</div>' +
+      '<div class="card" id="cashRecap"></div>';
+
+    // Custom order (+ how much of it was GCash), the boxes it physically used,
+    // the lid-box count and the day note. There is NO typed GCash total any
+    // more: it is computed and shown on the receipt.
+    h += '<div class="section-title">Custom order</div>';
+    // The box skus a special order may draw from: every in-cutoff box on the
+    // form — plus any row still HOLDING a figure (a sku since excluded or
+    // deactivated), because a figure with no stepper is a dead end: it must
+    // render so it can be seen and zeroed on purpose, never zeroed behind her
+    // back. Same rule the excluded card applies to its old buckets.
+    const cboxSkus = skus.filter(pr => {
+      const r = asArr(benta.rows).find(x => x.sku === pr.sku) || {};
+      return (pr.group === 'box' && cutoffOnDay(daySnap, pr)) || num(r.custom) > 0;
+    });
     h += '<div class="card">' +
       '<div class="field"><label for="customAmount">Custom order (₱)</label>' +
         '<input class="input money" id="customAmount" inputmode="decimal" autocomplete="off" placeholder="0" value="' + esc(benta.custom || '') + '">' +
@@ -3431,8 +3732,29 @@ function renderBenta(){
       '<div class="field"><label for="customGcash">How much of that was GCash? (₱)</label>' +
         '<input class="input money gcash-in" id="customGcash" inputmode="decimal" autocomplete="off" placeholder="0" value="' + esc(benta.customGcash || '') + '">' +
         '<p class="hint" style="margin-top:6px;">Leave it empty if the custom order was paid in cash.</p>' +
-        '<p class="err" id="err-customGcash" hidden></p></div>' +
-      '<div class="field"><label for="dayNotes">Note (optional)</label>' +
+        '<p class="err" id="err-customGcash" hidden></p></div>';
+    // Boxes the order USED (v2.7.0): whole boxes off tonight's counted stack.
+    // They are not priced again — the typed amount above is the order's entire
+    // value — so each one comes off its sku's priced quantity.
+    if (cboxSkus.length){
+      h += '<div class="buckets"><div class="pay-intro">Boxes the order used</div>' +
+        '<p class="hint" style="margin:-4px 0 10px;">Whole boxes from tonight’s counts that went into this order. They are not priced again — the amount above is the order’s whole value.</p>';
+      for (const pr of cboxSkus){
+        const r = asArr(benta.rows).find(x => x.sku === pr.sku) || {};
+        h += payRow(esc(pr.label),
+          stepperHTML(pr.sku, 'custom', num(r.custom), 'Boxes the order used, ' + pr.label, true), false) +
+          '<p class="err" id="err-cbox-' + esc(pr.sku) + '" hidden></p>';
+      }
+      h += '</div>';
+    }
+    // Box with lid (v2.7.0): its own labelled section — a plain count with NO
+    // price, NO sales money, NO stock tracking and NO note impact.
+    h += '<div class="buckets"><div class="pay-intro">Box with lid</div>' +
+      payRow('Lid boxes used', lidStepperHTML(), false) +
+      '<p class="hint" style="margin-top:4px;">Just a count — it has no price and touches no money.</p>' +
+      '<p class="err" id="err-lidBoxes" hidden></p>' +
+    '</div>';
+    h += '<div class="field" style="margin-top:14px;"><label for="dayNotes">Note (optional)</label>' +
         '<input class="input" id="dayNotes" autocomplete="off" placeholder="e.g. 30 pcs party order" value="' + esc(benta.notes) + '"></div>' +
     '</div>';
 
@@ -3513,6 +3835,110 @@ function updateWageCard(){
   if (sum) sum.textContent = wageSummary();
 }
 
+/* ---- ② The "Sold with GCash" card (v2.7.0). The whole payment question in one
+   collapsible card: per size, how many went through GCash and of those how many
+   were cheese, with the converted tin cash at the bottom. Closed on an all-cash
+   night — the common one — with its figure in the head so it can be read
+   without opening anything; it opens itself the moment it holds a figure, and
+   a validation error inside it opens it before the scroll (saveBenta). ---- */
+/** The figure in the card's head: everything THIS card controls — the per-sku
+ *  GCash money plus the converted cash. (The custom order's GCash part lives on
+ *  the custom-order card, so it is not restated here.) '' when there is none,
+ *  like the stock card. */
+function gcashSummaryText(c){
+  const d = isObj(c) ? c : computeDay(bentaPayload());
+  const fig = r2(num(d.gcash) - num(d.customGcash));
+  return fig ? peso(fig) : '';
+}
+function gcashCardHTML(skus, daySnap, payRow){
+  let body = '<p class="hint">How many of tonight’s boxes were paid through GCash. ' +
+    'They are already part of “Sold” above — this only splits the money.</p>';
+  let anyRow = false;
+  for (const pr of skus){
+    // Excluded skus never appear here: they have no payment split at all.
+    if (!cutoffOnDay(daySnap, pr)) continue;
+    const row = asArr(benta.rows).find(r => r.sku === pr.sku);
+    if (!row) continue;
+    anyRow = true;
+    const ui = rowUI(row);
+    body += '<div class="pay-group"><div class="pay-head gc">' + esc(pr.label) + '</div>' +
+      payRow('Sold with GCash',
+        stepperHTML(pr.sku, 'gcashAll', ui.G, 'Sold with GCash, ' + pr.label, true), true) +
+      // Only a box sku has a cheese version to point at.
+      (pr.group === 'box'
+        ? payRow('Of those, cheese',
+            stepperHTML(pr.sku, 'gcashOfCheese', ui.GC, 'Of the GCash boxes, cheese, ' + pr.label, true), true)
+        : '') +
+    '</div>';
+  }
+  if (!anyRow) body += '<p class="hint" style="margin-top:10px;">No box sizes to split yet.</p>';
+  // Tin cash swapped for a GCash transfer during the day (v2.7.0): the Total is
+  // untouched, only the cash/GCash split moves. Plain English on the label —
+  // this is the field the refusal about "the day's cash" points at.
+  body += '<div class="buckets"><div class="field" style="margin-bottom:0;">' +
+    '<label for="gcashConverted">Cash converted to GCash (₱)</label>' +
+    '<input class="input money gcash-in" id="gcashConverted" inputmode="decimal" autocomplete="off" placeholder="0" value="' +
+      esc(benta.gcashConverted || '') + '">' +
+    '<p class="hint" style="margin-top:6px;">Tin cash you moved into GCash during the day. ' +
+      'The day’s total does not change — only the cash and GCash split.</p>' +
+    '<p class="err" id="err-gcashConverted" hidden></p>' +
+  '</div></div>';
+  return collapseCardHTML('gcash', 'Sold with GCash', gcashSummaryText(), benta.gcashOpen, body);
+}
+
+/** The lid-box counter (v2.7.0): a plain count with no money anywhere near it.
+ *  Not sku-keyed, so it gets its own act instead of riding the sku steppers. */
+function lidStepperHTML(){
+  const label = 'Lid boxes used';
+  return '<div class="stepper sm">' +
+    '<button type="button" class="step-btn" data-act="lid-step" data-dir="-1" aria-label="One less: ' + label + '">−</button>' +
+    '<input class="step-val" id="lidBoxesIn" inputmode="numeric" autocomplete="off" value="' +
+      esc(benta.lidBoxes || '') + '" aria-label="' + label + '">' +
+    '<button type="button" class="step-btn" data-act="lid-step" data-dir="1" aria-label="One more: ' + label + '">+</button>' +
+  '</div>';
+}
+/** One press of the lid stepper: whole units, never below zero — the same
+ *  clamps the stock steppers apply, because it is the same kind of count. */
+function lidStep(dir){
+  let v = Math.floor(num(benta.lidBoxes)) + dir;
+  if (v < 0) v = 0;
+  benta.lidBoxes = v;
+  benta.dirty = true;
+  const f = $('lidBoxesIn');
+  if (f) f.value = v || '';
+  updateReceipt();
+  validateBentaLive();
+}
+
+/* ---- ③ "Sold with cash": display only — the derived remainder, spelled out so
+   the figure she counts the tin against explains itself (v2.7.0). Rebuilt by
+   updateReceipt on every change, exactly like the receipt strip. ---- */
+function cashRecapHTML(c){
+  let rows = '';
+  for (const l of asArr(asObj(c).lines)){
+    // Excluded money is not cash-in-the-total; the receipt's tin line owns it.
+    if (!l.in_cutoff) continue;
+    const bits = [];
+    if (l.regular_qty > 0) bits.push(l.regular_qty + ' regular × ' + peso(l.price));
+    if (l.cheese_qty > 0) bits.push(l.cheese_qty + ' cheese × ' + peso(l.cheese_price));
+    if (!bits.length) continue;
+    const amt = r2(l.regular_qty * l.price + l.cheese_qty * l.cheese_price);
+    rows += '<div class="co-row"><span>' + esc(txt(l.label)) + ' — ' + esc(bits.join(' + ')) +
+      '</span><span class="v">' + peso(amt) + '</span></div>';
+  }
+  const customCash = r2(num(asObj(c).custom) - num(asObj(c).customGcash));
+  if (customCash > 0){
+    rows += '<div class="co-row"><span>Custom order paid in cash</span><span class="v">' + peso(customCash) + '</span></div>';
+  }
+  if (num(asObj(c).gcashConverted) > 0){
+    rows += '<div class="co-row"><span>Converted to GCash</span><span class="v">−' + peso(asObj(c).gcashConverted) + '</span></div>';
+  }
+  if (!rows) rows = '<p class="hint">Enter the counts above — whatever is not GCash is cash, worked out here.</p>';
+  return '<p class="hint" style="margin-bottom:8px;">Nothing to type here — cash is what is left after GCash.</p>' +
+    rows +
+    '<div class="sum-row"><span>Cash</span><b>' + peso(asObj(c).cash) + '</b></div>';
+}
+
 function stockUsedCount(){ return asArr(benta.stock).filter(r => num(r.qty) > 0).length; }
 
 // The stock list is ADVISORY, not referential integrity: a row whose name has
@@ -3579,7 +4005,7 @@ function stockStepperHTML(i, r){
 
 // The two collapsible cards on the Sales screen and the flag each one remembers.
 // A whitelist, so a stray data attribute can never write a field on `benta`.
-const COLLAPSE_FLAG = { stock:'stockOpen', wage:'wageOpen' };
+const COLLAPSE_FLAG = { stock:'stockOpen', wage:'wageOpen', gcash:'gcashOpen' };
 function toggleCollapse(key){
   // hasOwnProperty, not a plain lookup: "toString" is inherited by every object
   // and would otherwise read as a valid flag name.
@@ -3637,7 +4063,16 @@ function updateReceipt(){
       // An EXCLUDED sku's money is NOT in the TOTAL below, so it must not sit among
       // the lines that add up to it. It gets its own line under the totals.
       if (!l.in_cutoff) continue;
-      if (l.regular_qty > 0){ any = true; h += rLine(l.label + ' ×' + l.regular_qty, l.regular_qty * l.price); }
+      // The special order's boxes physically left this stack, so the line counts
+      // them ("×6") and says out loud that some are not priced here ("less 1 for
+      // the special order") — the amount prices only the regular remainder, and
+      // the order's own money is the Custom order line below (v2.7.0).
+      if (l.regular_qty > 0 || l.custom_qty > 0){
+        any = true;
+        h += rLine(l.label + ' ×' + (l.regular_qty + l.custom_qty) +
+          (l.custom_qty > 0 ? ', less ' + l.custom_qty + ' for the special order' : ''),
+          l.regular_qty * l.price);
+      }
       if (l.cheese_qty > 0){ any = true; h += rLine(l.label + ' cheese ×' + l.cheese_qty, l.cheese_qty * l.cheese_price); }
       // "GCash" alone would repeat the old ambiguity — say which variant.
       if (l.gcash_qty > 0){ any = true; h += rLine(l.label + ' GCash regular ×' + l.gcash_qty, l.gcash_qty * l.price); }
@@ -3649,6 +4084,15 @@ function updateReceipt(){
       '<div class="r-total"><span class="lbl">TOTAL</span><span class="amt">' + peso(c.total) + '</span></div>' +
       '<div class="r-sub gcash"><span>GCash</span><span class="r-amt">' + peso(c.gcash) + '</span></div>' +
       '<div class="r-sub"><span>Cash</span><span class="r-amt">' + peso(c.cash) + '</span></div>';
+    // The two v2.7.0 notes, each only when it has something to say: the moved
+    // split (the figure is already inside GCash and out of Cash above), and the
+    // lid-box count, which is not money at all.
+    if (c.gcashConverted > 0){
+      h += '<div class="r-note">' + peso(c.gcashConverted) + ' of the cash was converted to GCash</div>';
+    }
+    if (c.lidBoxes > 0){
+      h += '<div class="r-note">Lid boxes used: ' + fmt(c.lidBoxes) + '</div>';
+    }
     // Money that is kept OUT of the cutoff, BELOW the totals and never added into
     // them. The tin line is not decoration: the nori cash sits in the same tin, so
     // without it the tin can never appear to reconcile and that reads as a bug.
@@ -3672,6 +4116,12 @@ function updateReceipt(){
     }
   }
   el.innerHTML = h;
+  // The display-only "Sold with cash" card and the GCash card's head figure
+  // mirror the same computation (v2.7.0) — one sum, three places it shows.
+  const recap = $('cashRecap');
+  if (recap) recap.innerHTML = cashRecapHTML(c);
+  const gsum = document.querySelector('#panel-benta [data-act="toggle-gcash"] .ch-sum');
+  if (gsum) gsum.textContent = gcashSummaryText(c);
 }
 function rLine(label, amt){
   return '<div class="r-line"><span>' + esc(label) + '</span><span class="r-amt">' + fmt(amt) + '</span></div>';
@@ -3817,6 +4267,30 @@ function validateBenta(){
     const gcash = b.gcashQty;
     const gcashCheese = b.gcashCheeseQty;
     const sold = sod - eod;
+    // The special order's boxes for this sku (v2.7.0), in the server's own
+    // sentences and its own order: whole units, never negative, only from a box
+    // sku that counts in the cutoff, and at most what sold. Its error slot is on
+    // the custom-order card, where the stepper is.
+    const label = skuLabel(r.sku);
+    const cq = num(r.custom);
+    const cboxKey = 'cbox:' + r.sku;
+    if (!isWhole(cq)){
+      errs[cboxKey] = label + ' special-order boxes must be a whole number (got "' + txt(r.custom) + '").';
+    } else if (cq < 0){
+      errs[cboxKey] = label + ': special-order boxes cannot be negative.';
+    } else if (cq > 0){
+      if (!inCut){
+        errs[cboxKey] = label + ' is kept out of the cutoff and its money is settled separately, so a special order cannot use its boxes.';
+      } else if (!isBox){
+        errs[cboxKey] = label + ' is not a box, so a special order cannot use boxes from it.';
+      } else if (cq > Math.max(0, sold)){
+        errs[cboxKey] = label + ': the special order used ' + cq + ', but only ' + Math.max(0, sold) + ' were sold.';
+      }
+    }
+    // The bound below judges PRICED sales only, so a valid special order shrinks
+    // it — exactly apiSaveDay's guard, which never sees an invalid customQty
+    // because it throws on those first.
+    const customQty = (!errs[cboxKey] && cq > 0) ? cq : 0;
     if (!isWhole(sod) || !isWhole(eod) || !isWhole(cheese) || !isWhole(gcash) || !isWhole(gcashCheese)){
       errs[key] = 'Use whole numbers only — half a box cannot be sold.';
     } else if (sod < 0 || eod < 0){
@@ -3833,9 +4307,15 @@ function validateBenta(){
       // Nothing sold yet, so there is nothing to split. Blaming the buckets
       // ("can only go up to 0") points at the wrong field entirely.
       errs[key] = 'Enter Start of day and End of day first, then split the boxes.';
-    } else if (cheese + gcash + gcashCheese > sold){
+    } else if (cheese + gcash + gcashCheese > sold - customQty){
+      // The buckets describe PRICED sales only, so the bound is sold minus the
+      // special order's boxes (v2.7.0) — with no special order this is the
+      // guard it always was, word for word, with the server's own clause
+      // appended when there is one.
       errs[key] = 'Cheese (' + cheese + ') + GCash (' + gcash + ') + GCash cheese (' + gcashCheese +
-        ') adds up to ' + (cheese + gcash + gcashCheese) + ', but only ' + sold + ' were sold. Lower one of them.';
+        ') adds up to ' + (cheese + gcash + gcashCheese) + ', but only ' + (sold - customQty) + ' were sold' +
+        (customQty > 0 ? ' at menu price (the special order used ' + customQty + ')' : '') +
+        '. Lower one of them.';
     }
     // The two excluded-sku rules the server enforces, in the server's own words.
     // Checked last so an ordinary counting mistake is still reported first, but
@@ -3853,6 +4333,29 @@ function validateBenta(){
   else if (customGcash > custom){
     errs.customGcash = 'The GCash part (' + peso(customGcash) +
       ') cannot be more than the custom order (' + peso(custom) + ').';
+  }
+
+  // Tin cash swapped for GCash (v2.7.0), in the server's own sentences. The
+  // bound is the day's cash BEFORE the conversion — apiSaveDay checks it after
+  // the roll-up, so it is measured here the same way: the whole day recomputed
+  // with the conversion at 0, whose `cash` is exactly that figure.
+  const conv = num(benta.gcashConverted);
+  if (conv < 0){
+    errs.gcashConverted = 'The cash converted to GCash cannot be negative.';
+  } else if (conv > 0){
+    const base = computeDay(Object.assign(bentaPayload(), { gcashConverted: 0 }));
+    if (conv > num(base.cash)){
+      errs.gcashConverted = 'The cash converted to GCash (' + fmt(conv) +
+        ") cannot be more than the day's cash (" + fmt(base.cash) + ').';
+    }
+  }
+
+  // Lid boxes (v2.7.0): a whole count, never negative — the server's words for
+  // both. Blank means none and is fine.
+  if (benta.lidBoxes !== '' && benta.lidBoxes != null){
+    const lid = num(benta.lidBoxes);
+    if (!isWhole(lid)) errs.lidBoxes = 'Lid boxes used must be a whole number (got "' + txt(benta.lidBoxes) + '").';
+    else if (lid < 0) errs.lidBoxes = 'Lid boxes used cannot be negative.';
   }
 
   // The wage. Blank is fine (it means "the usual rate"); a negative one is not.
@@ -3891,12 +4394,11 @@ function validateBentaLive(){
   const daySnap = storedPricesFor(benta.date);
   for (const r of asArr(benta.rows)){
     setErr('err-sku-' + r.sku, errs['sku:' + r.sku]);
+    setErr('err-cbox-' + r.sku, errs['cbox:' + r.sku]);
     const sold = num(r.sod) - num(r.eod);
     const badge = $('soldbadge-' + r.sku);
     if (badge) badge.classList.toggle('neg', sold < 0);
     const isBox = isBoxSku(r.sku);
-    const reg = $('reg-' + r.sku);
-    if (reg) reg.textContent = rowRegular(r, isBox);
     const split = $('split-' + r.sku);
     if (split){
       // Fall back to the same placeholder renderBenta drew the card from, so a
@@ -3912,6 +4414,8 @@ function validateBentaLive(){
   }
   setErr('err-custom', errs.custom);
   setErr('err-customGcash', errs.customGcash);
+  setErr('err-gcashConverted', errs.gcashConverted);
+  setErr('err-lidBoxes', errs.lidBoxes);
   setErr('err-salary', errs.salary);
   for (const s of asArr(benta.stock)) setErr('err-stock-' + s.product, errs['stock:' + s.product]);
   return errs;
@@ -3927,6 +4431,12 @@ function saveBenta(){
     // and finding a second one only after fixing the first is a treasure hunt.
     if (keys.some(k => k.indexOf('stock:') === 0) && !benta.stockOpen) toggleCollapse('stock');
     if (errs.salary && !benta.wageOpen) toggleCollapse('wage');
+    // The GCash card holds its own field (the converted cash) and the steppers
+    // that fix any sku error involving a GCash figure — open it for either.
+    if (!benta.gcashOpen && (errs.gcashConverted ||
+        asArr(benta.rows).some(r => errs['sku:' + r.sku] && (num(r.gcash) > 0 || num(r.gcashCheese) > 0)))){
+      toggleCollapse('gcash');
+    }
     const el = $(errSlotId(keys[0]));
     if (el) el.scrollIntoView({ block:'center', behavior: prefersReduced() ? 'auto' : 'smooth' });
     return;
@@ -3996,10 +4506,32 @@ function tearReceipt(done){
 
 function bentaStep(sku, field, dir){
   const r = benta.rows.find(x => x.sku === sku);
+  if (!r) return;
+  // The v2.7.0 presentation steppers edit the buckets through their own map.
+  if (UI_FIELDS[field]){ uiStep(r, field, dir); return; }
   const key = ROW_FIELDS[field];
-  if (!r || !key) return;
+  if (!key) return;
   let v = num(r[key]) + dir;
   if (v < 0) v = 0;
+  // The special order's boxes come off what sold and only off what the buckets
+  // have not already claimed — the server's bound, mirrored as a clamp here so
+  // the stepper can never show a figure the save is about to refuse.
+  if (key === 'custom'){
+    const sold = Math.max(0, num(r.sod) - num(r.eod));
+    const b = sentBuckets(r);
+    const paid = b.cheeseQty + b.gcashQty + b.gcashCheeseQty;
+    const room = Math.max(0, sold - paid);
+    if (dir > 0 && sold === 0){
+      toast('Enter Start of day and End of day first — the order’s boxes come off what sold.');
+      v = 0;
+    } else if (v > room){
+      toast(room === sold
+        ? 'The special order can only use up to ' + sold + ' — that is how many were sold.'
+        : 'The special order can only use up to ' + room + ' — the other ' + (sold - room) +
+          ' of the ' + sold + ' sold are already counted as cheese or GCash.');
+      v = room;
+    }
+  }
   const bucket = BUCKETS.find(b => b.field === key);
   if (bucket){
     // A bucket can never claim more boxes than are still unlabelled: the three
@@ -4042,7 +4574,11 @@ const GX_CATS = EXPENSE_CATS;   // same six stored values, one source of truth
 // are gone: goods arriving are their own event — "Stock came in" under More →
 // Stock on hand — because suppliers deliver on credit and the flour is not
 // paid yet. Legacy rows that carry a quantity still display it in the list.
-let gx = { open:false, category:'Supplies', item:'', amount:'', date:todayStr(), backlogRef:'' };
+// `pick` is the supplies-picklist choice (v2.7.0): a picked item name, or ''
+// while nothing is chosen yet. `other` is the "Something else" path — the
+// free-text box and the category chips, exactly the form as it always was.
+// The two are mutually exclusive; with an empty picklist only `other` exists.
+let gx = { open:false, category:'Supplies', item:'', amount:'', date:todayStr(), backlogRef:'', pick:'', other:false };
 // The last expense that was dated OUTSIDE the cutoff being listed. It saved
 // correctly but it cannot appear in this list, so it is named here instead of
 // seeming to vanish. { label, item, amount, date }
@@ -4078,27 +4614,48 @@ function renderGastos(){
   if (!gx.open){
     h += '<button type="button" class="btn block" data-act="gastos-open">+ Add an expense</button>';
   } else {
-    h += '<div class="card">' +
-      '<div class="field"><label>Category</label><div class="chips" role="group" aria-label="Expense category">';
-    for (const cat of GX_CATS){
-      h += '<button type="button" class="chip" data-act="gastos-cat" data-cat="' + cat + '" aria-pressed="' + String(gx.category === cat) + '">' + cat + '</button>';
-    }
-    h += '</div></div>';
-    if (gx.category === 'Backlog'){
-      const active = asArr(state.backlogs).filter(b => isObj(b) && truthy(b.active));
-      h += '<div class="field"><label for="gxBacklog">Which backlog?</label><select class="input" id="gxBacklog">';
-      if (!active.length) h += '<option value="">No active backlog</option>';
-      else {
-        h += '<option value=""' + (gx.backlogRef === '' ? ' selected' : '') + '>Choose…</option>';
-        for (const b of active){
-          h += '<option value="' + esc(b.name) + '"' + (gx.backlogRef === b.name ? ' selected' : '') + '>' +
-            esc(b.name) + ' — balance ' + peso(backlogBalance(b)) + '</option>';
-        }
+    // The supplies picklist comes FIRST (v2.7.0): most expenses are the same
+    // few supplies, so they are one tap — and a picked item is obviously
+    // category Supplies, so the category chips stay out of the way. "Something
+    // else" is the form exactly as it always was: free text and the chips. The
+    // category CONCEPT is untouched — every note line is still driven by it.
+    const plist = supplyPicklist();
+    const showCats = !plist.length || gx.other;
+    h += '<div class="card">';
+    if (plist.length){
+      h += '<div class="field"><label>What did you buy or pay?</label><div class="chips" role="group" aria-label="Supplies picklist">';
+      for (const it of plist){
+        // A picklist name is sheet data — escaped exactly once, everywhere it
+        // lands in the markup (the attribute and the text).
+        h += '<button type="button" class="chip" data-act="gastos-pick" data-pick="' + esc(it) + '" aria-pressed="' + String(gx.pick === it) + '">' + esc(it) + '</button>';
       }
-      h += '</select><p class="err" id="err-gx-backlog" hidden></p></div>';
+      h += '<button type="button" class="chip" data-act="gastos-other" aria-pressed="' + String(!!gx.other) + '">Something else…</button>';
+      h += '</div>' +
+        (gx.pick ? '<p class="hint" style="margin-top:8px;">Filed under Supplies.</p>' : '') +
+        '<p class="err" id="err-gx-pick" hidden></p></div>';
     }
-    h += '<div class="field"><label for="gxItem">What did you buy or pay?</label>' +
-      '<input class="input" id="gxItem" autocomplete="off" placeholder="e.g. flour, eggs, gas" value="' + esc(gx.item) + '"></div>';
+    if (showCats){
+      h += '<div class="field"><label>Category</label><div class="chips" role="group" aria-label="Expense category">';
+      for (const cat of GX_CATS){
+        h += '<button type="button" class="chip" data-act="gastos-cat" data-cat="' + cat + '" aria-pressed="' + String(gx.category === cat) + '">' + cat + '</button>';
+      }
+      h += '</div></div>';
+      if (gx.category === 'Backlog'){
+        const active = asArr(state.backlogs).filter(b => isObj(b) && truthy(b.active));
+        h += '<div class="field"><label for="gxBacklog">Which backlog?</label><select class="input" id="gxBacklog">';
+        if (!active.length) h += '<option value="">No active backlog</option>';
+        else {
+          h += '<option value=""' + (gx.backlogRef === '' ? ' selected' : '') + '>Choose…</option>';
+          for (const b of active){
+            h += '<option value="' + esc(b.name) + '"' + (gx.backlogRef === b.name ? ' selected' : '') + '>' +
+              esc(b.name) + ' — balance ' + peso(backlogBalance(b)) + '</option>';
+          }
+        }
+        h += '</select><p class="err" id="err-gx-backlog" hidden></p></div>';
+      }
+      h += '<div class="field"><label for="gxItem">What did you buy or pay?</label>' +
+        '<input class="input" id="gxItem" autocomplete="off" placeholder="e.g. flour, eggs, gas" value="' + esc(gx.item) + '"></div>';
+    }
     h += '<div class="field"><label for="gxAmount">How much? (₱)</label>' +
       '<input class="input money" id="gxAmount" inputmode="decimal" autocomplete="off" placeholder="0" value="' + esc(gx.amount) + '">' +
       '<p class="err" id="err-gx-amount" hidden></p></div>';
@@ -4151,6 +4708,18 @@ function renderGastos(){
 
 function submitGasto(){
   let ok = true;
+  // With a picklist on offer, something must be chosen — a picked supply, or
+  // "Something else" for the free-text path. Without one the form is exactly
+  // what it always was and nothing here fires.
+  const hasPicklist = supplyPicklist().length > 0;
+  const pickEl = $('err-gx-pick');
+  if (hasPicklist && !gx.pick && !gx.other){
+    if (pickEl){ pickEl.textContent = 'Choose what you bought or paid, or tap “Something else”.'; pickEl.hidden = false; }
+    ok = false;
+  } else if (pickEl) pickEl.hidden = true;
+  // A picked supply is category Supplies by definition; only the free-text
+  // path carries the chosen category (and a backlog needs its name).
+  const picked = hasPicklist && !!gx.pick;
   // The DATE, in the server's own words: a half-edited year (a future day, or
   // "0002-…") files real money where nobody looks, so it is refused here the
   // same way the change handler refuses it — never only one of the two.
@@ -4165,7 +4734,7 @@ function submitGasto(){
     if (amtEl){ amtEl.textContent = 'Enter the amount.'; amtEl.hidden = false; }
     ok = false;
   } else if (amtEl) amtEl.hidden = true;
-  if (gx.category === 'Backlog' && !gx.backlogRef){
+  if (!picked && gx.category === 'Backlog' && !gx.backlogRef){
     const be = $('err-gx-backlog');
     if (be){ be.textContent = 'Choose which backlog you paid.'; be.hidden = false; }
     ok = false;
@@ -4173,12 +4742,13 @@ function submitGasto(){
   if (!ok) return;
   // MONEY ONLY (v2.6.0): no stockProduct/stockQty on this payload, ever — the
   // server refuses an expense that names stock, pointing at "Stock came in".
+  // A picked supply files as Supplies with the picked name as the item (v2.7.0).
   const payload = {
     date: gx.date || todayStr(),
-    category: gx.category,
-    item: gx.item.trim(),
+    category: picked ? 'Supplies' : gx.category,
+    item: picked ? gx.pick : gx.item.trim(),
     amount: num(gx.amount),
-    backlogRef: gx.category === 'Backlog' ? gx.backlogRef : '',
+    backlogRef: (!picked && gx.category === 'Backlog') ? gx.backlogRef : '',
     notes: '',
     entryId: uuid()
   };
@@ -4194,7 +4764,10 @@ function submitGasto(){
   gxElsewhere = elsewhere
     ? { label: periodLabel(itsPeriod), item: payload.item || payload.category, amount: payload.amount, date: payload.date }
     : null;
-  gx = { open:true, category:gx.category, item:'', amount:'', date:gx.date, backlogRef:'' };
+  // `pick` clears so the next tap is a fresh choice; `other` (like the chosen
+  // category) is a mode and is remembered, so a run of free-text entries stays
+  // on the free-text form.
+  gx = { open:true, category:gx.category, item:'', amount:'', date:gx.date, backlogRef:'', pick:'', other:gx.other };
   renderGastos();
   toast(elsewhere ? 'Saved to ' + periodLabel(itsPeriod) + '.' : 'Expense added.');
   drainQueue();
@@ -4978,7 +5551,8 @@ function maintLoad(){
   maintConst = {
     daily_salary: dailySalary(), split_default: splitDefault(),
     mama_per_cutoff: num(st.mama_per_cutoff), electric_per_cutoff: num(st.electric_per_cutoff),
-    branch: txt(st.branch), staff: txt(st.staff)
+    branch: txt(st.branch), staff: txt(st.staff),
+    supply_picklist: txt(st.supply_picklist)
   };
   maintStock = Object.create(null);
   for (const s of asArr(state.stockItems)){
@@ -5074,6 +5648,9 @@ function maintenanceHTML(){
     '<div class="field"><label for="ms-staff">Who can mind the stall</label>' +
       '<input class="input" id="ms-staff" data-mset="staff" autocomplete="off" value="' + esc(maintConst.staff) + '">' +
       '<p class="hint" style="margin-top:6px;">Separate the names with commas, e.g. Mama, Nayt.</p></div>' +
+    '<div class="field"><label for="ms-supply_picklist">Supplies picklist</label>' +
+      '<input class="input" id="ms-supply_picklist" data-mset="supply_picklist" autocomplete="off" value="' + esc(maintConst.supply_picklist) + '">' +
+      '<p class="hint" style="margin-top:6px;">The one-tap choices on the expense form. Separate the items with commas.</p></div>' +
     '<p class="err" id="err-maint-set" hidden></p>' +
     '<button type="button" class="btn block primary" data-act="maint-save-set">Save amounts</button></div>';
 
@@ -5168,6 +5745,10 @@ function maintSettingsPayload(mc){
   if (branch) settings.branch = branch;
   const staff = txt(m.staff).trim();
   if (staff) settings.staff = staff;
+  // Same blank-omission rule: a cleared picklist field means "leave the sheet's
+  // list alone", never "wipe the chips off the expense form".
+  const picklist = txt(m.supply_picklist).trim();
+  if (picklist) settings.supply_picklist = picklist;
   for (const k of ['daily_salary','split_default','mama_per_cutoff','electric_per_cutoff']){
     const raw = m[k];
     if (raw === '' || raw == null) continue;   // blank = leave the sheet's figure alone
@@ -5301,6 +5882,8 @@ document.addEventListener('click', (ev) => {
   }
   else if (act === 'toggle-stock') toggleCollapse('stock');
   else if (act === 'toggle-wage') toggleCollapse('wage');
+  else if (act === 'toggle-gcash') toggleCollapse('gcash');
+  else if (act === 'lid-step') lidStep(Number(el.dataset.dir));
   else if (act === 'stock-step'){
     const st = el.closest('[data-stkstep]');
     if (st) stockStep(st.dataset.stkstep, Number(el.dataset.dir));
@@ -5312,6 +5895,18 @@ document.addEventListener('click', (ev) => {
   else if (act === 'gastos-open'){ gx.open = true; gx.date = todayStr(); renderGastos(); const f = $('gxItem'); if (f) f.focus(); }
   else if (act === 'gastos-cancel'){ gx.open = false; gxElsewhere = null; renderGastos(); }
   else if (act === 'gastos-cat'){ gx.category = el.dataset.cat; renderGastos(); }
+  // A picked supply IS the item and IS category Supplies — one tap, nothing
+  // else to choose. "Something else" is the whole form as it always was.
+  else if (act === 'gastos-pick'){
+    gx.pick = txt(el.dataset.pick); gx.other = false;
+    renderGastos();
+    const f = $('gxAmount'); if (f) f.focus();
+  }
+  else if (act === 'gastos-other'){
+    gx.other = true; gx.pick = '';
+    renderGastos();
+    const f = $('gxItem'); if (f) f.focus();
+  }
   else if (act === 'gastos-submit') submitGasto();
   else if (act === 'gastos-del') deleteGasto(el.dataset.id);
 
@@ -5390,6 +5985,8 @@ document.addEventListener('input', (ev) => {
   // Sales fields. There is no typed GCash total any more — it is computed.
   if (id === 'customAmount'){ benta.custom = ev.target.value; benta.dirty = true; updateReceipt(); validateBentaLive(); }
   else if (id === 'customGcash'){ benta.customGcash = ev.target.value; benta.dirty = true; updateReceipt(); validateBentaLive(); }
+  else if (id === 'gcashConverted'){ benta.gcashConverted = ev.target.value; benta.dirty = true; updateReceipt(); validateBentaLive(); }
+  else if (id === 'lidBoxesIn'){ benta.lidBoxes = ev.target.value; benta.dirty = true; updateReceipt(); validateBentaLive(); }
   else if (id === 'daySalary'){ benta.salary = ev.target.value; benta.dirty = true; updateWageCard(); validateBentaLive(); }
   else if (id === 'dayNotes'){ benta.notes = ev.target.value; benta.dirty = true; }
   else if (id.startsWith('in-')){
@@ -5398,9 +5995,16 @@ document.addEventListener('input', (ev) => {
     // dashes or other characters that make the id ambiguous.
     const st = ev.target.closest('.stepper');
     if (st){
-      const sku = st.dataset.sku, field = ROW_FIELDS[st.dataset.field];
-      const r = field ? benta.rows.find(x => x.sku === sku) : null;
-      if (r){ r[field] = Math.max(0, num(ev.target.value)); benta.dirty = true; afterCountChange(sku); }
+      const sku = st.dataset.sku;
+      // A v2.7.0 presentation field writes the buckets through its own map.
+      if (UI_FIELDS[st.dataset.field]){
+        const r = benta.rows.find(x => x.sku === sku);
+        if (r){ uiTyped(r, st.dataset.field, ev.target.value); benta.dirty = true; afterCountChange(sku); }
+      } else {
+        const field = ROW_FIELDS[st.dataset.field];
+        const r = field ? benta.rows.find(x => x.sku === sku) : null;
+        if (r){ r[field] = Math.max(0, num(ev.target.value)); benta.dirty = true; afterCountChange(sku); }
+      }
     }
   }
 
