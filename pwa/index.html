@@ -541,7 +541,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.7.1';
+const APP_VERSION = '2.7.2';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -5336,7 +5336,12 @@ function renderIbapa(){
 let countingProduct = '';   // the product whose count field is open
 let countDraft = '';        // what is typed in it
 let arriving = false;       // whether the "Stock came in" form is open
-let arrival = { product:'', qty:'', date: todayStr() };
+// One qty per ACTIVE product, parallel to activeStockItems() at open time and
+// addressed by ROW INDEX like the Sales screen's stock card — the list is
+// constant, so the form shows every product with a stepper instead of making
+// her choose from a dropdown (owner, 2026-08-19: "dont let me choose, just
+// present all the stocks with + button").
+let arrival = { qtys: [], date: todayStr() };
 
 function stockOnHandHTML(){
   let list = [];
@@ -5357,24 +5362,26 @@ function stockOnHandHTML(){
   if (!arriving){
     h += '<button type="button" class="btn block" data-act="arrive-open" style="margin:6px 0 14px;">Stock came in</button>';
   } else {
+    // Every product listed with its own stepper — the list is constant, so
+    // there is nothing to choose, only counts to tap in. Rows are addressed
+    // by INDEX, never by name: a product name is sheet data (v2.7.2).
     const items = activeStockItems();
-    const unit = stockUnitOf(arrival.product);
     h += '<div style="margin:6px 0 14px;">' +
-      '<div class="field"><label for="arrProduct">What arrived?</label>' +
-        '<select class="input" id="arrProduct">' +
-          '<option value=""' + (arrival.product === '' ? ' selected' : '') + '>Choose…</option>' +
-          items.map(s => '<option value="' + esc(s.product) + '"' +
-            (arrival.product === s.product ? ' selected' : '') + '>' + esc(s.product) +
-            (s.unit ? ' (by the ' + esc(s.unit) + ')' : '') + '</option>').join('') +
-        '</select></div>' +
-      '<div class="field"><label for="arrQty">How many ' + esc(unit ? unit + 's' : 'units') + ' arrived?</label>' +
-        '<div class="stepper">' +
-          '<button type="button" class="step-btn" data-act="arrive-step" data-dir="-1" aria-label="Subtract one unit">−</button>' +
-          '<input class="step-val" id="arrQty" inputmode="numeric" autocomplete="off" value="' + esc(arrival.qty) + '" aria-label="How many units arrived">' +
-          '<button type="button" class="step-btn" data-act="arrive-step" data-dir="1" aria-label="Add one unit">+</button>' +
+      '<p class="hint" style="margin-bottom:6px;">Tap + on what arrived — whole units only, the same way you count what you open. No money here: paying for it is a normal expense, whenever you pay.</p>';
+    items.forEach((s, i) => {
+      const label = 'Units of ' + txt(s.product) + ' that arrived';
+      h += '<div class="stk-row">' +
+        '<div class="stk-what"><span class="stk-name">' + esc(s.product) + '</span>' +
+          (s.unit ? '<span class="stk-unit">by the ' + esc(s.unit) + '</span>' : '') + '</div>' +
+        '<div class="stepper sm" data-arrstep="' + i + '">' +
+          '<button type="button" class="step-btn" data-act="arrive-step" data-dir="-1" aria-label="One less: ' + esc(label) + '">−</button>' +
+          '<input class="step-val" id="in-arr-' + i + '" inputmode="numeric" autocomplete="off" ' +
+            'value="' + esc(txt(arrival.qtys[i])) + '" aria-label="' + esc(label) + '">' +
+          '<button type="button" class="step-btn" data-act="arrive-step" data-dir="1" aria-label="One more: ' + esc(label) + '">+</button>' +
         '</div>' +
-        '<p class="hint" style="margin-top:6px;">Whole units only — the same way you count what you open. No money here: paying for it is a normal Supplies expense, whenever you pay.</p></div>' +
-      '<div class="field"><label for="arrDate">When did it arrive?</label>' +
+      '</div>';
+    });
+    h += '<div class="field" style="margin-top:10px;"><label for="arrDate">When did it arrive?</label>' +
         '<input class="input" type="date" id="arrDate" value="' + esc(arrival.date) + '" max="' + todayStr() + '"></div>' +
       '<p class="err" id="err-arrive" hidden></p>' +
       '<div class="btn-row"><button type="button" class="btn" data-act="arrive-cancel">Close</button>' +
@@ -5462,41 +5469,57 @@ function saveStockCountNow(product){
 
 /** One press of the arrival stepper. Clamped at 0 (the validator asks for at
  *  least 1) and always a whole number — the buttons can only ever step by one. */
-function arriveStep(dir){
-  const q = Math.max(0, Math.floor(num(arrival.qty)) + (num(dir) > 0 ? 1 : -1));
-  arrival.qty = String(q);
-  const f = $('arrQty');
-  if (f) f.value = arrival.qty;
+function arriveStep(i, dir){
+  const q = Math.max(0, Math.floor(num(arrival.qtys[num(i)])) + (num(dir) > 0 ? 1 : -1));
+  arrival.qtys[num(i)] = String(q);
+  const f = $('in-arr-' + num(i));
+  if (f) f.value = String(q);
 }
 
-/** Save a delivery: quantity in, no money anywhere near it (v2.6.0). The same
- *  clamps the server applies — a real product, at least 1 whole unit, an event
- *  date (no future, no pre-2020) — refused here in the server's own words so
- *  the phone never queues a row the sheet will bounce. On-hand rises the
- *  moment this returns, via the local mirror. */
+/** Save the deliveries: one row per product with a quantity, no money anywhere
+ *  near any of them (v2.6.0). The same clamps the server applies — at least 1
+ *  whole unit per named row, an event date (no future, no pre-2020) — refused
+ *  here in the server's own words so the phone never queues a row the sheet
+ *  will bounce. Each product is its own saveStockDelivery (its own entryId),
+ *  so a replay converges per product. On-hand rises the moment this returns. */
 function saveArrival(){
   const err = $('err-arrive');
-  const product = txt(arrival.product);
-  const qty = num(arrival.qty);
+  const items = activeStockItems();
   const dateBad = entryDateError(arrival.date);
   let bad = '';
-  if (!product) bad = 'Choose what arrived.';
-  else if (dateBad) bad = dateBad;
-  else if (!isWhole(qty)) bad = 'Count whole units (1, 2, 3) — “' + txt(arrival.qty) + '” is not a whole unit.';
-  else if (arrival.qty === '' || qty < 1) bad = 'Enter how many arrived — at least 1.';
+  const rows = [];
+  if (dateBad) bad = dateBad;
+  else {
+    for (let i = 0; i < items.length && !bad; i++){
+      const raw = txt(arrival.qtys[i]);
+      if (raw === '' || num(raw) === 0) continue;    // untouched row: nothing arrived
+      const qty = num(raw);
+      if (!isWhole(qty) || qty < 1){
+        bad = txt(items[i].product) + ': count whole units (1, 2, 3) — “' + raw + '” is not a whole unit.';
+      } else {
+        rows.push({ product: txt(items[i].product), qty });
+      }
+    }
+    if (!bad && !rows.length) bad = 'Tap + on what arrived — at least one product.';
+  }
   if (bad){
     if (err){ err.textContent = bad; err.hidden = false; }
     return;
   }
-  const payload = { date: arrival.date || todayStr(), product, qty, entryId: uuid() };
-  applyLocalStockDelivery(payload);
-  enqueue('saveStockDelivery', payload);
+  const date = arrival.date || todayStr();
+  const said = [];
+  for (const r of rows){
+    const payload = { date, product: r.product, qty: r.qty, entryId: uuid() };
+    applyLocalStockDelivery(payload);
+    enqueue('saveStockDelivery', payload);
+    said.push(qtyWithUnit(r.qty, stockUnitOf(r.product)) + ' of ' + r.product);
+  }
   persistState();
   arriving = false;
-  arrival = { product:'', qty:'', date: todayStr() };
+  arrival = { qtys: [], date: todayStr() };
   renderIbapa();
-  toast(product + ': ' + qtyWithUnit(qty, stockUnitOf(product)) +
-    ' added to your stock. Paying for it goes under Expenses as usual, whenever you pay.');
+  toast('Added to your stock: ' + said.join(', ') +
+    '. Paying for it goes under Expenses as usual, whenever you pay.');
   drainQueue();
 }
 
@@ -5904,13 +5927,14 @@ document.addEventListener('click', (ev) => {
   else if (act === 'count-save') saveStockCountNow(el.dataset.product);
   else if (act === 'arrive-open'){
     arriving = true;
-    arrival = { product:'', qty:'', date: todayStr() };
+    arrival = { qtys: activeStockItems().map(() => ''), date: todayStr() };
     renderIbapa();
-    const f = $('arrProduct');
-    if (f) f.focus();
   }
   else if (act === 'arrive-cancel'){ arriving = false; renderIbapa(); }
-  else if (act === 'arrive-step') arriveStep(Number(el.dataset.dir));
+  else if (act === 'arrive-step'){
+    const st = el.closest('[data-arrstep]');
+    if (st) arriveStep(st.dataset.arrstep, Number(el.dataset.dir));
+  }
   else if (act === 'arrive-save') saveArrival();
 
   // Maintenance
@@ -5984,7 +6008,7 @@ document.addEventListener('input', (ev) => {
   }
 
   // More: the "Stock came in" fields (the quantity types like any stepper's box)
-  else if (id === 'arrQty'){ arrival.qty = ev.target.value; }
+  else if (id.startsWith('in-arr-')){ arrival.qtys[num(id.slice(7))] = ev.target.value; }
 
   // Cutoff fields. The split's residual follows the field as it is typed; only
   // the four figures it moves are rewritten, so the keyboard stays put.
@@ -6011,7 +6035,6 @@ document.addEventListener('change', (ev) => {
   if (ds.mactive != null){ if (maintPrices[ds.mactive]) maintPrices[ds.mactive].active = ev.target.checked; return; }
   if (ds.mcutoff != null){ if (maintPrices[ds.mcutoff]) maintPrices[ds.mcutoff].inCutoff = ev.target.checked; return; }
   if (ds.mstockactive != null){ if (maintStock[ds.mstockactive]) maintStock[ds.mstockactive].active = ev.target.checked; return; }
-  if (id === 'arrProduct'){ arrival.product = ev.target.value; renderIbapa(); return; }
   if (id === 'arrDate'){
     // The same clamps every event date gets: kept as typed, judged live in the
     // server's own words, and never committed while it is wrong (saveArrival

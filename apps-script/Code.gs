@@ -233,7 +233,7 @@
  *     hand-set value — an explicit 0 included — is never overwritten.
  */
 
-var VERSION = '2.7.1';
+var VERSION = '2.7.2';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------

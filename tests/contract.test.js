@@ -738,6 +738,21 @@ test('a delivery is quantity only; a legacy expense-attached row keeps counting 
     [['Takoyaki Flour', 4]], 'the delivery must survive the seam into the phone mirror');
 });
 
+test('"Stock came in" lists every product with a stepper — nothing to choose (v2.7.2, source pins)', () => {
+  // The form is DOM-bound, so its shape is pinned at source. The owner:
+  // "dont let me choose, just present all the stocks with + button".
+  const slab2 = slab('function stockOnHandHTML(){', 'function stockExplain(s){');
+  assert.ok(/items\.forEach\(\(s, i\) =>/.test(slab2), 'one row per active product, by index');
+  assert.ok(/data-arrstep="' \+ i \+ '"/.test(slab2), 'steppers addressed by row index, never by name');
+  assert.ok(!/arrProduct/.test(slab2), 'the product dropdown is gone');
+  const save = slab('function saveArrival(){', 'let maintOpen = false;');
+  assert.ok(/const payload = { date, product: r\.product, qty: r\.qty, entryId: uuid\(\) };/.test(save),
+    'each product is its OWN saveStockDelivery with its OWN entryId — one shared id would make ' +
+    'the local upsert keep only the last product of a multi-product delivery');
+  assert.ok(/if \(!bad && !rows\.length\) bad = /.test(save), 'an all-zero save is refused, not silently empty');
+  assert.ok(/count whole units \(1, 2, 3\)/.test(save), 'fractions refused naming the product, in the usual words');
+});
+
 test('the delivery mirror survives an app restart (state_v1 round trip) (v2.6.0)', () => {
   // Closing and reopening the app rebuilds the whole mirror through
   // sanitizeState. A collection dropped there under-reads on-hand on every
