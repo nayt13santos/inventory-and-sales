@@ -762,8 +762,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.7.0', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.7.0');
+  assert.strictEqual(g.data.version, '2.7.1', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.7.1');
 });
 
 // ---------------------------------------------------------------------------
@@ -4228,8 +4228,10 @@ test('lidBoxes is stored and shipped, and moves no money anywhere', () => {
 });
 
 test('supply_picklist: seeded, added on migration, whitelisted, and an edit survives setupSheet', () => {
-  const SEEDED = 'Takoyaki Flour, Takoyaki Sauce, Japanese Mayo, Bonito, Aonori, Togarashi';
-  // A fresh sheet seeds it from the six stock-item names, and bootstrap ships it.
+  // PIN MOVED (v2.7.1, deliberate): the seed is the owner's purchase-money
+  // buckets now, not the stock list — quantities enter under Stock on hand.
+  const SEEDED = 'Veggies, Eggs, Flour, Box';
+  // A fresh sheet seeds the owner's buckets, and bootstrap ships them.
   const { ctx, token } = freshSetup();
   let boot = post(ctx, { token, action: 'bootstrap', payload: {} });
   assert.strictEqual(boot.data.settings.supply_picklist, SEEDED);

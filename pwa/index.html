@@ -541,7 +541,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.7.0';
+const APP_VERSION = '2.7.1';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -591,10 +591,12 @@ function freshState(){
     settings:{ branch:'Tañong', mama_per_cutoff:500, electric_per_cutoff:500,
       partners:'Nayt, Partner', staff:'Mama',
       daily_salary:DEFAULT_DAILY_SALARY, split_default:DEFAULT_SPLIT,
-      // The expense form's one-tap picklist (v2.7.0), seeded with the SAME six
-      // names seedSettings writes into the sheet — so demo mode (and a sheet not
-      // migrated yet) offers the chips from day one, exactly like the stock list.
-      supply_picklist: SEED_STOCK_ITEMS.map(p => p[0]).join(', ') },
+      // The expense form's one-tap buckets between Octopus and Other (v2.7.1,
+      // the owner's list), seeded with the SAME value seedSettings writes into
+      // the sheet — so demo mode (and a sheet not migrated yet) offers the
+      // chips from day one. Money buckets, not the stock list: quantities
+      // enter under Stock on hand, this is what the peso was for.
+      supply_picklist: 'Veggies, Eggs, Flour, Box' },
     // EXACTLY the skus setupSheet() seeds into the Prices tab, and nothing else.
     // A seeded sku the sheet does not have is not harmless: Maintenance sends
     // every sku in this list, and the server refuses a price row it has no group
@@ -4569,16 +4571,18 @@ function afterCountChange(sku){
 /* ============================================================
    EXPENSES (gastos panel) — expenses for the current cutoff
    ============================================================ */
-const GX_CATS = EXPENSE_CATS;   // same six stored values, one source of truth
 // An expense is MONEY ONLY (v2.6.0). The old optional "What arrived?" fields
 // are gone: goods arriving are their own event — "Stock came in" under More →
 // Stock on hand — because suppliers deliver on credit and the flour is not
 // paid yet. Legacy rows that carry a quantity still display it in the list.
-// `pick` is the supplies-picklist choice (v2.7.0): a picked item name, or ''
-// while nothing is chosen yet. `other` is the "Something else" path — the
-// free-text box and the category chips, exactly the form as it always was.
-// The two are mutually exclusive; with an empty picklist only `other` exists.
-let gx = { open:false, category:'Supplies', item:'', amount:'', date:todayStr(), backlogRef:'', pick:'', other:false };
+// `pick` is the one choice this form takes (v2.7.1, owner: "just retain the
+// category"): 'Octopus' or 'Other' (the two category buckets entered here),
+// or a picklist name (files as Supplies with that name as the item), or ''
+// while nothing is chosen. The free-text "what did you buy" is GONE —
+// quantities already enter under Stock on hand, so an expense needs only its
+// bucket, amount and date. Mama, Electric and backlog payments keep their own
+// doors on the Cutoff screen; the server still accepts every category.
+let gx = { open:false, pick:'', amount:'', date:todayStr() };
 // The last expense that was dated OUTSIDE the cutoff being listed. It saved
 // correctly but it cannot appear in this list, so it is named here instead of
 // seeming to vanish. { label, item, amount, date }
@@ -4614,48 +4618,26 @@ function renderGastos(){
   if (!gx.open){
     h += '<button type="button" class="btn block" data-act="gastos-open">+ Add an expense</button>';
   } else {
-    // The supplies picklist comes FIRST (v2.7.0): most expenses are the same
-    // few supplies, so they are one tap — and a picked item is obviously
-    // category Supplies, so the category chips stay out of the way. "Something
-    // else" is the form exactly as it always was: free text and the chips. The
-    // category CONCEPT is untouched — every note line is still driven by it.
-    const plist = supplyPicklist();
-    const showCats = !plist.length || gx.other;
+    // ONE row of buckets (v2.7.1, owner: "just retain the category — octopus,
+    // veggies, eggs, flour, box, other"). Octopus and Other are the two
+    // category buckets entered on this screen; between them sit the usual
+    // supplies from the Maintenance-editable picklist, each filing as
+    // Supplies with its name as the item. No free text and no category chips:
+    // the bucket IS the whole choice. A picklist name that collides with a
+    // bucket name is not offered — the tap must map to exactly one thing.
+    const plist = supplyPicklist().filter(n => n !== 'Octopus' && n !== 'Other');
     h += '<div class="card">';
-    if (plist.length){
-      h += '<div class="field"><label>What did you buy or pay?</label><div class="chips" role="group" aria-label="Supplies picklist">';
-      for (const it of plist){
-        // A picklist name is sheet data — escaped exactly once, everywhere it
-        // lands in the markup (the attribute and the text).
-        h += '<button type="button" class="chip" data-act="gastos-pick" data-pick="' + esc(it) + '" aria-pressed="' + String(gx.pick === it) + '">' + esc(it) + '</button>';
-      }
-      h += '<button type="button" class="chip" data-act="gastos-other" aria-pressed="' + String(!!gx.other) + '">Something else…</button>';
-      h += '</div>' +
-        (gx.pick ? '<p class="hint" style="margin-top:8px;">Filed under Supplies.</p>' : '') +
-        '<p class="err" id="err-gx-pick" hidden></p></div>';
+    h += '<div class="field"><label>What is this money for?</label><div class="chips" role="group" aria-label="Expense bucket">';
+    for (const b of ['Octopus', ...plist, 'Other']){
+      // A picklist name is sheet data — escaped exactly once, everywhere it
+      // lands in the markup (the attribute and the text).
+      h += '<button type="button" class="chip" data-act="gastos-pick" data-pick="' + esc(b) + '" aria-pressed="' + String(gx.pick === b) + '">' + esc(b) + '</button>';
     }
-    if (showCats){
-      h += '<div class="field"><label>Category</label><div class="chips" role="group" aria-label="Expense category">';
-      for (const cat of GX_CATS){
-        h += '<button type="button" class="chip" data-act="gastos-cat" data-cat="' + cat + '" aria-pressed="' + String(gx.category === cat) + '">' + cat + '</button>';
-      }
-      h += '</div></div>';
-      if (gx.category === 'Backlog'){
-        const active = asArr(state.backlogs).filter(b => isObj(b) && truthy(b.active));
-        h += '<div class="field"><label for="gxBacklog">Which backlog?</label><select class="input" id="gxBacklog">';
-        if (!active.length) h += '<option value="">No active backlog</option>';
-        else {
-          h += '<option value=""' + (gx.backlogRef === '' ? ' selected' : '') + '>Choose…</option>';
-          for (const b of active){
-            h += '<option value="' + esc(b.name) + '"' + (gx.backlogRef === b.name ? ' selected' : '') + '>' +
-              esc(b.name) + ' — balance ' + peso(backlogBalance(b)) + '</option>';
-          }
-        }
-        h += '</select><p class="err" id="err-gx-backlog" hidden></p></div>';
-      }
-      h += '<div class="field"><label for="gxItem">What did you buy or pay?</label>' +
-        '<input class="input" id="gxItem" autocomplete="off" placeholder="e.g. flour, eggs, gas" value="' + esc(gx.item) + '"></div>';
-    }
+    h += '</div>' +
+      (gx.pick && gx.pick !== 'Octopus' && gx.pick !== 'Other'
+        ? '<p class="hint" style="margin-top:8px;">Filed under Supplies.</p>' : '') +
+      '<p class="hint" style="margin-top:8px;">Edit this list under More → Maintenance.</p>' +
+      '<p class="err" id="err-gx-pick" hidden></p></div>';
     h += '<div class="field"><label for="gxAmount">How much? (₱)</label>' +
       '<input class="input money" id="gxAmount" inputmode="decimal" autocomplete="off" placeholder="0" value="' + esc(gx.amount) + '">' +
       '<p class="err" id="err-gx-amount" hidden></p></div>';
@@ -4708,18 +4690,15 @@ function renderGastos(){
 
 function submitGasto(){
   let ok = true;
-  // With a picklist on offer, something must be chosen — a picked supply, or
-  // "Something else" for the free-text path. Without one the form is exactly
-  // what it always was and nothing here fires.
-  const hasPicklist = supplyPicklist().length > 0;
+  // The bucket is the whole choice — nothing saves without one.
   const pickEl = $('err-gx-pick');
-  if (hasPicklist && !gx.pick && !gx.other){
-    if (pickEl){ pickEl.textContent = 'Choose what you bought or paid, or tap “Something else”.'; pickEl.hidden = false; }
+  if (!gx.pick){
+    if (pickEl){ pickEl.textContent = 'Choose what this money was for.'; pickEl.hidden = false; }
     ok = false;
   } else if (pickEl) pickEl.hidden = true;
-  // A picked supply is category Supplies by definition; only the free-text
-  // path carries the chosen category (and a backlog needs its name).
-  const picked = hasPicklist && !!gx.pick;
+  // 'Octopus'/'Other' are category buckets with no item; any other pick is a
+  // supply, filed as Supplies with the picked name as the item (v2.7.1).
+  const isBucket = gx.pick === 'Octopus' || gx.pick === 'Other';
   // The DATE, in the server's own words: a half-edited year (a future day, or
   // "0002-…") files real money where nobody looks, so it is refused here the
   // same way the change handler refuses it — never only one of the two.
@@ -4734,21 +4713,15 @@ function submitGasto(){
     if (amtEl){ amtEl.textContent = 'Enter the amount.'; amtEl.hidden = false; }
     ok = false;
   } else if (amtEl) amtEl.hidden = true;
-  if (!picked && gx.category === 'Backlog' && !gx.backlogRef){
-    const be = $('err-gx-backlog');
-    if (be){ be.textContent = 'Choose which backlog you paid.'; be.hidden = false; }
-    ok = false;
-  }
   if (!ok) return;
   // MONEY ONLY (v2.6.0): no stockProduct/stockQty on this payload, ever — the
   // server refuses an expense that names stock, pointing at "Stock came in".
-  // A picked supply files as Supplies with the picked name as the item (v2.7.0).
   const payload = {
     date: gx.date || todayStr(),
-    category: picked ? 'Supplies' : gx.category,
-    item: picked ? gx.pick : gx.item.trim(),
+    category: isBucket ? gx.pick : 'Supplies',
+    item: isBucket ? '' : gx.pick,
     amount: num(gx.amount),
-    backlogRef: (!picked && gx.category === 'Backlog') ? gx.backlogRef : '',
+    backlogRef: '',
     notes: '',
     entryId: uuid()
   };
@@ -4764,10 +4737,9 @@ function submitGasto(){
   gxElsewhere = elsewhere
     ? { label: periodLabel(itsPeriod), item: payload.item || payload.category, amount: payload.amount, date: payload.date }
     : null;
-  // `pick` clears so the next tap is a fresh choice; `other` (like the chosen
-  // category) is a mode and is remembered, so a run of free-text entries stays
-  // on the free-text form.
-  gx = { open:true, category:gx.category, item:'', amount:'', date:gx.date, backlogRef:'', pick:'', other:gx.other };
+  // `pick` clears so the next tap is a fresh choice; the date is remembered so
+  // a run of same-day entries types it once.
+  gx = { open:true, pick:'', amount:'', date:gx.date };
   renderGastos();
   toast(elsewhere ? 'Saved to ' + periodLabel(itsPeriod) + '.' : 'Expense added.');
   drainQueue();
@@ -5892,20 +5864,14 @@ document.addEventListener('click', (ev) => {
   else if (act === 'goto-stock') showTab('ibapa');
 
   // Expenses
-  else if (act === 'gastos-open'){ gx.open = true; gx.date = todayStr(); renderGastos(); const f = $('gxItem'); if (f) f.focus(); }
+  else if (act === 'gastos-open'){ gx.open = true; gx.date = todayStr(); renderGastos(); }
   else if (act === 'gastos-cancel'){ gx.open = false; gxElsewhere = null; renderGastos(); }
-  else if (act === 'gastos-cat'){ gx.category = el.dataset.cat; renderGastos(); }
-  // A picked supply IS the item and IS category Supplies — one tap, nothing
-  // else to choose. "Something else" is the whole form as it always was.
+  // The bucket IS the whole choice (v2.7.1): Octopus/Other file as those
+  // categories, a picklist name files as Supplies with that name as the item.
   else if (act === 'gastos-pick'){
-    gx.pick = txt(el.dataset.pick); gx.other = false;
+    gx.pick = txt(el.dataset.pick);
     renderGastos();
     const f = $('gxAmount'); if (f) f.focus();
-  }
-  else if (act === 'gastos-other'){
-    gx.other = true; gx.pick = '';
-    renderGastos();
-    const f = $('gxItem'); if (f) f.focus();
   }
   else if (act === 'gastos-submit') submitGasto();
   else if (act === 'gastos-del') deleteGasto(el.dataset.id);
@@ -6009,7 +5975,6 @@ document.addEventListener('input', (ev) => {
   }
 
   // Expenses fields
-  else if (id === 'gxItem') gx.item = ev.target.value;
   else if (id === 'gxAmount') gx.amount = ev.target.value;
   else if (id === 'gxDate'){
     // Kept as typed, judged live — a half-edited year ("0002-…") shows the
@@ -6017,7 +5982,6 @@ document.addEventListener('input', (ev) => {
     gx.date = ev.target.value || todayStr();
     setErr('err-gx-date', ev.target.value ? entryDateError(ev.target.value) : '');
   }
-  else if (id === 'gxBacklog') gx.backlogRef = ev.target.value;
 
   // More: the "Stock came in" fields (the quantity types like any stepper's box)
   else if (id === 'arrQty'){ arrival.qty = ev.target.value; }
@@ -6057,7 +6021,6 @@ document.addEventListener('change', (ev) => {
     return;
   }
   if (id === 'payBlRef'){ payBl.ref = ev.target.value; return; }
-  if (id === 'gxBacklog'){ gx.backlogRef = ev.target.value; return; }
   if (id === 'bentaDate'){
     const v = ev.target.value;
     // The form NEVER moves onto a date the server would refuse: a future day, a

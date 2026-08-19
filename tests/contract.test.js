@@ -4336,19 +4336,24 @@ test('"Sold with cash" is display only, and the receipt says the new lines only 
     'the recap is rebuilt by updateReceipt — one sum, one voice');
 });
 
-test('the supplies picklist crosses the seam, and picking files under Supplies', () => {
-  const SIX = ['Takoyaki Flour', 'Takoyaki Sauce', 'Japanese Mayo', 'Bonito', 'Aonori', 'Togarashi'];
+test('the expense buckets cross the seam, and each tap files exactly one way (v2.7.1)', () => {
+  // The owner's list: the form is ONE row — Octopus, the picklist, Other —
+  // with no free text and no category chips. PIN MOVED (v2.7.1, deliberate):
+  // the v2.7.0 "Something else"/showCats pins are gone WITH the paths they
+  // pinned; the mapping they protected (a picked name files as Supplies with
+  // that name as the item) is pinned below in its new form.
+  const BUCKETS = ['Veggies', 'Eggs', 'Flour', 'Box'];
   // Demo mode (no bootstrap ever): the chips are there from day one.
   const demo = loadClient();
-  assert.deepStrictEqual(demo.supplyPicklist(), SIX);
+  assert.deepStrictEqual(demo.supplyPicklist(), BUCKETS);
   // The seeded sheet value survives the seam.
   const app = syncedClient(F.boot);
-  assert.deepStrictEqual(app.supplyPicklist(), SIX);
+  assert.deepStrictEqual(app.supplyPicklist(), BUCKETS);
   // An owner-edited list is split like `staff`: trimmed, empties dropped.
   const edited = syncedClient(Object.assign({}, F.boot,
     { settings: Object.assign({}, F.boot.settings, { supply_picklist: ' Flour , Eggs ,, ' }) }));
   assert.deepStrictEqual(edited.supplyPicklist(), ['Flour', 'Eggs']);
-  // Empty means the plain form — the old screen, untouched.
+  // Empty leaves just the two category buckets — the row never disappears.
   const none = syncedClient(Object.assign({}, F.boot,
     { settings: Object.assign({}, F.boot.settings, { supply_picklist: '' }) }));
   assert.deepStrictEqual(none.supplyPicklist(), []);
@@ -4357,18 +4362,23 @@ test('the supplies picklist crosses the seam, and picking files under Supplies',
     'Flour, Eggs');
   assert.ok(!has(app.maintSettingsPayload({ supply_picklist: '  ' }), 'supply_picklist'));
 
-  // The expense form is render code, so the category rule is pinned at source:
-  // chips hidden while the picklist is offered and "Something else" not chosen,
-  // and a picked supply files as category Supplies with the picked name.
+  // The expense form is render code, so the mapping is pinned at source.
   const gastos = slab('function renderGastos(){', 'function submitGasto(){');
-  assert.ok(/supplyPicklist\(\)/.test(gastos), 'the form offers the picklist first');
-  assert.ok(/const showCats = !plist\.length \|\| gx\.other/.test(gastos),
-    'the category chips show only without a picklist, or on the free-text path');
-  assert.ok(/Something else/.test(gastos), 'free text must stay possible');
+  assert.ok(/\['Octopus', \.\.\.plist, 'Other'\]/.test(gastos),
+    'the row is Octopus, the picklist, Other — in that order, always');
+  assert.ok(/supplyPicklist\(\)\.filter\(n => n !== 'Octopus' && n !== 'Other'\)/.test(gastos),
+    'a picklist name colliding with a bucket is not offered — one tap, one meaning');
+  assert.ok(!/Something else/.test(gastos), 'the free-text path is gone from this form');
+  assert.ok(!/gastos-cat/.test(gastos), 'and so are the category chips');
   const submit = slab('function submitGasto(){', 'function deleteGasto(id){');
-  assert.ok(/picked \? 'Supplies' : gx\.category/.test(submit),
+  assert.ok(/const isBucket = gx\.pick === 'Octopus' \|\| gx\.pick === 'Other'/.test(submit),
+    'Octopus and Other are the two category buckets on this screen');
+  assert.ok(/category: isBucket \? gx\.pick : 'Supplies'/.test(submit),
     'a picked supply IS category Supplies — the note line depends on it');
-  assert.ok(/picked \? gx\.pick : gx\.item/.test(submit), 'and the picked name is the item');
+  assert.ok(/item: isBucket \? '' : gx\.pick/.test(submit),
+    'the picked name is the item; the buckets carry none');
+  assert.ok(/backlogRef: ''/.test(submit),
+    'backlog payments live on the Cutoff screen, never here');
 });
 
 atest('a queued pre-2.7.0 saveDay drains and lands byte-identical to the explicit defaults', async () => {

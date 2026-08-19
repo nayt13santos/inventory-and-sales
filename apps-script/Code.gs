@@ -233,7 +233,7 @@
  *     hand-set value — an explicit 0 included — is never overwritten.
  */
 
-var VERSION = '2.7.0';
+var VERSION = '2.7.1';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -3152,7 +3152,10 @@ function seedSettings(ss) {
     // v2.7.0: the expense form's item picklist, seeded from the six stock item
     // names. Comma-separated, edited under Maintenance; free text stays
     // possible on the form — the picklist only saves typing.
-    ['supply_picklist', 'Takoyaki Flour, Takoyaki Sauce, Japanese Mayo, Bonito, Aonori, Togarashi']
+    // The expense form's buckets between Octopus and Other (v2.7.1, the
+    // owner's list). Purchase MONEY buckets, not the stock list — quantities
+    // enter under Stock on hand, this is what the peso was for.
+    ['supply_picklist', 'Veggies, Eggs, Flour, Box']
   ];
   defaults.forEach(function (d) {
     if (!have[d[0]]) toAppend.push({ key: d[0], value: d[1] });
