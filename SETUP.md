@@ -45,7 +45,7 @@ Open the Google Sheet and edit these tabs directly — the app picks up changes 
 - **Settings** — `mama_per_cutoff` (₱500), `electric_per_cutoff` (₱500), `daily_salary` (₱200 — added to every day that is not marked closed), `split_default` (₱3,000, i.e. ₱1,500 each), `branch` (Tañong), and `staff` (comma-separated names if more than Mama minds the stall). **You can now edit all of these from the phone** under **More → Maintenance**, along with prices and the stock list — the sheet is no longer the only way in.
 - **StockItems** — the things you open, counted whole: Takoyaki Flour (pack), Takoyaki Sauce (gallon), Japanese Mayo (pack), Bonito (pack), Aonori (pack), Togarashi (pack). All start at 0 on hand. Three arrive with their reorder points already set — **Flour at 5, Sauce at 1, Mayo at 1** (your figures) — so the quiet **Low** line can appear from day one; the rest have none (blank `reorder_at` = no warning, and any value you set yourself is never overwritten). After your first stocktake, use **More → Stock on hand → Correct the count** rather than typing figures in here.
 
-> **After updating the script, run `setupSheet` once more.** This release adds columns (`gcash_converted` and `lid_boxes` on DailyLog, `custom_qty` on DailyCounts), a `supply_picklist` setting (the expense screen's picklist — edit it under More → Maintenance), and fills in the reorder points you chose (Flour 5, Sauce 1, Mayo 1 — only where the cell is blank; anything you set yourself stays). It's a safe migration: it only ever *appends* new columns at the right and creates missing tabs — it never moves, renames or deletes anything you already have, and your token and prices are preserved. The old `SupplyItems`/`DailySupplies` tabs are left exactly as they are and simply stop being used.
+> **After updating the script, run `setupSheet` once more.** Re-running it adds whatever your sheet is still missing — as of v2.7.x that means columns (`gcash_converted` and `lid_boxes` on DailyLog, `custom_qty` on DailyCounts), a `supply_picklist` setting (the expense screen's picklist — edit it under More → Maintenance), and fills in the reorder points you chose (Flour 5, Sauce 1, Mayo 1 — only where the cell is blank; anything you set yourself stays). It's a safe migration: it only ever *appends* new columns at the right and creates missing tabs — it never moves, renames or deletes anything you already have, and your token and prices are preserved. The old `SupplyItems`/`DailySupplies` tabs are left exactly as they are and simply stop being used.
 
 ## Daily / cutoff flow after setup
 
@@ -144,7 +144,7 @@ Upload the six files from `pwa/` (`index.html`, `sw.js`, `manifest.webmanifest`,
 
 ### 3. Get the update onto the phones
 
-Each phone caches the app so it works offline, so a new version lands on the **second** open, not the first: open the app once (it quietly downloads the update), close it fully — swipe it out of the app switcher, don't just go to the home screen — then open it again.
+Each phone caches the app so it works offline. On an open with signal, the app quietly downloads the update and **reloads itself** so the new version lands on that same open (it politely waits if a day is half-typed). If **More → About** still shows the old version, close it fully — swipe it out of the app switcher — and open it once more.
 
 Check **More → About** shows the new version. If it still shows the old one, close it fully and reopen once more.
 

@@ -747,10 +747,15 @@ test('"Stock came in" lists every product with a stepper — nothing to choose (
   // The form is DOM-bound, so its shape is pinned at source. The owner:
   // "dont let me choose, just present all the stocks with + button".
   const slab2 = slab('function stockOnHandHTML(){', 'function stockExplain(s){');
-  assert.ok(/items\.forEach\(\(s, i\) =>/.test(slab2), 'one row per active product, by index');
-  assert.ok(/data-arrstep="' \+ i \+ '"/.test(slab2), 'steppers addressed by row index, never by name');
+  // PIN MOVED (v2.7.4, deliberate): the rows are a SNAPSHOT carrying product
+  // names now — the gate's STOCKIN-1 proved live-list index resolution could
+  // book a quantity typed on one product against another.
+  assert.ok(/asArr\(arrival\.rows\)\.forEach\(\(s, i\) =>/.test(slab2), 'one row per snapshotted product');
+  assert.ok(/data-arrstep="' \+ i \+ '"/.test(slab2), 'steppers addressed by row index within the snapshot');
   assert.ok(!/arrProduct/.test(slab2), 'the product dropdown is gone');
   const save = slab('function saveArrival(){', 'let maintOpen = false;');
+  assert.ok(/for \(const s of asArr\(arrival\.rows\)\)/.test(save),
+    'the save iterates the SNAPSHOT rows, never the live list');
   assert.ok(/const payload = { date, product: r\.product, qty: r\.qty, entryId: uuid\(\) };/.test(save),
     'each product is its OWN saveStockDelivery with its OWN entryId — one shared id would make ' +
     'the local upsert keep only the last product of a multi-product delivery');
@@ -3182,6 +3187,10 @@ const S_DOBOOT   = slab('async function doBootstrap(){', 'function applyBootstra
 const S_PERSISTA = slab('function persistAttention(){', 'function persistDrafts(){');
 const S_ATTNCOPY = slab('function attnCopy(a){', 'function attentionCardHTML(){');
 const S_CUTHELP  = slab('function cutoffMissingDays(per){', 'function renderCutoff(){');
+// v2.7.4: the "Stock came in" form's state and save path — rows snapshot their
+// product NAME at open, so a list change mid-form can never move typed work.
+const S_ARRSTATE = slab("let countingProduct = '';", 'function stockOnHandHTML(){');
+const S_ARRFNS   = slab('function arriveStep(i, dir){', 'let maintOpen = false;');
 
 /** A client whose sync engine is REAL: enqueue, drainQueue, doBootstrap, api —
  *  with the wire (fetch), storage success and every toast/render under the
@@ -3213,6 +3222,8 @@ ${S_VALIDATE}
 ${S_ATTNCOPY}
 ${S_CUTHELP}
 ${S_PERSISTA}
+${S_ARRSTATE}
+${S_ARRFNS}
 let state = freshState();
 let queue = [];
 let config = freshConfig();
@@ -3230,6 +3241,7 @@ function persistDrafts(){}
 function updateStatus(){}
 function renderIbapa(){}
 function applyUpdateIfSafe(){}
+const $ = () => null;   // no DOM here: error surfaces are asserted via state, not markup
 function renderPanel(t){ hooks.panels.push(String(t)); }
 function toast(m){ hooks.toasts.push(String(m)); }
 function fetch(url, opts){ return hooks.fetch(url, opts); }
@@ -3254,6 +3266,9 @@ return {
   // flag, the blank-omitting settings payload and the phone's note refusal.
   backlogBalance, cutoffOnDay, stockStatusOf, stockStatusList,
   maintSettingsPayload, noteRefusal,
+  // v2.7.4: the arrival form's save path, with its rows settable by tests.
+  get arrival(){ return arrival; }, set arrival(v){ arrival = v; },
+  arriveStep, saveArrival,
   num, fmt, peso
 };`;
   // eslint-disable-next-line no-new-func
@@ -3466,6 +3481,30 @@ test('a legacy-GCash day is NOT "not in the sheet", and its card says so', () =>
   app.noteAttention('rejected', 'saveDay', dayPayload(D, 5, 'rej-x'), 'refused');
   assert.strictEqual(app.dateNotInSheet(D), true);
   assert.strictEqual(app.cutoffMissingDays({ start: D, end: D }).length, 1);
+});
+
+test('a stock-list change while "Stock came in" is open cannot move a typed quantity (v2.7.4)', () => {
+  // The gate's STOCKIN-1: quantities resolved by INDEX at save time booked 5
+  // packs typed on Flour as 5 gallons of Sauce after a Maintenance edit landed
+  // mid-form. Rows carry their product NAME from the moment the form opens.
+  const app = loadSyncClient();
+  app.arrival = { rows: [
+    { product: 'Takoyaki Flour', unit: 'pack', qty: '' },
+    { product: 'Takoyaki Sauce', unit: 'gallon', qty: '' },
+  ], date: '2026-08-19' };
+  for (let k = 0; k < 5; k++) app.arriveStep(0, 1);
+  // The list changes underneath — Flour deactivated, Sauce now index 0.
+  app.state.stockItems = [{ product: 'Takoyaki Sauce', unit: 'gallon', active: true, sort: 1 }];
+  app.saveArrival();
+  const q = app.queue.filter(x => x.action === 'saveStockDelivery');
+  assert.deepStrictEqual(q.map(x => [x.payload.product, x.payload.qty]), [['Takoyaki Flour', 5]],
+    'the 5 typed on Flour must save as Flour — never slide onto Sauce');
+  assert.deepStrictEqual((app.state.stockDeliveries['2026-08-19'] || []).map(r => [r.product, r.qty]),
+    [['Takoyaki Flour', 5]], 'and the mirror tells the same story');
+  // An all-zero form still refuses: nothing new enqueued.
+  app.arrival = { rows: [{ product: 'Bonito', unit: 'bag', qty: '' }], date: '2026-08-19' };
+  app.saveArrival();
+  assert.strictEqual(app.queue.filter(x => x.action === 'saveStockDelivery').length, 1);
 });
 
 atest('a refused DELIVERY is not a missing day: nothing blocks the note (v2.6.0)', async () => {

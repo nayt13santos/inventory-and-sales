@@ -226,9 +226,10 @@
  *   - LID BOXES: saveDay gains `lidBoxes` (whole >= 0); DailyLog appends
  *     `lid_boxes` (blank reads 0). NO price, NO sales money, NO stock tracking,
  *     NO note impact — twice offered, twice declined.
- *   - Settings gains `supply_picklist` (the expense form's item picklist),
- *     seeded from the six stock item names, whitelisted in saveSettings and
- *     editable under Maintenance like `staff`.
+ *   - Settings gains `supply_picklist` (the expense form's one-tap buckets;
+ *     since v2.7.1 it seeds the owner's purchase-money buckets "Veggies,
+ *     Eggs, Flour, Box" — not the stock list), whitelisted in saveSettings
+ *     and editable under Maintenance like `staff`.
  *   - setupSheet backfills StockItems.reorder_at ONLY where the cell is BLANK
  *     (Takoyaki Flour 5, Takoyaki Sauce 1, Japanese Mayo 1 — the owner's
  *     figures), in the salary-backfill shape: it runs on every migration, and a
@@ -350,9 +351,10 @@ var EXPENSE_CATEGORIES = ['Supplies', 'Octopus', 'Electric', 'Mama', 'Backlog', 
 var SETTABLE_SETTINGS = {
   branch: 'text',
   staff: 'text',
-  // The expense form's item picklist (v2.7.0): comma-separated item names,
-  // edited under Maintenance like `staff`. Free text — the picklist is a
-  // convenience, never a constraint on what an expense may be called.
+  // The expense form's one-tap buckets between Octopus and Other (v2.7.1):
+  // comma-separated names, edited under Maintenance like `staff`. 'text' is
+  // the VALUE type in this whitelist — on the form the buckets are the whole
+  // choice, there is no free-text item box any more.
   supply_picklist: 'text',
   daily_salary: 'money',
   split_default: 'money',
@@ -3159,9 +3161,6 @@ function seedSettings(ss) {
     // Cutoff screen pre-fills (₱1,500 each).
     ['daily_salary', DEFAULT_DAILY_SALARY],
     ['split_default', DEFAULT_SPLIT],
-    // v2.7.0: the expense form's item picklist, seeded from the six stock item
-    // names. Comma-separated, edited under Maintenance; free text stays
-    // possible on the form — the picklist only saves typing.
     // The expense form's buckets between Octopus and Other (v2.7.1, the
     // owner's list). Purchase MONEY buckets, not the stock list — quantities
     // enter under Stock on hand, this is what the peso was for.

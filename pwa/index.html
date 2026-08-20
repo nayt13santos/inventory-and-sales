@@ -5430,12 +5430,17 @@ function renderIbapa(){
 let countingProduct = '';   // the product whose count field is open
 let countDraft = '';        // what is typed in it
 let arriving = false;       // whether the "Stock came in" form is open
-// One qty per ACTIVE product, parallel to activeStockItems() at open time and
-// addressed by ROW INDEX like the Sales screen's stock card — the list is
-// constant, so the form shows every product with a stepper instead of making
-// her choose from a dropdown (owner, 2026-08-19: "dont let me choose, just
-// present all the stocks with + button").
-let arrival = { qtys: [], date: todayStr() };
+// One row per ACTIVE product, SNAPSHOTTED when the form opens — each row
+// carries its own {product, unit, qty}, exactly like the Sales screen's stock
+// card, so a stock-list change while the form is open (a Maintenance save, a
+// background sync) can never shift a typed quantity onto a different product
+// or drop it. Rows are still ADDRESSED by index (a name is sheet data), but
+// they RESOLVE by the name they carry. A row whose product was renamed or
+// deactivated mid-form saves under its stored name; if the sheet no longer
+// knows it, the server refuses in its plain sentence and the red card says so
+// — misdirected stock is silent, a refusal is not. (Owner, 2026-08-19: "dont
+// let me choose, just present all the stocks with + button".)
+let arrival = { rows: [], date: todayStr() };
 
 function stockOnHandHTML(){
   let list = [];
@@ -5457,12 +5462,12 @@ function stockOnHandHTML(){
     h += '<button type="button" class="btn block" data-act="arrive-open" style="margin:6px 0 14px;">Stock came in</button>';
   } else {
     // Every product listed with its own stepper — the list is constant, so
-    // there is nothing to choose, only counts to tap in. Rows are addressed
-    // by INDEX, never by name: a product name is sheet data (v2.7.2).
-    const items = activeStockItems();
+    // there is nothing to choose, only counts to tap in. The rows are the
+    // SNAPSHOT taken when the form opened (see `arrival`), never the live
+    // list: typed work must not move because the list did (v2.7.4).
     h += '<div style="margin:6px 0 14px;">' +
       '<p class="hint" style="margin-bottom:6px;">Tap + on what arrived — whole units only, the same way you count what you open. No money here: paying for it is a normal expense, whenever you pay.</p>';
-    items.forEach((s, i) => {
+    asArr(arrival.rows).forEach((s, i) => {
       const label = 'Units of ' + txt(s.product) + ' that arrived';
       h += '<div class="stk-row">' +
         '<div class="stk-what"><span class="stk-name">' + esc(s.product) + '</span>' +
@@ -5470,7 +5475,7 @@ function stockOnHandHTML(){
         '<div class="stepper sm" data-arrstep="' + i + '">' +
           '<button type="button" class="step-btn" data-act="arrive-step" data-dir="-1" aria-label="One less: ' + esc(label) + '">−</button>' +
           '<input class="step-val" id="in-arr-' + i + '" inputmode="numeric" autocomplete="off" ' +
-            'value="' + esc(txt(arrival.qtys[i])) + '" aria-label="' + esc(label) + '">' +
+            'value="' + esc(txt(s.qty)) + '" aria-label="' + esc(label) + '">' +
           '<button type="button" class="step-btn" data-act="arrive-step" data-dir="1" aria-label="One more: ' + esc(label) + '">+</button>' +
         '</div>' +
       '</div>';
@@ -5564,8 +5569,10 @@ function saveStockCountNow(product){
 /** One press of the arrival stepper. Clamped at 0 (the validator asks for at
  *  least 1) and always a whole number — the buttons can only ever step by one. */
 function arriveStep(i, dir){
-  const q = Math.max(0, Math.floor(num(arrival.qtys[num(i)])) + (num(dir) > 0 ? 1 : -1));
-  arrival.qtys[num(i)] = String(q);
+  const row = asArr(arrival.rows)[num(i)];
+  if (!row) return;
+  const q = Math.max(0, Math.floor(num(row.qty)) + (num(dir) > 0 ? 1 : -1));
+  row.qty = String(q);
   const f = $('in-arr-' + num(i));
   if (f) f.value = String(q);
 }
@@ -5578,20 +5585,24 @@ function arriveStep(i, dir){
  *  so a replay converges per product. On-hand rises the moment this returns. */
 function saveArrival(){
   const err = $('err-arrive');
-  const items = activeStockItems();
   const dateBad = entryDateError(arrival.date);
   let bad = '';
   const rows = [];
   if (dateBad) bad = dateBad;
   else {
-    for (let i = 0; i < items.length && !bad; i++){
-      const raw = txt(arrival.qtys[i]);
+    // Each row resolves by the NAME it has carried since the form opened —
+    // never by position in the live list, which may have changed underneath
+    // (v2.7.4: an index resolved at save time silently booked a quantity
+    // typed on one product against a different one).
+    for (const s of asArr(arrival.rows)){
+      if (bad) break;
+      const raw = txt(asObj(s).qty);
       if (raw === '' || num(raw) === 0) continue;    // untouched row: nothing arrived
       const qty = num(raw);
       if (!isWhole(qty) || qty < 1){
-        bad = txt(items[i].product) + ': count whole units (1, 2, 3) — “' + raw + '” is not a whole unit.';
+        bad = txt(s.product) + ': count whole units (1, 2, 3) — “' + raw + '” is not a whole unit.';
       } else {
-        rows.push({ product: txt(items[i].product), qty });
+        rows.push({ product: txt(s.product), unit: txt(s.unit), qty });
       }
     }
     if (!bad && !rows.length) bad = 'Tap + on what arrived — at least one product.';
@@ -5606,11 +5617,11 @@ function saveArrival(){
     const payload = { date, product: r.product, qty: r.qty, entryId: uuid() };
     applyLocalStockDelivery(payload);
     enqueue('saveStockDelivery', payload);
-    said.push(qtyWithUnit(r.qty, stockUnitOf(r.product)) + ' of ' + r.product);
+    said.push(qtyWithUnit(r.qty, r.unit) + ' of ' + r.product);
   }
   persistState();
   arriving = false;
-  arrival = { qtys: [], date: todayStr() };
+  arrival = { rows: [], date: todayStr() };
   renderIbapa();
   toast('Added to your stock: ' + said.join(', ') +
     '. Paying for it goes under Expenses as usual, whenever you pay.');
@@ -6029,7 +6040,9 @@ document.addEventListener('click', (ev) => {
   else if (act === 'count-save') saveStockCountNow(el.dataset.product);
   else if (act === 'arrive-open'){
     arriving = true;
-    arrival = { qtys: activeStockItems().map(() => ''), date: todayStr() };
+    // SNAPSHOT the list now: each row owns its product name from here on.
+    arrival = { rows: activeStockItems().map(s => ({
+      product: txt(asObj(s).product), unit: txt(asObj(s).unit), qty: '' })), date: todayStr() };
     renderIbapa();
   }
   else if (act === 'arrive-cancel'){ arriving = false; renderIbapa(); }
@@ -6110,7 +6123,7 @@ document.addEventListener('input', (ev) => {
   }
 
   // More: the "Stock came in" fields (the quantity types like any stepper's box)
-  else if (id.startsWith('in-arr-')){ arrival.qtys[num(id.slice(7))] = ev.target.value; }
+  else if (id.startsWith('in-arr-')){ const r = asArr(arrival.rows)[num(id.slice(7))]; if (r) r.qty = ev.target.value; }
 
   // Cutoff fields. The split's residual follows the field as it is typed; only
   // the four figures it moves are rewritten, so the keyboard stays put.
