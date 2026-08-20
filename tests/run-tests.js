@@ -762,8 +762,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.7.2', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.7.2');
+  assert.strictEqual(g.data.version, '2.7.3', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.7.3');
 });
 
 // ---------------------------------------------------------------------------
@@ -3993,10 +3993,25 @@ test("the cash floor: converted cash above the day's cash is refused naming both
   assert.strictEqual(r.ok, true, r.error);
   assert.strictEqual(r.data.cash, 0, 'cash may reach exactly 0, never below');
   assert.strictEqual(r.data.gcash, 400);
-  // Negative is its own plain refusal.
+  // PIN MOVED (v2.7.3, deliberate): a NEGATIVE conversion is the other
+  // direction now — GCash cashed out of the tin — with its own floor at the
+  // day's GCash, refused in the same shape of sentence.
   r = saveDay(ctx, token, Object.assign({}, base, { gcashConverted: -5, entryId: 'floor-3' }));
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.data.gcash, 85, 'GCash drops by the cash-out');
+  assert.strictEqual(r.data.cash, 315, 'and the tin gains it — Total unmoved');
+  assert.strictEqual(r.data.total, 400);
+  // Cashing out EXACTLY the day's GCash is legal: GCash ends the day at 0.
+  r = saveDay(ctx, token, Object.assign({}, base, { gcashConverted: -90, entryId: 'floor-4' }));
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.data.gcash, 0, 'GCash may reach exactly 0, never below');
+  assert.strictEqual(r.data.cash, 400);
+  // One peso past it is refused, naming both figures, before any write.
+  r = saveDay(ctx, token, Object.assign({}, base, { gcashConverted: -91, entryId: 'floor-5' }));
   assert.strictEqual(r.ok, false);
-  assert.match(r.error, /cash converted to GCash cannot be negative/);
+  assert.strictEqual(r.error,
+    "The GCash taken out as cash (91) cannot be more than the day's GCash (90).",
+    'one plain sentence naming BOTH figures, like the cash floor');
 });
 
 test('a closed day zeroes gcashConverted and lidBoxes whatever the payload says', () => {

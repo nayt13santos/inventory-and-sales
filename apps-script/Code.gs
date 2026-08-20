@@ -203,14 +203,16 @@
  * works. Every new payload key is OPTIONAL, and absent means the harmless
  * default (0 / empty) — an old phone's queued day lands with the same totals
  * and the same note it always produced:
- *   - CASH CONVERTED TO GCASH: some tin cash is swapped for a GCash transfer
- *     during the day, so the day's TOTAL is untouched and only the split moves.
- *     saveDay gains `gcashConverted` (>= 0; REFUSED, naming both figures, when
- *     it exceeds the day's computed cash — Cash can never go negative).
- *     DailyLog appends `gcash_converted` (blank legacy cells read 0). The
- *     roll-up becomes gcash = Σ per-sku gcash_amount + custom_gcash +
- *     gcash_converted and cash = total − gcash, so Total = Cash + GCash still
- *     holds by construction, never by argument.
+ *   - MONEY CONVERTED BETWEEN THE TIN AND GCASH: the day's TOTAL is untouched
+ *     and only the split moves. saveDay gains `gcashConverted` — SIGNED since
+ *     v2.7.3 (positive = tin cash swapped for a GCash transfer, negative =
+ *     GCash cashed out of the tin; the phone's direction chip carries the
+ *     sign). Each direction is REFUSED, naming both figures, when it exceeds
+ *     the day's computed figure on the side it leaves — neither Cash nor
+ *     GCash can ever go negative. DailyLog appends `gcash_converted` (blank
+ *     legacy cells read 0). The roll-up is gcash = Σ per-sku gcash_amount +
+ *     custom_gcash + gcash_converted and cash = total − gcash, so
+ *     Total = Cash + GCash still holds by construction, never by argument.
  *   - SPECIAL ORDERS DRAW THEIR BOXES FROM THE COUNTED STACK: saveDay gains
  *     `customBoxes:[{sku, qty}]` — whole units of counted box skus the order
  *     physically used. Per sku qty <= sold, and the sku must be group=box AND
@@ -233,7 +235,7 @@
  *     hand-set value — an explicit 0 included — is never overwritten.
  */
 
-var VERSION = '2.7.2';
+var VERSION = '2.7.3';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -614,13 +616,16 @@ function apiSaveDay(ss, settings, payload) {
     throw new Error('The GCash part of the custom order (' + fmtAmt(customGcash) +
       ') cannot be more than the custom order amount (' + fmtAmt(custom) + ').');
   }
-  // --- Tin cash swapped for a GCash transfer during the day (v2.7.0). It moves
-  // the SPLIT only — the day's Total is untouched — so it is validated against
-  // the day's computed cash AFTER the roll-up below, where that figure exists.
-  // Absent/blank (every payload queued before v2.7.0) means 0: nothing was
-  // converted, and the split lands exactly where it always did.
-  var gcashConverted = closed ? 0 : numOrThrow(payload.gcashConverted, 'The cash converted to GCash');
-  if (gcashConverted < 0) throw new Error('The cash converted to GCash cannot be negative.');
+  // --- Money converted between the tin and GCash during the day (v2.7.0;
+  // SIGNED since v2.7.3 — owner: "convert income cash to gcash, vice versa").
+  // POSITIVE = tin cash swapped for a GCash transfer; NEGATIVE = GCash cashed
+  // out of the tin. Either way it moves the SPLIT only — the day's Total is
+  // untouched — so both floors are validated against the day's computed
+  // figures AFTER the roll-up below, where they exist. Absent/blank (every
+  // payload queued before v2.7.0) means 0: nothing was converted, and the
+  // split lands exactly where it always did. Payloads queued by v2.7.0–v2.7.2
+  // phones are always >= 0, so the sign change breaks nothing queued.
+  var gcashConverted = closed ? 0 : numOrThrow(payload.gcashConverted, 'The converted amount');
   // --- Lid boxes used (v2.7.0). A plain count, whole units like everything
   // else that is counted: NO price, NO sales money, NO stock tracking, NO note
   // impact — it is stored, shipped back, and printed on the receipt, nothing
@@ -968,17 +973,22 @@ function apiSaveDay(ss, settings, payload) {
   var excludedLines = lines.filter(function (l) { return !l.in_cutoff; });
   var total = round2(counted.reduce(function (s, l) { return s + l.amount; }, 0) + custom);
   var gcashSales = round2(counted.reduce(function (s, l) { return s + l.gcash_amount; }, 0) + customGcash);
-  // Converted cash can only move cash that EXISTS: at most the day's computed
-  // cash before the conversion, so Cash can never go negative (v2.7.0). Refused
-  // naming both figures — a cap applied silently would save a split the tin
-  // does not show.
+  // A conversion can only move money that EXISTS on the side it leaves: at
+  // most the day's computed cash when converting cash to GCash, at most the
+  // day's computed GCash when cashing GCash out (v2.7.3) — so neither figure
+  // can ever go negative. Refused naming both figures — a cap applied
+  // silently would save a split the tin does not show.
   var cashBefore = round2(total - gcashSales);
   if (gcashConverted > cashBefore) {
     throw new Error('The cash converted to GCash (' + fmtAmt(gcashConverted) +
       ") cannot be more than the day's cash (" + fmtAmt(cashBefore) + ').');
   }
-  // gcash = per-sku GCash + the custom order's GCash + the converted cash, and
-  // cash is the remainder — Total = Cash + GCash by construction, as ever.
+  if (gcashConverted < 0 && -gcashConverted > gcashSales) {
+    throw new Error('The GCash taken out as cash (' + fmtAmt(-gcashConverted) +
+      ") cannot be more than the day's GCash (" + fmtAmt(gcashSales) + ').');
+  }
+  // gcash = per-sku GCash + the custom order's GCash + the signed conversion,
+  // and cash is the remainder — Total = Cash + GCash by construction, as ever.
   var gcash = round2(gcashSales + gcashConverted);
   var cash = round2(total - gcash);
   var excludedTotal = round2(excludedLines.reduce(function (s, l) { return s + l.amount; }, 0));

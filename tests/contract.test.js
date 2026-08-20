@@ -4396,6 +4396,47 @@ test('the expense buckets cross the seam, and each tap files exactly one way (v2
     'backlog payments live on the Cutoff screen, never here');
 });
 
+test('the conversion converts BOTH ways (v2.7.3): signed on the wire, a chip on the screen', () => {
+  const srv = loadServer();
+  const D = ymdDaysAgo(2);
+  // A night with ₱100 of GCash sales, then ₱60 of GCash cashed out of the tin.
+  const r = post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
+    date: D, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    gcashConverted: -60,
+    counts: [{ sku: 'box4', sod: 10, eod: 0, cheeseQty: 0, gcashQty: 2, gcashCheeseQty: 0 }],
+    entryId: 'conv-io-1' } });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.deepStrictEqual([r.data.total, r.data.gcash, r.data.cash], [500, 40, 460],
+    'Total unmoved; GCash 100 − 60 cashed out; the tin gains the 60');
+  // The signed value crosses the seam, and the form shows size and direction —
+  // never a minus sign.
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} });
+  const app = syncedClient(boot.data);
+  assert.strictEqual(app.state.days[D].gcash_converted, -60);
+  app.loadBentaForm(D);
+  assert.strictEqual(app.num(app.benta.gcashConverted), 60, 'the amount box holds the size, unsigned');
+  assert.strictEqual(app.benta.convDir, 'in', 'the chip holds the direction');
+  const p = app.bentaPayload();
+  assert.strictEqual(p.gcashConverted, -60, 'and the payload re-carries the sign');
+  const c = app.computeDay(p);
+  assert.deepStrictEqual([c.total, c.gcash, c.cash], [500, 40, 460], 'preview = server, to the peso');
+  // The phone refuses past the GCash floor in the server's own sentence.
+  app.benta.gcashConverted = '101';
+  const errs = app.validateBenta();
+  assert.match(String(errs.gcashConverted || ''),
+    /The GCash taken out as cash \(101\) cannot be more than the day's GCash \(100\)\./);
+  // And past the cash floor the other way, unchanged from v2.7.0.
+  app.benta.convDir = 'out';
+  app.benta.gcashConverted = '9999';
+  assert.match(String(app.validateBenta().gcashConverted || ''),
+    /cannot be more than the day's cash/);
+  // Source pins for the DOM-bound half: the two direction chips exist and the
+  // payload derives its sign from the chip, never from typed text.
+  assert.match(HTML, /data-act="conv-dir" data-dir="out"/);
+  assert.match(HTML, /data-act="conv-dir" data-dir="in"/);
+  assert.match(HTML, /\(benta\.convDir === 'in' \? -1 : 1\) \* Math\.max\(0, num\(benta\.gcashConverted\)\)/);
+});
+
 atest('a queued pre-2.7.0 saveDay drains and lands byte-identical to the explicit defaults', async () => {
   const srvA = loadServer();
   const srvB = loadServer();

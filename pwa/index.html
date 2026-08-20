@@ -541,7 +541,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.7.2';
+const APP_VERSION = '2.7.3';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -1113,8 +1113,10 @@ function sanitizeDrafts(rawv){
       date: k, closed: !!d.closed, staff: txt(d.staff),
       custom: raw1(d.custom), customGcash: raw1(d.customGcash),
       // The v2.7.0 fields. A draft written by an older build has none of them,
-      // so they read '' — which every reader treats as the harmless 0.
+      // so they read '' — which every reader treats as the harmless 0. The
+      // conversion DIRECTION (v2.7.3) only survives as one of its two values.
       gcashConverted: raw1(d.gcashConverted), lidBoxes: raw1(d.lidBoxes),
+      convDir: d.convDir === 'in' ? 'in' : 'out',
       salary: raw1(d.salary), notes: txt(d.notes),
       rows: asArr(d.rows).filter(isObj).filter(r => txt(r.sku)).map(r => ({
         sku: txt(r.sku), sod: raw1(r.sod), eod: raw1(r.eod),
@@ -1531,12 +1533,14 @@ function computeDay(p){
   // Cash = Total − GCash still holds; GCash is now derived from what was
   // actually entered instead of read off the GCash app.
   const gcashSales = r2(gsum + customGcash);
-  // Tin cash swapped for a GCash transfer (v2.7.0): it moves the SPLIT only —
-  // the Total is untouched. It can only move cash that EXISTS, so it clamps at
-  // the day's cash before the conversion, exactly the bound apiSaveDay refuses
-  // over (validateBenta shows that refusal inline; this keeps the preview true).
+  // Money converted between the tin and GCash (v2.7.0; SIGNED since v2.7.3,
+  // negative = GCash cashed out): it moves the SPLIT only — the Total is
+  // untouched. It can only move money that EXISTS on the side it leaves, so it
+  // clamps at the day's cash going one way and at the day's GCash going the
+  // other — exactly the bounds apiSaveDay refuses over (validateBenta shows
+  // those refusals inline; this keeps the preview true).
   const cashBefore = r2(total - gcashSales);
-  const gcashConverted = p.closed ? 0 : Math.min(cashBefore, Math.max(0, num(p.gcashConverted)));
+  const gcashConverted = p.closed ? 0 : Math.max(-gcashSales, Math.min(cashBefore, num(p.gcashConverted)));
   const gcash = r2(gcashSales + gcashConverted);
   // Lid boxes (v2.7.0): a plain count carried through so the receipt can print
   // it. NO price, NO money — it touches nothing else here.
@@ -2937,8 +2941,12 @@ function loadBentaForm(date){
     custom: num(day.custom_amount),
     customGcash: num(day.custom_gcash),
     // The v2.7.0 figures, loaded back like the custom order: 0 on a fresh date
-    // and on every day saved before the columns existed.
-    gcashConverted: num(day.gcash_converted),
+    // and on every day saved before the columns existed. The conversion is
+    // SIGNED in the sheet (v2.7.3: negative = GCash cashed out of the tin);
+    // the form holds its size and its direction separately, so nobody ever
+    // types or reads a minus sign.
+    gcashConverted: Math.abs(num(day.gcash_converted)),
+    convDir: num(day.gcash_converted) < 0 ? 'in' : 'out',
     lidBoxes: num(day.lid_boxes),
     // The day's WAGE. A saved day shows the figure it was saved with (so history
     // never moves when the rate changes); a new day starts at today's rate, and
@@ -3014,6 +3022,8 @@ function applyBentaDraft(dr){
   // guard for the same reason — a pre-2.7.0 draft says nothing about them.
   if (dr.salary !== '' && dr.salary != null) benta.salary = dr.salary;
   if (dr.gcashConverted !== '' && dr.gcashConverted != null) benta.gcashConverted = dr.gcashConverted;
+  // A pre-v2.7.3 draft has no direction: keep the form's (cash → GCash).
+  if (dr.convDir === 'in' || dr.convDir === 'out') benta.convDir = dr.convDir;
   if (dr.lidBoxes !== '' && dr.lidBoxes != null) benta.lidBoxes = dr.lidBoxes;
   benta.notes = txt(dr.notes);
   for (const d of asArr(dr.rows)){
@@ -3045,7 +3055,7 @@ function stashBentaDraft(){
   drafts[benta.date] = {
     date: benta.date, closed: !!benta.closed, staff: txt(benta.staff),
     custom: raw1(benta.custom), customGcash: raw1(benta.customGcash),
-    gcashConverted: raw1(benta.gcashConverted), lidBoxes: raw1(benta.lidBoxes),
+    gcashConverted: raw1(benta.gcashConverted), convDir: txt(benta.convDir), lidBoxes: raw1(benta.lidBoxes),
     salary: raw1(benta.salary), notes: txt(benta.notes),
     rows: asArr(benta.rows).map(r => ({
       sku: txt(r.sku), sod: raw1(r.sod), eod: raw1(r.eod),
@@ -3138,7 +3148,10 @@ function bentaPayload(){
     // sends 0 for both, exactly as the server forces. The conversion is NOT
     // clamped to the day's cash here: validateBenta refuses that state in the
     // server's own sentence, so an over-large figure never queues at all.
-    gcashConverted: closed ? 0 : Math.max(0, num(benta.gcashConverted)),
+    // SIGNED on the wire (v2.7.3): the direction chip carries the sign, the
+    // typed amount never does. 'in' = GCash cashed out of the tin = negative.
+    gcashConverted: closed ? 0
+      : (benta.convDir === 'in' ? -1 : 1) * Math.max(0, num(benta.gcashConverted)),
     lidBoxes: closed ? 0 : Math.max(0, num(benta.lidBoxes)),
     // Boxes the special order used, per sku (v2.7.0) — only rows that actually
     // hold one travel, exactly as only opened stock travels. Sent as the row
@@ -3874,14 +3887,22 @@ function gcashCardHTML(skus, daySnap, payRow){
     '</div>';
   }
   if (!anyRow) body += '<p class="hint" style="margin-top:10px;">No box sizes to split yet.</p>';
-  // Tin cash swapped for a GCash transfer during the day (v2.7.0): the Total is
-  // untouched, only the cash/GCash split moves. Plain English on the label —
-  // this is the field the refusal about "the day's cash" points at.
+  // Money converted between the tin and GCash during the day (v2.7.0; both
+  // directions since v2.7.3): the Total is untouched, only the cash/GCash
+  // split moves. Direction is two chips and the amount has no sign — the
+  // stored value is signed, the form never shows a minus.
+  const dirIn = benta.convDir === 'in';
   body += '<div class="buckets"><div class="field" style="margin-bottom:0;">' +
-    '<label for="gcashConverted">Cash converted to GCash (₱)</label>' +
+    '<label for="gcashConverted">Converted during the day (₱)</label>' +
+    '<div class="chips" role="group" aria-label="Direction of the conversion" style="margin-bottom:8px;">' +
+      '<button type="button" class="chip" data-act="conv-dir" data-dir="out" aria-pressed="' + String(!dirIn) + '">Cash → GCash</button>' +
+      '<button type="button" class="chip" data-act="conv-dir" data-dir="in" aria-pressed="' + String(dirIn) + '">GCash → cash</button>' +
+    '</div>' +
     '<input class="input money gcash-in" id="gcashConverted" inputmode="decimal" autocomplete="off" placeholder="0" value="' +
       esc(benta.gcashConverted || '') + '">' +
-    '<p class="hint" style="margin-top:6px;">Tin cash you moved into GCash during the day. ' +
+    '<p class="hint" style="margin-top:6px;">' + (dirIn
+      ? 'GCash you paid out of the tin as cash during the day. '
+      : 'Tin cash you moved into GCash during the day. ') +
       'The day’s total does not change — only the cash and GCash split.</p>' +
     '<p class="err" id="err-gcashConverted" hidden></p>' +
   '</div></div>';
@@ -3932,8 +3953,11 @@ function cashRecapHTML(c){
   if (customCash > 0){
     rows += '<div class="co-row"><span>Custom order paid in cash</span><span class="v">' + peso(customCash) + '</span></div>';
   }
-  if (num(asObj(c).gcashConverted) > 0){
-    rows += '<div class="co-row"><span>Converted to GCash</span><span class="v">−' + peso(asObj(c).gcashConverted) + '</span></div>';
+  const cv = num(asObj(c).gcashConverted);
+  if (cv > 0){
+    rows += '<div class="co-row"><span>Converted to GCash</span><span class="v">−' + peso(cv) + '</span></div>';
+  } else if (cv < 0){
+    rows += '<div class="co-row"><span>GCash taken out as cash</span><span class="v">+' + peso(-cv) + '</span></div>';
   }
   if (!rows) rows = '<p class="hint">Enter the counts above — whatever is not GCash is cash, worked out here.</p>';
   return '<p class="hint" style="margin-bottom:8px;">Nothing to type here — cash is what is left after GCash.</p>' +
@@ -4091,6 +4115,8 @@ function updateReceipt(){
     // lid-box count, which is not money at all.
     if (c.gcashConverted > 0){
       h += '<div class="r-note">' + peso(c.gcashConverted) + ' of the cash was converted to GCash</div>';
+    } else if (c.gcashConverted < 0){
+      h += '<div class="r-note">' + peso(-c.gcashConverted) + ' of the GCash was taken out as cash</div>';
     }
     if (c.lidBoxes > 0){
       h += '<div class="r-note">Lid boxes used: ' + fmt(c.lidBoxes) + '</div>';
@@ -4337,16 +4363,21 @@ function validateBenta(){
       ') cannot be more than the custom order (' + peso(custom) + ').';
   }
 
-  // Tin cash swapped for GCash (v2.7.0), in the server's own sentences. The
-  // bound is the day's cash BEFORE the conversion — apiSaveDay checks it after
-  // the roll-up, so it is measured here the same way: the whole day recomputed
-  // with the conversion at 0, whose `cash` is exactly that figure.
+  // The conversion, in the server's own sentences. Each direction's bound is
+  // the day's figure BEFORE the conversion — apiSaveDay checks after the
+  // roll-up, so it is measured here the same way: the whole day recomputed
+  // with the conversion at 0, whose cash/gcash are exactly those figures.
   const conv = num(benta.gcashConverted);
   if (conv < 0){
-    errs.gcashConverted = 'The cash converted to GCash cannot be negative.';
+    errs.gcashConverted = 'The converted amount cannot be negative — pick the direction with the two buttons instead.';
   } else if (conv > 0){
     const base = computeDay(Object.assign(bentaPayload(), { gcashConverted: 0 }));
-    if (conv > num(base.cash)){
+    if (benta.convDir === 'in'){
+      if (conv > num(base.gcash)){
+        errs.gcashConverted = 'The GCash taken out as cash (' + fmt(conv) +
+          ") cannot be more than the day's GCash (" + fmt(base.gcash) + ').';
+      }
+    } else if (conv > num(base.cash)){
       errs.gcashConverted = 'The cash converted to GCash (' + fmt(conv) +
         ") cannot be more than the day's cash (" + fmt(base.cash) + ').';
     }
@@ -5882,6 +5913,14 @@ document.addEventListener('click', (ev) => {
   else if (act === 'stock-step'){
     const st = el.closest('[data-stkstep]');
     if (st) stockStep(st.dataset.stkstep, Number(el.dataset.dir));
+  }
+  // The conversion's direction (v2.7.3): a chip, so the amount never carries a
+  // sign. Changing it is a real edit of the day — it moves the split.
+  else if (act === 'conv-dir'){
+    benta.convDir = el.dataset.dir === 'in' ? 'in' : 'out';
+    benta.dirty = true;
+    renderBenta();
+    validateBentaLive();
   }
   else if (act === 'save-day') saveBenta();
   else if (act === 'goto-stock') showTab('ibapa');
