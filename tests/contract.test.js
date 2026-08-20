@@ -143,6 +143,9 @@ const S_MAINT     = slab('function priceRowError(pr, m){', 'function saveMaintPr
 // validateBenta + excludedRowError: every rule apiSaveDay enforces, mirrored on the
 // phone so it never queues a day the server will refuse.
 const S_VALIDATE  = slab('function isWhole(v){', "/** 'sku:box4' -> 'err-sku-box4'");
+// v2.7.4: the Cutoff screen's stock block, plus the window guard it consults.
+const S_PREVINC   = slab('function previewIncomplete(per){', 'function cutoffExpenseDate(per){');
+const S_STOCKCUT  = slab('function stockCutoffHTML(per){', 'function excludedBlockHTML(f){');
 
 function loadClient() {
   const src = `
@@ -159,6 +162,8 @@ ${S_FORM}
 ${S_CARDS}
 ${S_MAINT}
 ${S_VALIDATE}
+${S_PREVINC}
+${S_STOCKCUT}
 let state = freshState();
 let queue = [];
 let config = freshConfig();
@@ -198,7 +203,7 @@ return {
   // about a refused day, the two collapsible cards, and the price rule.
   splitFieldAmount, liveCutoff, pendingSplit, splitDefault,
   noteAttention, attentionForDate, dateNotInSheet, daySavedMessage,
-  stockRowSaid, stockCardHTML, wageCardHTML, wageIsCustom, wageSummary,
+  stockRowSaid, stockCardHTML, stockCutoffHTML, wageCardHTML, wageIsCustom, wageSummary,
   priceRowError,
   // v2.4.0: the flag whose BLANK means TRUE, the per-sku lookup the screens read,
   // and the period's excluded block (display only).
@@ -751,6 +756,34 @@ test('"Stock came in" lists every product with a stepper — nothing to choose (
     'the local upsert keep only the last product of a multi-product delivery');
   assert.ok(/if \(!bad && !rows\.length\) bad = /.test(save), 'an all-zero save is refused, not silently empty');
   assert.ok(/count whole units \(1, 2, 3\)/.test(save), 'fractions refused naming the product, in the usual words');
+});
+
+test('the Cutoff screen counts the period\'s stock for you (v2.7.4)', () => {
+  // The owner's paper "Last Cutoff supplies count", computed. Demo client:
+  // every row below is the phone's own arithmetic.
+  const app = loadClient();
+  const per = { start: '2026-07-16', end: '2026-07-31' };
+  app.applyLocalStockDelivery({ date: '2026-07-20', product: 'Takoyaki Flour', qty: 10, entryId: 'sc-d1' });
+  app.applyLocalDay({ date: '2026-07-21', closed: false, staff: 'Mama', customAmount: 0,
+    customGcash: 0, notes: '', counts: [],
+    stock: [{ product: 'Takoyaki Flour', qty: 3 }], entryId: 'sc-day' });
+  app.applyLocalStockCount({ date: '2026-07-31', product: 'Takoyaki Flour', qty: 9, entryId: 'sc-c1' });
+  // The NEXT cutoff's delivery must not leak in.
+  app.applyLocalStockDelivery({ date: '2026-08-01', product: 'Takoyaki Flour', qty: 99, entryId: 'sc-d2' });
+  const html = app.stockCutoffHTML(per);
+  assert.match(html, /Stock this cutoff/);
+  assert.match(html, /10 packs came in/);
+  assert.match(html, /3 packs opened/);
+  assert.match(html, /counted 9 packs/);
+  assert.ok(!/99/.test(html), "the next cutoff's delivery stays out");
+  assert.ok(!/Togarashi/.test(html), 'a product with no movement is left out, not zero-padded');
+  // A period this phone cannot fully see shows NOTHING, not partial sums.
+  app.cfg.apiUrl = 'https://api.example/exec';
+  app.state.window_start = '2026-07-20';
+  assert.strictEqual(app.stockCutoffHTML(per), '',
+    'a period older than the snapshot window must not dress partial sums as truth');
+  // Source pin: the Cutoff screen actually renders it.
+  assert.match(HTML, /h \+= stockCutoffHTML\(per\);/);
 });
 
 test('the delivery mirror survives an app restart (state_v1 round trip) (v2.6.0)', () => {

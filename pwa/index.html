@@ -541,7 +541,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.7.3';
+const APP_VERSION = '2.7.4';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -5023,7 +5023,70 @@ function renderCutoff(){
   // count. Nothing above depends on it and the note does not mention it.
   h += excludedBlockHTML(f);
 
+  // And the period's stock movements — the owner's paper "Last Cutoff supplies
+  // count", computed instead of counted by hand (v2.7.4). No money, no figure
+  // above depends on it.
+  h += stockCutoffHTML(per);
+
   $('panel-cutoff').innerHTML = h;
+}
+
+/** The period's stock story, per product: what came in, what was opened, and
+ *  the latest stocktake inside the period — all from rows this phone holds
+ *  (deliveries, legacy expense-attached arrivals, usage, counts). Display
+ *  only. A period this phone cannot fully see (older than window_start) shows
+ *  NOTHING rather than partial sums dressed as truth — same rule the money
+ *  preview follows. Products with no movement are left out, not zero-padded. */
+function stockCutoffHTML(per){
+  if (previewIncomplete(per)) return '';
+  const items = activeStockItems();
+  if (!items.length) return '';
+  const rows = [];
+  for (const it of items){
+    const product = txt(asObj(it).product);
+    let arrived = 0, opened = 0, counted = null;
+    const dlv = asObj(state.stockDeliveries);
+    for (const d in dlv){
+      if (!inPeriod(d, per)) continue;
+      for (const r of asArr(dlv[d])) if (txt(asObj(r).product) === product) arrived += num(asObj(r).qty);
+    }
+    const exps = asObj(state.expenses);
+    for (const id in exps){
+      const e = asObj(exps[id]);
+      if (txt(e.stock_product) === product && inPeriod(txt(e.date), per)) arrived += num(e.stock_qty);
+    }
+    const usage = asObj(state.stockUsage);
+    for (const d in usage){
+      if (!inPeriod(d, per)) continue;
+      for (const r of asArr(usage[d])) if (txt(asObj(r).product) === product) opened += num(asObj(r).qty);
+    }
+    const cnts = asObj(state.stockCounts);
+    for (const d in cnts){
+      if (!inPeriod(d, per)) continue;
+      for (const r of asArr(cnts[d])){
+        const c = asObj(r);
+        if (txt(c.product) !== product) continue;
+        if (!counted || d > counted.date ||
+            (d === counted.date && txt(c.updated_at) >= counted.updated_at)){
+          counted = { date: d, qty: num(c.counted_qty), updated_at: txt(c.updated_at) };
+        }
+      }
+    }
+    if (arrived || opened || counted) rows.push({ product, unit: txt(asObj(it).unit), arrived, opened, counted });
+  }
+  if (!rows.length) return '';
+  let h = '<div class="section-title">Stock this cutoff</div><div class="card">' +
+    '<p class="hint" style="margin-bottom:10px;">Counted from what was logged — the paper supplies count, done for you. No money in it, and it is in no figure above.</p>';
+  for (const r of rows){
+    const bits = [];
+    if (r.arrived) bits.push(qtyWithUnit(r.arrived, r.unit) + ' came in');
+    if (r.opened) bits.push(qtyWithUnit(r.opened, r.unit) + ' opened');
+    h += '<div class="co-row"><span>' + esc(r.product) +
+      (r.counted ? '<span class="hint"> · counted ' + esc(qtyWithUnit(r.counted.qty, r.unit)) +
+        ' on ' + esc(fmtShort(r.counted.date)) + '</span>' : '') + '</span>' +
+      '<span class="v">' + esc(bits.join(', ') || '—') + '</span></div>';
+  }
+  return h + '</div>';
 }
 
 /** The period's EXCLUDED money — nori, and anything else the owner keeps out of
