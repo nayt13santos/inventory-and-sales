@@ -23,8 +23,51 @@
  * ========================================================================== */
 'use strict';
 
-/** The sheet to protect: the long id from its URL, between /d/ and /edit. */
+/** The sheet to protect. Paste EITHER its id — the long string in the sheet's
+ *  URL between /d/ and /edit — or the whole URL; both work. */
 var SPREADSHEET_ID = 'PASTE_THE_SHEET_ID_HERE';
+
+var ID_PLACEHOLDER = 'PASTE_THE_SHEET_ID_HERE';
+
+/** The id the SAVED code actually holds, tolerantly read: a whole sheet URL is
+ *  accepted, and stray quotes or spaces are trimmed. Refuses in sentences that
+ *  name the three real reasons an owner sees "still the placeholder" AFTER
+ *  typing the id — because "you didn't type it" is usually not the truth:
+ *    - Run executes the SAVED file, so an unsaved edit is invisible;
+ *    - every .gs file in a project shares one scope, so a SECOND copy of this
+ *      script declaring SPREADSHEET_ID again silently wins;
+ *    - the id can land in the wrong line.
+ *  Trailing underscore = private, so it stays out of the Run dropdown. */
+function sheetIdOrThrow_() {
+  var raw = String(SPREADSHEET_ID === null || SPREADSHEET_ID === undefined ? '' : SPREADSHEET_ID)
+    .trim().replace(/^['"]+|['"]+$/g, '').trim();
+  var fromUrl = /\/d\/([A-Za-z0-9_-]{20,})/.exec(raw);
+  var id = fromUrl ? fromUrl[1] : raw;
+  if (!id || id === ID_PLACEHOLDER) {
+    throw new Error('SPREADSHEET_ID is still "' + ID_PLACEHOLDER + '" in the code that just RAN. ' +
+      'If you already typed the id, one of these three is why: (1) the file was not saved — ' +
+      'press the save icon (or Ctrl+S) first, because Run uses the saved code; (2) this project has ' +
+      'a SECOND file with the same script in it — look at the file list on the left, and delete the ' +
+      'spare, because two files both setting SPREADSHEET_ID means the other one wins; (3) the id went ' +
+      'somewhere other than the line starting "var SPREADSHEET_ID =". Run whichSheet() to see exactly ' +
+      'what the saved code holds.');
+  }
+  if (!/^[A-Za-z0-9_-]{20,}$/.test(id)) {
+    throw new Error('SPREADSHEET_ID does not look like a sheet id: "' + id + '". Paste the long ' +
+      'string from the sheet URL between /d/ and /edit — or paste the whole URL, that works too.');
+  }
+  return id;
+}
+
+/** Run this any time to SEE what the saved code is pointing at. Names the
+ *  actual file, so "right id, wrong sheet" is impossible to mistake. */
+function whichSheet() {
+  var id = sheetIdOrThrow_();
+  var said = 'SPREADSHEET_ID reads as ' + id + ' — that is the file named "' +
+    DriveApp.getFileById(id).getName() + '".';
+  Logger.log(said);
+  return said;
+}
 
 var BACKUP_FOLDER = 'Octogo Tracker Backups';
 var BACKUP_KEEP = 8;                 // ~two months of Mondays
@@ -34,9 +77,7 @@ var TZ = 'Asia/Manila';
  *  one rather than stacking a second — and makes the first copy immediately,
  *  so "did it work?" has an answer today rather than next Monday. */
 function setupBackups() {
-  if (!SPREADSHEET_ID || SPREADSHEET_ID === 'PASTE_THE_SHEET_ID_HERE') {
-    throw new Error('Put the sheet id in SPREADSHEET_ID first (the long string in the sheet URL between /d/ and /edit).');
-  }
+  var id = sheetIdOrThrow_();
   var triggers = ScriptApp.getProjectTriggers();
   for (var i = 0; i < triggers.length; i++) {
     if (triggers[i].getHandlerFunction() === 'backupSheet') ScriptApp.deleteTrigger(triggers[i]);
@@ -66,7 +107,7 @@ function backupSheet() {
   // this needs, and getFileById gives it without the project ever asking for
   // permission to read or write spreadsheet CONTENT. Narrower is safer — this
   // project can copy the file and nothing else (v2.7.5).
-  var file = DriveApp.getFileById(SPREADSHEET_ID);
+  var file = DriveApp.getFileById(sheetIdOrThrow_());
   var it = DriveApp.getFoldersByName(BACKUP_FOLDER);
   var folder = it.hasNext() ? it.next() : DriveApp.createFolder(BACKUP_FOLDER);
   var name = 'Backup ' + Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd') + ' — ' + file.getName();

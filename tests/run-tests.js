@@ -36,6 +36,10 @@ function test(name, fn) {
  *  keeping Drive and trigger permissions out of the bound script is the whole
  *  reason the file exists (v2.7.5). */
 const BACKUPS_GS = path.join(ROOT, 'apps-script', 'Backups.gs');
+// Shaped like a real Drive id (44 chars of [A-Za-z0-9_-]), because the code
+// now REFUSES anything that is not — a fixture that could not exist in Drive
+// would test the wrong thing.
+const FAKE_SHEET_ID = '1wuz_VowppbC0Wl41KbW4sho6M9r6DGDL24Wrym_RWX8';
 function loadBackups(ssOverride, opts) {
   const ss = ssOverride || new FakeSpreadsheet();
   const ctx = makeContext(ss);
@@ -43,7 +47,7 @@ function loadBackups(ssOverride, opts) {
   let src = fs.readFileSync(BACKUPS_GS, 'utf8');
   if (!(opts && opts.keepPlaceholder)) {
     src = src.replace("var SPREADSHEET_ID = 'PASTE_THE_SHEET_ID_HERE';",
-      "var SPREADSHEET_ID = 'fake-spreadsheet-id';");
+      "var SPREADSHEET_ID = '" + FAKE_SHEET_ID + "';");
   }
   vm.runInContext(src, ctx, { filename: 'Backups.gs' });
   return { ctx, ss };
@@ -4412,17 +4416,54 @@ test('the BOUND script never touches Drive or triggers — the phones\' permissi
   const backups = fs.readFileSync(BACKUPS_GS, 'utf8');
   assert.ok(/DriveApp/.test(backups) && /ScriptApp/.test(backups),
     'the standalone project is where those live');
-  assert.ok(/DriveApp\.getFileById\(SPREADSHEET_ID\)/.test(backups),
+  assert.ok(/DriveApp\.getFileById\(sheetIdOrThrow_\(\)\)/.test(backups),
     'it reaches the sheet by id — it is not bound to it');
   assert.ok(!/SpreadsheetApp\.\w/.test(backups),
     'and never through SpreadsheetApp: copying a file must not ask for permission to READ the sheet');
 });
 
-test('a backup project without its sheet id refuses in one plain sentence', () => {
+test('an unset sheet id refuses by naming the three real reasons, and arms nothing', () => {
+  // The owner hit this for real: the guard fired AFTER he had typed the id,
+  // because Run executes the SAVED file and every .gs in a project shares one
+  // scope — a second copy of the script silently wins. "You didn't type it" is
+  // the one explanation that is usually false, so the sentence never says it.
   const { ctx } = loadBackups(null, { keepPlaceholder: true });
-  assert.throws(() => ctx.setupBackups(), /Put the sheet id in SPREADSHEET_ID first/);
+  let err = null;
+  try { ctx.setupBackups(); } catch (e) { err = e; }
+  assert.ok(err, 'it must refuse');
+  assert.match(err.message, /still "PASTE_THE_SHEET_ID_HERE" in the code that just RAN/);
+  assert.match(err.message, /was not saved/, 'names the unsaved-file cause');
+  assert.match(err.message, /SECOND file with the same script/, 'names the duplicate-file cause');
+  assert.match(err.message, /whichSheet\(\)/, 'and offers the self-check');
   assert.strictEqual(ctx.ScriptApp._triggers.length, 0, 'and arms nothing');
   assert.strictEqual(ctx.DriveApp._folders.size, 0, 'and creates no folder');
+});
+
+test('the sheet id is read tolerantly: a whole URL, stray quotes and spaces all work', () => {
+  const URL = 'https://docs.google.com/spreadsheets/d/1wuz_VowppbC0Wl41KbW4sho6M9r6DGDL24Wrym_RWX8/edit#gid=0';
+  const ID = '1wuz_VowppbC0Wl41KbW4sho6M9r6DGDL24Wrym_RWX8';
+  const asWritten = (value) => {
+    const { ctx } = loadBackups(null, { keepPlaceholder: true });
+    ctx.SPREADSHEET_ID = value;
+    return ctx.sheetIdOrThrow_();
+  };
+  assert.strictEqual(asWritten(URL), ID, 'pasting the whole URL is the obvious thing to do, so it works');
+  assert.strictEqual(asWritten('  ' + ID + '  '), ID, 'stray spaces trimmed');
+  assert.strictEqual(asWritten("'" + ID + "'"), ID, 'stray quotes trimmed');
+  assert.strictEqual(asWritten(ID), ID);
+  // Garbage says what it saw rather than blaming the owner.
+  let err = null;
+  try { asWritten('the sheet'); } catch (e) { err = e; }
+  assert.match(err.message, /does not look like a sheet id: "the sheet"/);
+});
+
+test('whichSheet names the file the saved code is pointing at', () => {
+  const { ctx } = loadBackups();
+  const said = ctx.whichSheet();
+  assert.match(said, new RegExp('SPREADSHEET_ID reads as ' + FAKE_SHEET_ID));
+  assert.match(said, /that is the file named "Octogo Takoyaki - Marikina"/,
+    'naming the real file makes "right id, wrong sheet" impossible to mistake');
+  assert.strictEqual(ctx.ScriptApp._triggers.length, 0, 'a look must never arm anything');
 });
 
 test('sheetCheck: a date retyped by hand is CAUGHT — the row that no cutoff can see', () => {
