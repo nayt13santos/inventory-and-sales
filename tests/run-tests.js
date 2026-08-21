@@ -785,8 +785,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.7.6', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.7.6');
+  assert.strictEqual(g.data.version, '2.8.0', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.8.0');
 });
 
 // ---------------------------------------------------------------------------
@@ -4638,37 +4638,77 @@ function costFixture() {
   return f;
 }
 
-test('THE double-count guard: a restock is consumption OR money out, never both', () => {
+test('THE double-count guard: what the PHONE writes is recognised, not just product names', () => {
+  // PIN MOVED (v2.8.0, deliberate — and it moved because the gate found the
+  // first version WRONG). The guard used to match an expense's item against
+  // StockItems product names only. But the phone's expense form writes BUCKET
+  // names — "Flour", "Box" — and no bucket equals a product ("Takoyaki
+  // Flour"), so the guard never fired on anything the app itself wrote: every
+  // sack of flour counted twice (paid AND opened), every box twice (the Box
+  // bucket AND boxes sold x box_cost), reading ~30-60% too dear. The mapping
+  // is DECLARED now, in Settings costed_buckets, because guessing it wrong the
+  // other way would take real money OUT of the cost and make a price look safe
+  // to cut.
   const { ctx, token } = costFixture();
   const c = costing(ctx, token);
   assert.strictEqual(c.ok, true, c.error);
-  // The sack of flour appears on BOTH sides of the ledger — ₱600 paid on the
-  // 19th, 2 packs opened on the 20th — and may be counted ONCE. Consumption is
-  // the side that keeps it, because it is the side that knows how much was USED.
   assert.strictEqual(c.data.variable.stock, 540,
     'consumption: 2 packs of Flour x 120 + 1 pack of Mayo x 300');
   assert.strictEqual(c.data.variable.money, 1500,
-    'money out: Octopus 1,200 + Veggies 300. The 600 flour RESTOCK is NOT added — ' +
-    'with it this would read 2,100 and every ball would look dearer than it is');
-  // The match is on the NAME, case-insensitively and trimmed, against the same
-  // StockItems list the consumption side prices from — so the two can never
-  // disagree about which products are tracked.
+    'money out: Octopus 1,200 + Veggies 300 — the 600 flour restock is priced as consumption instead');
+
+  // 1. THE BUCKET THE PHONE ACTUALLY WRITES. This is the case that was broken.
+  expenseAt(ctx, token, '2026-07-19', 'Supplies', 'Flour', 720, 'c-b1');
+  let d = costing(ctx, token).data;
+  assert.strictEqual(d.variable.money, 1500,
+    'a "Flour" bucket tap is a restock: its money is NOT added, or the flour is counted twice');
+  assert.strictEqual(d.variable.counted_per_unit, 1320,
+    'and what was set aside is REPORTED (600 + 720), so the subtraction is visible');
+
+  // 2. The container bucket, the other half of the same bug: boxes sold are
+  // already charged at box_cost, so buying boxes must not be charged again.
+  expenseAt(ctx, token, '2026-07-19', 'Supplies', 'Box', 230, 'c-b2');
+  d = costing(ctx, token).data;
+  assert.strictEqual(d.variable.money, 1500, 'the Box bucket is priced per box, not twice');
+  assert.ok(d.variable.boxes > 0, 'containers are still charged — through box_cost');
+
+  // 3. A hand-typed product name still works, shouted and padded.
   assert.strictEqual(post(ctx, { token, action: 'saveExpense', payload: {
     date: '2026-07-19', category: 'Supplies', item: '  JAPANESE MAYO  ', amount: 700,
     backlogRef: '', notes: '', entryId: 'c-x7' } }).ok, true);
   assert.strictEqual(costing(ctx, token).data.variable.money, 1500,
     'shouted and padded, it is still the mayo the ledger already prices');
-  // ...and it is a NAME match, not a guess: "flour" is not a product on the
-  // list, so that money is ordinary Supplies and stays in.
-  expenseAt(ctx, token, '2026-07-19', 'Supplies', 'flour', 250, 'c-x8');
-  assert.strictEqual(costing(ctx, token).data.variable.money, 1750,
-    'a purchase whose name is NOT on the stock list is money out like any other');
-  // A restock filed under Octopus is subtracted on the same rule.
+
+  // 4. A bucket that is NOT costed per unit stays in, at full value — the
+  // eggs and veggies are how the money side earns its name.
+  expenseAt(ctx, token, '2026-07-19', 'Supplies', 'Eggs', 240, 'c-b3');
+  assert.strictEqual(costing(ctx, token).data.variable.money, 1740,
+    'no per-unit cost exists for eggs, so their money is the only record of them');
+
+  // 5. The category does not change what a restock is.
   assert.strictEqual(post(ctx, { token, action: 'saveExpense', payload: {
     date: '2026-07-19', category: 'Octopus', item: 'Bonito', amount: 900,
     backlogRef: '', notes: '', entryId: 'c-x9' } }).ok, true);
-  assert.strictEqual(costing(ctx, token).data.variable.money, 1750,
-    'the category does not change what a restock is');
+  assert.strictEqual(costing(ctx, token).data.variable.money, 1740);
+
+  // 6. A legacy pre-2.6.0 row carries its delivery on the expense itself; the
+  // quantity is already in the stock ledger, so the money is not added again.
+  ctx.appendObjects(ctx.SpreadsheetApp.getActive(), 'Expenses', [{
+    date: '2026-07-19', category: 'Supplies', item: 'sako (legacy)', amount: 480,
+    backlog_ref: '', notes: '', entry_id: 'c-legacy', updated_at: '',
+    stock_product: 'Takoyaki Flour', stock_qty: 4 }]);
+  assert.strictEqual(costing(ctx, token).data.variable.money, 1740,
+    'a ride-along delivery row is a restock however its item is named');
+
+  // 7. And the declaration is EDITABLE: take Flour out of costed_buckets and
+  // its money counts again, which is the behaviour for a bucket he has not
+  // given a per-unit cost to.
+  assert.strictEqual(post(ctx, { token, action: 'saveSettings',
+    payload: { settings: { costed_buckets: 'Box' } } }).ok, true);
+  assert.strictEqual(costing(ctx, token).data.variable.money, 1740 + 720,
+    'declared, not guessed: the BUCKET row counts again once the sheet stops claiming ' +
+    'it is priced per unit — while the row named for the product itself stays a restock ' +
+    'on rule 2, which is the point of having both rules');
 });
 
 test('the costing arithmetic, figure by hand-computed figure', () => {
@@ -4863,14 +4903,26 @@ test('targets are ADVICE: computed from the mix, written nowhere', () => {
   // One asked-for figure -> one row. ₱1,798.75 of cost a night + ₱1,000 wanted
   // against ₱3,800 actually taken = a factor of 0.7365..., applied to every
   // active in-cutoff price, holding the sales mix exactly as it was.
+  // PIN MOVED (v2.8.0, deliberate — the gate proved the old algebra fell short
+  // by P542 a night on a cheese-heavy fortnight). The factor scales the
+  // SCALABLE takings only (revenue less the typed custom orders, which no menu
+  // price can move) and is applied to the cheese price as well as the plain
+  // one — cheese money is part of that same scalable total, and leaving it
+  // unscaled is exactly why the advice used to under-deliver.
   const one = costing(ctx, token, { targetPerDay: 1000 }).data;
   assert.strictEqual(one.targets.length, 1);
   assert.strictEqual(one.targets[0].per_day, 1000);
-  assert.deepStrictEqual(one.targets[0].prices, [
-    { sku: 'box4', price: 36.83 },     // 50 x 2,798.75/3,800
-    { sku: 'box6', price: 47.87 },     // 65 x the same factor
-    { sku: 'box10', price: 77.33 }     // 105 x the same factor
-  ], 'nori is excluded, so it is not in the advice either');
+  const advice = one.targets[0].prices;
+  assert.deepStrictEqual(advice.map(r => r.sku), ['box4', 'box6', 'box10'],
+    'nori is excluded, so it is not in the advice either');
+  // Every row scales by ONE factor, cheese included, and the factor is the one
+  // that makes the scalable takings cover the costs plus what he wants left.
+  const f = advice[0].price / 50;
+  advice.forEach(r => {
+    const p = { box4: [50, 60], box6: [65, 80], box10: [105, 125] }[r.sku];
+    assert.ok(Math.abs(r.price - p[0] * f) < 0.02, r.sku + ': the plain price scales');
+    assert.ok(Math.abs(r.cheese_price - p[1] * f) < 0.02, r.sku + ': and so does the cheese price');
+  });
   // No figure asked for -> the illustrative ladder, so the screen has something
   // to read before he types his own.
   assert.deepStrictEqual(costing(ctx, token).data.targets.map(t => t.per_day), [500, 1000, 1500]);
@@ -4884,6 +4936,85 @@ test('targets are ADVICE: computed from the mix, written nowhere', () => {
   const back = costing(ctx, token, { start: '2026-07-31', end: '2026-07-16' });
   assert.strictEqual(back.ok, false);
   assert.strictEqual(back.error, 'start (2026-07-31) must be on or before end (2026-07-16).');
+});
+
+test('the advice DELIVERS: set the advised prices, sell the same mix, get the figure asked for', () => {
+  // The gate's MT-3 measured the old advice P542.55 a night short on exactly
+  // this shape — cheese-heavy with a typed custom order. So this test does not
+  // check the algebra on paper: it SETS the advised prices, replays the
+  // identical nights, and asks the app again what a night leaves.
+  const WANT = 2500;
+  const play = (priceRows) => {
+    const { ctx, token } = freshSetup();
+    if (priceRows){
+      assert.strictEqual(post(ctx, { token, action: 'savePrices', payload: { rows: priceRows } }).ok, true);
+    }
+    ['2026-07-20', '2026-07-21'].forEach((d, i) =>
+      assert.strictEqual(post(ctx, { token, action: 'saveDay', payload: {
+        date: d, closed: false, staff: 'Mama', customAmount: 400, customGcash: 0, notes: '',
+        counts: [{ sku: 'box4', sod: 50, eod: 0, cheeseQty: 20, gcashQty: 0, gcashCheeseQty: 0 },
+                 { sku: 'box10', sod: 10, eod: 0, cheeseQty: 5, gcashQty: 0, gcashCheeseQty: 0 }],
+        stock: [{ product: 'Takoyaki Flour', qty: 3 }], entryId: 'adv-' + i } }).ok, true));
+    assert.strictEqual(post(ctx, { token, action: 'saveExpense', payload: { date: '2026-07-20',
+      category: 'Octopus', item: 'Octopus', amount: 1400, backlogRef: '', notes: '',
+      entryId: 'adv-octo' } }).ok, true);
+    return { ctx, token };
+  };
+  const a = play(null);
+  const asked = post(a.ctx, { token: a.token, action: 'costing',
+    payload: { start: '2026-07-16', end: '2026-07-31', targetPerDay: WANT } });
+  assert.strictEqual(asked.ok, true, asked.error);
+  const rows = asked.data.targets[0].prices.map(r =>
+    ({ sku: r.sku, price: r.price, cheesePrice: r.cheese_price, active: true }));
+  assert.ok(rows.length === 3, 'there is advice to test');
+  assert.strictEqual(asked.data.targets[0].custom_orders_held, true,
+    'and it says the custom-order money was held out of the scaling');
+
+  const b = play(rows);
+  const after = post(b.ctx, { token: b.token, action: 'costing',
+    payload: { start: '2026-07-16', end: '2026-07-31' } });
+  assert.strictEqual(after.ok, true, after.error);
+  const left = after.data.per_day.left;
+  assert.ok(Math.abs(left - WANT) <= 1,
+    'a night must actually leave what was asked for — got ' + left + ' against ' + WANT +
+    ' (the old algebra came up 542 short here)');
+});
+
+test('a cost cell that is not a usable figure is UNPRICED, never coerced to zero', () => {
+  // The gate's MIG-2: the honesty guard tested only for a literally BLANK cell,
+  // so "P120" or "12,50" fell to 0 through asNum and a typed "-5" stayed
+  // negative — costed at nothing or less than nothing, with no caveat at all.
+  const { ctx, ss, token } = freshSetup();
+  assert.strictEqual(post(ctx, { token, action: 'saveDay', payload: {
+    date: '2026-07-20', closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box4', sod: 10, eod: 0, cheeseQty: 0, gcashQty: 0, gcashCheeseQty: 0 }],
+    stock: [{ product: 'Takoyaki Flour', qty: 2 }], entryId: 'junk-day' } }).ok, true);
+  const sheet = ss.getSheetByName('StockItems');
+  const v = sheet.getDataRange().getValues();
+  const col = v[0].indexOf('unit_cost') + 1;
+  const row = v.findIndex((r, i) => i > 0 && r[0] === 'Takoyaki Flour') + 1;
+  const ask = () => post(ctx, { token, action: 'costing',
+    payload: { start: '2026-07-16', end: '2026-07-31' } }).data;
+
+  // The seeded figure works.
+  assert.strictEqual(ask().variable.stock, 240, '2 packs at the seeded 120');
+  for (const junk of ['₱120', '12,50', 'one twenty', '-5', 'NaN']){
+    sheet.getRange(row, col, 1, 1).setValues([[junk]]);
+    const d = ask();
+    assert.strictEqual(d.variable.stock, 0,
+      '"' + junk + '" is not a figure, so nothing is costed from it');
+    assert.deepStrictEqual(d.unpriced.map(u => u.name), ['Takoyaki Flour'],
+      '"' + junk + '" must be REPORTED as having no cost, not silently used');
+    assert.match(d.caveats.join('\n'), /Takoyaki Flour has no cost set/);
+    assert.deepStrictEqual(d.targets, [], 'and the advice stays off while a cost is unusable');
+  }
+  // Zero itself is an ANSWER, not a mistake: nori's box costs nothing.
+  sheet.getRange(row, col, 1, 1).setValues([[0]]);
+  const d0 = ask();
+  assert.deepStrictEqual(d0.unpriced, [], 'a deliberate 0 is a cost, and it is respected');
+  assert.strictEqual(d0.variable.stock, 0);
+  assert.ok(!/has no cost set/.test(d0.caveats.join('\n')),
+    'and the unpriced caveat is gone — any caveat left is about something else');
 });
 
 test('THE FENCE: the cutoff note and its figures are byte-identical with and without costs', () => {

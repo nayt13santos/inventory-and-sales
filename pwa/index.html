@@ -541,7 +541,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.7.6';
+const APP_VERSION = '2.8.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -6259,6 +6259,17 @@ function costFiguresHTML(res, per){
     '<div class="co-row"><span>Stock opened</span><span class="v">' + peso(v.stock) + '</span></div>' +
     '<div class="co-row"><span>Supplies &amp; octopus paid</span><span class="v">' + peso(v.money) + '</span></div>' +
     '<div class="co-row"><span>Boxes used</span><span class="v">' + peso(v.boxes) + '</span></div>' +
+    // What was PAID for things already priced per unit above, shown so the
+    // subtraction is visible (v2.8.0). Without this line the money figure here
+    // quietly disagrees with the Expenses screen and looks like a mistake.
+    (num(v.counted_per_unit) > 0
+      ? '<div class="r-sep" role="presentation"></div>' +
+        '<div class="co-row"><span>Also paid, counted above instead</span><span class="v">' +
+          peso(v.counted_per_unit) + '</span></div>' +
+        '<p class="hint" style="margin-top:8px;">That is what you paid for flour and boxes in these nights. It is ' +
+          '<b>not</b> added here, because the flour is already counted as it was opened and the boxes as they were ' +
+          'used — counting the money too would price every ball dearer than it is.</p>'
+      : '') +
     (isNone(v.per_ball) && why ? '<p class="hint" style="margin-top:8px;">' + why + '</p>' : '') +
   '</div>';
 
@@ -6418,7 +6429,13 @@ async function loadCosting(){
   const key = periodKey(per);
   const typed = txt(costTarget).trim();
   if (typed !== '' && num(typed) < 0){
+    // Refused, and SAID on the screen rather than only in a field that the next
+    // render may replace: an early return used to leave the whole section mute,
+    // so paging between cutoffs did nothing and looked broken (v2.8.0).
+    costErr = 'The nightly target cannot be negative — clear it, or type what a night should leave you.';
+    costBusy = false;
     setErr('err-cost-target', 'The nightly target cannot be negative.');
+    renderIbapa();
     return;
   }
   setErr('err-cost-target', '');
@@ -6443,8 +6460,14 @@ async function loadCosting(){
     costErr = '';
   }catch(err){
     console.error(err);
-    costRes = null;
-    costErr = friendlyError(err, 'Try again when there is a signal.');
+    // Guarded exactly like the success path (v2.8.0): a request for a period he
+    // has already navigated away from must not delete the answer on screen just
+    // because it failed late — the figures showing belong to THIS period and
+    // are still true.
+    if (periodKey(costPer || per) === key){
+      costRes = null;
+      costErr = friendlyError(err, 'Try again when there is a signal.');
+    }
   }finally{
     costBusy = false;
     if (activeTab === 'ibapa') renderIbapa();

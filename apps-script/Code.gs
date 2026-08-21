@@ -279,7 +279,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.7.6';
+var VERSION = '2.8.0';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -413,6 +413,7 @@ var SETTABLE_SETTINGS = {
   // the VALUE type in this whitelist — on the form the buckets are the whole
   // choice, there is no free-text item box any more.
   supply_picklist: 'text',
+  costed_buckets: 'text',
   daily_salary: 'money',
   split_default: 'money',
   mama_per_cutoff: 'money',
@@ -2172,6 +2173,33 @@ function excludedForPeriod(ss, start, end) {
  * WOULD need to be for a chosen nightly take, holding the sales mix as it
  * actually was. Nothing here writes to Prices, and nothing here may.
  */
+/** A cost cell, read the only honest way (v2.8.0): a usable figure, or BLANK.
+ *  Blank means "not known" and is the documented case. But a hand-typed "P120",
+ *  "12,50" or "-5" is NOT blank, and asNum would turn the first two into 0 and
+ *  keep the third negative — costing at nothing, or at less than nothing, with
+ *  every honesty guard staying silent because the cell "had a value". Anything
+ *  that is not a finite figure of zero or more therefore reads exactly like
+ *  blank: reported as unpriced, left out, and shown as empty so it gets
+ *  retyped. Zero itself IS an answer (nori's box costs nothing). */
+function costCell(v) {
+  if (asStr(v) === '') return '';
+  var n = Number(v);
+  return (isFinite(n) && n >= 0) ? n : '';
+}
+
+/** Whether a cost cell holds a figure this screen may use (v2.8.0). BLANK is
+ *  "not known" — that is the documented case. But a hand-typed "P120", "12,50"
+ *  or "-5" is NOT blank, and asNum coerces the first two to 0 and keeps the
+ *  third negative: costing at nothing, or at less than nothing, while the
+ *  honesty guard stays silent. Anything that is not a finite figure of zero or
+ *  more is therefore treated exactly like blank — reported as unpriced and
+ *  left out. Zero itself IS an answer (nori's box costs nothing). */
+function usableCost(v) {
+  if (v === '' || v === null || v === undefined) return false;
+  var n = Number(v);
+  return isFinite(n) && n >= 0;
+}
+
 function apiCosting(ss, settings, payload) {
   var start = reqDate(payload.start, 'start');
   var end = reqDate(payload.end, 'end');
@@ -2216,14 +2244,19 @@ function apiCosting(ss, settings, payload) {
   // below need: a day that is simply missing is not a day with no sales.
   var dayByDate = Object.create(null);
   days.forEach(function (d) { dayByDate[d.date] = d; });
-  var daysOpen = 0, revenue = 0, salary = 0;
+  var daysOpen = 0, revenue = 0, salary = 0, customMoney = 0;
   days.forEach(function (d) {
     if (!d.closed) daysOpen++;
     revenue += d.total;
     salary += d.salary;   // already 0 on a closed day (readDays resolves it)
+    // A special order's money is a figure he TYPED, not a menu price, so it
+    // cannot move when a menu price moves. The targets below must leave it
+    // out of what they scale, or the advice quietly under-delivers.
+    customMoney += d.custom_amount;
   });
   revenue = round2(revenue);
   salary = round2(salary);
+  customMoney = round2(customMoney);
 
   // --- Balls, containers, and what sold. Driven by the count rows' OWN
   // in_cutoff snapshot; `sold` (not sold − custom_qty) is the right driver for
@@ -2242,7 +2275,7 @@ function apiCosting(ss, settings, payload) {
     // whose sku has left the Prices tab.
     balls += sold * (p ? asNum(p.size) : 0);
     if (sold === 0) return;
-    if (!p || p.box_cost === '') {
+    if (!p || !usableCost(p.box_cost)) {
       unpricedBox[c.sku] = (unpricedBox[c.sku] || 0) + sold;
       return;
     }
@@ -2257,7 +2290,7 @@ function apiCosting(ss, settings, payload) {
     var qty = asNum(u.qty);
     if (qty === 0) return;
     var it = itemByName[lower(u.product)];
-    if (!it || it.unit_cost === '') {
+    if (!it || !usableCost(it.unit_cost)) {
       // No cost on file (or a name the stock list does not know at all): the
       // quantity is REPORTED and left out, never costed at nothing.
       var name = it ? it.product : asStr(u.product);
@@ -2268,13 +2301,37 @@ function apiCosting(ss, settings, payload) {
     stockCost += qty * asNum(it.unit_cost);
   });
 
-  // --- Money out: Supplies + Octopus, less every restock of a tracked product.
-  var moneyCost = 0;
+  // --- Money out: Supplies + Octopus, less every purchase this ledger ALREADY
+  // prices per unit. Getting this wrong is the worst thing the screen can do,
+  // and the first version DID get it wrong: it matched an expense's item name
+  // against StockItems products, but the expense form's buckets are money
+  // buckets — "Flour", "Box" — and no bucket name equals a product name
+  // ("Takoyaki Flour"). The guard could therefore never fire on anything the
+  // app itself writes: a sack of flour was counted twice (money paid AND flour
+  // opened) and every box twice (the Box bucket AND boxes sold x box_cost),
+  // reading ~30-60% too dear on a fortnight logged the way the phone logs it.
+  //
+  // So the mapping is DECLARED, not guessed: Settings `costed_buckets` lists
+  // the bucket names whose money is already counted per unit. A guess would be
+  // worse than a declaration here, because guessing wrong in the other
+  // direction removes real money from the cost and makes a price look safe to
+  // cut. Three ways a row can be recognised, all of them explicit:
+  //   1. its item is one of `costed_buckets` (the phone's own buckets), or
+  //   2. its item IS a tracked product name (a hand-typed "Takoyaki Flour"), or
+  //   3. it carries a legacy stock_product (a pre-2.6.0 delivery row).
+  var costedBuckets = Object.create(null);
+  asStr(settings.costed_buckets).split(',').forEach(function (b) {
+    var k = lower(asStr(b).trim());
+    if (k) costedBuckets[k] = true;
+  });
+  var moneyCost = 0, countedPerUnit = 0;
   expenses.forEach(function (x) {
     if (x.category !== 'Supplies' && x.category !== 'Octopus') return;
-    // THE double-count guard. This row bought something the ledger already
-    // prices as consumption, so its money is not added again here.
-    if (itemByName[lower(x.item)]) return;
+    var item = lower(x.item);
+    if (costedBuckets[item] || itemByName[item] || asStr(x.stock_product) !== '') {
+      countedPerUnit += x.amount;     // reported, never added to the cost
+      return;
+    }
     moneyCost += x.amount;
   });
 
@@ -2348,18 +2405,41 @@ function apiCosting(ss, settings, payload) {
   // the revenue a night actually made. With no open days, or no revenue to
   // scale, there is no factor and the list is empty rather than full of
   // invented prices.
+  // --- TARGETS. What every menu price would have to be for a night to LEAVE
+  // the figure he asks for, selling the same mix. Two things the first version
+  // got wrong, both of which made the advice under-deliver (the gate measured
+  // P542 a night short on a cheese-heavy fortnight):
+  //   - the factor was calibrated on TOTAL revenue but applied only to each
+  //     sku's plain `price`, so cheese money never scaled with it;
+  //   - the typed custom-order amount was inside that revenue too, and a menu
+  //     price cannot move it at all.
+  // So the base is the SCALABLE money only (revenue less custom orders), and
+  // the factor is applied to BOTH the plain price and the cheese price of every
+  // sku, which together are exactly that scalable money.
   var targets = [];
-  if (daysOpen > 0 && revenue > 0) {
-    var revenuePerDay = revenue / daysOpen;
+  var scalablePerDay = daysOpen > 0 ? (revenue - customMoney) / daysOpen : 0;
+  var customPerDay = daysOpen > 0 ? customMoney / daysOpen : 0;
+  if (daysOpen > 0 && scalablePerDay > 0) {
     var costsPerDay = (variableTotal + fixedTotal) / daysOpen;
     wants.forEach(function (w) {
-      var factor = (costsPerDay + w) / revenuePerDay;
+      // needed scalable takings = costs + what he wants left - what the custom
+      // orders already bring in (which no price change can alter).
+      var needScalable = costsPerDay + w - customPerDay;
+      if (needScalable <= 0) return;      // already there without touching a price
+      var factor = needScalable / scalablePerDay;
       var rows = [];
       prices.list.forEach(function (p) {
         if (!p.in_cutoff || !p.active) return;
-        rows.push({ sku: p.sku, price: round2(p.price * factor) });
+        rows.push({
+          sku: p.sku,
+          price: round2(p.price * factor),
+          // Cheese moves with it: it is part of the same scalable takings, and
+          // an unchanged cheese price is why the old advice fell short.
+          cheese_price: p.cheese_price === '' || asNum(p.cheese_price) === 0
+            ? asNum(p.cheese_price) : round2(asNum(p.cheese_price) * factor)
+        });
       });
-      targets.push({ per_day: round2(w), prices: rows });
+      targets.push({ per_day: round2(w), prices: rows, custom_orders_held: customPerDay > 0 });
     });
   }
 
@@ -2446,7 +2526,11 @@ function apiCosting(ss, settings, payload) {
     revenue: revenue,
     caveats: caveats,
     variable: {
-      stock: stockCost, money: moneyCost, boxes: boxesCost, per_ball: perBall
+      stock: stockCost, money: moneyCost, boxes: boxesCost, per_ball: perBall,
+      // What was paid for things this ledger prices per unit instead — shown
+      // so the subtraction is visible rather than a figure that quietly
+      // disagrees with his Expenses screen.
+      counted_per_unit: round2(countedPerUnit)
     },
     fixed: {
       salary: salary, shares: shares,
@@ -2729,7 +2813,7 @@ function readPrices(ss) {
       cheese_price: asNum(cellOf(r, t, 'cheese_price')),
       active: asBool(cellOf(r, t, 'active')),
       // What one container costs (v2.8.0). Blank = no cost known, shipped blank.
-      box_cost: asStr(rawBoxCost) === '' ? '' : asNum(rawBoxCost),
+      box_cost: costCell(rawBoxCost),
       // in_cutoff=FALSE means "sell it, count it, but keep its money out of
       // every cutoff figure". asCutoffFlag, NOT asBool: a blank cell (every
       // pre-v2.4.0 row) and a missing column both have to read TRUE.
@@ -2919,7 +3003,7 @@ function readStockItems(ss) {
         reorder_at: asStr(rawReorder) === '' ? '' : asNum(rawReorder),
         // What one unit costs to buy (v2.8.0). Blank = no cost known, shipped
         // blank so the phone can show an empty box and save it back empty.
-        unit_cost: asStr(rawUnitCost) === '' ? '' : asNum(rawUnitCost)
+        unit_cost: costCell(rawUnitCost)
       };
       list.push(o);
       map[product] = o;
@@ -3909,7 +3993,13 @@ function seedSettings(ss) {
     // The expense form's buckets between Octopus and Other (v2.7.1, the
     // owner's list). Purchase MONEY buckets, not the stock list — quantities
     // enter under Stock on hand, this is what the peso was for.
-    ['supply_picklist', 'Veggies, Eggs, Flour, Box']
+    ['supply_picklist', 'Veggies, Eggs, Flour, Box'],
+    // v2.8.0: which expense buckets are already priced PER UNIT elsewhere, so
+    // "What it costs" does not count their money a second time. Seeded to match
+    // the picklist above (Flour restocks a tracked product; Box buys the
+    // containers that boxes-sold x box_cost already charges for). Editable —
+    // add a bucket here the day it gets a per-unit cost, and not before.
+    ['costed_buckets', 'Flour, Sauce, Mayo, Bonito, Aonori, Togarashi, Box']
   ];
   defaults.forEach(function (d) {
     if (!have[d[0]]) toAppend.push({ key: d[0], value: d[1] });

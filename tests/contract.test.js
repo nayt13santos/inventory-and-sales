@@ -4805,6 +4805,26 @@ test('the Maintenance payload OMITS a blank cost field, on both cards', () => {
   assert.match(inv.costingHTML(), /A cost was changed, so the old figures were thrown away\./);
 });
 
+test('the screen SHOWS the money it set aside, so the subtraction is not a mystery (v2.8.0)', () => {
+  // The gate's MT-1/MT-2 fix subtracts what was paid for things priced per unit.
+  // A cost figure that silently disagrees with the Expenses screen reads as a
+  // bug, so the set-aside total is on screen with its reason.
+  const app = costingClient(F.boot, F.costing, '');
+  const withAside = Object.assign({}, F.costing, {
+    variable: Object.assign({}, F.costing.variable, { counted_per_unit: 950 })
+  });
+  const h = app.costFiguresHTML({ key: 'k', target: '', data: withAside },
+    { start: PERIOD.start, end: PERIOD.end });
+  assert.match(h, /Also paid, counted above instead/);
+  assert.match(h, /counting the money too would price every ball dearer than it is/);
+  // Nothing paid twice, nothing to explain: the line stays away.
+  const none = Object.assign({}, F.costing, {
+    variable: Object.assign({}, F.costing.variable, { counted_per_unit: 0 })
+  });
+  assert.ok(!/Also paid, counted above instead/.test(
+    app.costFiguresHTML({ key: 'k', target: '', data: none }, { start: PERIOD.start, end: PERIOD.end })));
+});
+
 test('the screen shows the caveats ABOVE the figures they qualify (v2.8.0)', () => {
   // The card exists because the owner's real Aug 16-31 read P1.57 a ball with
   // no purchases logged and advised cutting Box 10 to P83. The warning has to
