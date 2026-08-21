@@ -30,6 +30,25 @@ function test(name, fn) {
 }
 
 // Fresh context per scenario so sheet state never leaks between tests.
+/** The STANDALONE backup project (apps-script/Backups.gs) — its own Apps
+ *  Script project in real life, so its own VM context here, with the sheet id
+ *  filled in the way the owner fills it. Deliberately separate from Code.gs:
+ *  keeping Drive and trigger permissions out of the bound script is the whole
+ *  reason the file exists (v2.7.5). */
+const BACKUPS_GS = path.join(ROOT, 'apps-script', 'Backups.gs');
+function loadBackups(ssOverride, opts) {
+  const ss = ssOverride || new FakeSpreadsheet();
+  const ctx = makeContext(ss);
+  vm.createContext(ctx);
+  let src = fs.readFileSync(BACKUPS_GS, 'utf8');
+  if (!(opts && opts.keepPlaceholder)) {
+    src = src.replace("var SPREADSHEET_ID = 'PASTE_THE_SHEET_ID_HERE';",
+      "var SPREADSHEET_ID = 'fake-spreadsheet-id';");
+  }
+  vm.runInContext(src, ctx, { filename: 'Backups.gs' });
+  return { ctx, ss };
+}
+
 function load(ssOverride) {
   const ss = ssOverride || new FakeSpreadsheet();
   const ctx = makeContext(ss);
@@ -762,8 +781,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.7.4', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.7.4');
+  assert.strictEqual(g.data.version, '2.7.5', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.7.5');
 });
 
 // ---------------------------------------------------------------------------
@@ -4333,6 +4352,121 @@ test('the backfill reaches a LIVE StockItems tab on migration, by header name', 
   const before = JSON.stringify(snapshot(ss));
   ctx.setupSheet();
   assert.strictEqual(JSON.stringify(snapshot(ss)), before, 're-running changes nothing');
+});
+
+// ---------------------------------------------------------------------------
+// 24. v2.7.5: the sheet backs ITSELF up, and "Check the sheet" audits it.
+// ---------------------------------------------------------------------------
+console.log('\n--- 24. v2.7.5: weekly self-backup + the sheet integrity check ---');
+
+test('setupBackups arms ONE weekly trigger (re-running replaces, never stacks) and copies today', () => {
+  const { ctx } = loadBackups();
+  const said = ctx.setupBackups();
+  assert.match(said, /Weekly backup armed/);
+  assert.strictEqual(ctx.ScriptApp._triggers.length, 1, 'one trigger after first arm');
+  ctx.setupBackups();
+  ctx.setupBackups();
+  assert.strictEqual(ctx.ScriptApp._triggers.length, 1, 're-arming must replace, not stack');
+  assert.strictEqual(ctx.ScriptApp._triggers[0].getHandlerFunction(), 'backupSheet');
+  const folder = ctx.DriveApp._folders.get('Octogo Tracker Backups');
+  assert.ok(folder, 'the Drive folder was created');
+  assert.strictEqual(folder._files.filter(f => !f._trashed).length, 1,
+    'exactly ONE copy today, however many times it armed');
+  assert.match(folder._files[0].getName(), /^Backup \d{4}-\d{2}-\d{2} — Octogo Takoyaki - Marikina$/);
+});
+
+test('backupSheet prunes the OLDEST copies past 8 — never the newest', () => {
+  const { ctx } = loadBackups();
+  const folder = ctx.DriveApp.createFolder('Octogo Tracker Backups');
+  // Ten older copies already sitting in the folder, oldest first.
+  for (let m = 1; m <= 10; m++) {
+    const name = 'Backup 2026-0' + Math.min(6, m) + '-' + String(10 + m) + ' — Octogo Takoyaki - Marikina';
+    folder._files.push({ _trashed: false, getName: () => name, setTrashed(v){ this._trashed = !!v; } });
+  }
+  ctx.backupSheet();                                  // adds today's, then prunes
+  const live = folder._files.filter(f => !f._trashed).map(f => f.getName()).sort();
+  assert.strictEqual(live.length, 8, 'the newest 8 stay');
+  assert.ok(live[live.length - 1].indexOf('Backup 2026-08') === 0, "today's copy survives");
+  const trashed = folder._files.filter(f => f._trashed).map(f => f.getName()).sort();
+  assert.strictEqual(trashed.length, 3, 'the three oldest went to the trash');
+  assert.ok(trashed.every(n => n < live[0]), 'every trashed name sorts OLDER than every kept one');
+  // Idempotent within the day: run again, nothing more changes.
+  const snapshotNames = JSON.stringify(folder._files.map(f => [f.getName(), f._trashed]));
+  ctx.backupSheet();
+  assert.strictEqual(JSON.stringify(folder._files.map(f => [f.getName(), f._trashed])), snapshotNames);
+});
+
+test('the BOUND script never touches Drive or triggers — the phones\' permissions stay put', () => {
+  // v2.7.5's load-bearing separation: Apps Script grants permissions per
+  // PROJECT and the bound script is what serves the phones. If DriveApp or
+  // ScriptApp ever appear in Code.gs, the live web app's permission set grows
+  // and an ordinary night's save can fail until the owner re-authorises in the
+  // editor. Backups therefore live in their own project (Backups.gs).
+  const bound = fs.readFileSync(CODE_GS, 'utf8');
+  assert.ok(!/\bDriveApp\b/.test(bound), 'Code.gs must not use DriveApp');
+  assert.ok(!/\bScriptApp\b/.test(bound), 'Code.gs must not use ScriptApp');
+  assert.ok(!/\b(MailApp|GmailApp|UrlFetchApp)\b/.test(bound), 'nor any other permission-bearing service');
+  const backups = fs.readFileSync(BACKUPS_GS, 'utf8');
+  assert.ok(/DriveApp/.test(backups) && /ScriptApp/.test(backups),
+    'the standalone project is where those live');
+  assert.ok(/SpreadsheetApp\.openById\(SPREADSHEET_ID\)/.test(backups),
+    'it reaches the sheet by id — it is not bound to it');
+});
+
+test('a backup project without its sheet id refuses in one plain sentence', () => {
+  const { ctx } = loadBackups(null, { keepPlaceholder: true });
+  assert.throws(() => ctx.setupBackups(), /Put the sheet id in SPREADSHEET_ID first/);
+  assert.strictEqual(ctx.ScriptApp._triggers.length, 0, 'and arms nothing');
+  assert.strictEqual(ctx.DriveApp._folders.size, 0, 'and creates no folder');
+});
+
+test('sheetCheck: a healthy sheet answers with NO findings, and writes nothing', () => {
+  const { ctx, ss, token } = freshSetup();
+  assert.strictEqual(post(ctx, { token, action: 'saveDay', payload: {
+    date: '2026-07-28', closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box4', sod: 5, eod: 0, cheeseQty: 0, gcashQty: 0, gcashCheeseQty: 0 }],
+    entryId: 'chk-day' } }).ok, true);
+  const before = JSON.stringify(snapshot(ss));
+  const r = post(ctx, { token, action: 'sheetCheck', payload: {} });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.deepStrictEqual(r.data.findings, [], 'nothing invented on clean data');
+  assert.ok(r.data.checked_rows > 0);
+  assert.strictEqual(JSON.stringify(snapshot(ss)), before, 'a check is a pure read');
+});
+
+test('sheetCheck: every class of hand-edit damage gets its own plain sentence', () => {
+  const { ctx, ss, token } = freshSetup();
+  assert.strictEqual(post(ctx, { token, action: 'saveDay', payload: {
+    date: '2026-07-28', closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box4', sod: 5, eod: 0, cheeseQty: 0, gcashQty: 0, gcashCheeseQty: 0 }],
+    entryId: 'chk-day' } }).ok, true);
+  // The damage, exactly as hands make it:
+  ctx.appendObjects(ss, 'DailyLog', [{ date: '2026-07-28', closed: false, staff: 'X',
+    gcash: 0, total: 1, cash: 1, custom_amount: 0, notes: '', entry_id: 'dup-day', updated_at: '' }]);
+  ctx.appendObjects(ss, 'Expenses', [
+    { date: '2026-07-27', category: 'Sup plies', item: 'typo cat', amount: 100, backlog_ref: '', notes: '', entry_id: 'chk-e1', updated_at: '' },
+    { date: '2026-07-27', category: 'Backlog', item: 'ghost ref', amount: 50, backlog_ref: 'No Such Debt', notes: '', entry_id: 'chk-e2', updated_at: '' },
+    { date: '2026-07-27', category: 'Other', item: 'minus', amount: -5, backlog_ref: '', notes: '', entry_id: 'chk-e3', updated_at: '' }
+  ]);
+  ctx.appendObjects(ss, 'DailyCounts', [{ date: '2026-07-20', sku: 'box4', sod: 3, eod: 0,
+    sold: 3, cheese_qty: 0, regular_qty: 3, amount: 150, entry_id: 'orphan-1' }]);
+  ctx.appendObjects(ss, 'StockUsage', [{ date: '2026-07-27', product: 'Takoyaki Floor',
+    qty: 1, entry_id: 'chk-u1', updated_at: '' }]);
+  const dl = ss.getSheetByName('DailyLog').getDataRange().getValues();
+  const totalCol = dl[0].indexOf('total');
+  const row = dl.findIndex((r2, i) => i > 0 && r2[0] === '2026-07-28') + 1;
+  ss.getSheetByName('DailyLog').getRange(row, totalCol + 1, 1, 1).setValues([[9999]]);
+
+  const r = post(ctx, { token, action: 'sheetCheck', payload: {} });
+  assert.strictEqual(r.ok, true, r.error);
+  const all = r.data.findings.join('\n');
+  assert.match(all, /DailyLog: two rows share the date "2026-07-28"/);
+  assert.match(all, /category "Sup plies".*folds into "Other payments"/);
+  assert.match(all, /points at "No Such Debt", which is not a Backlogs row/);
+  assert.match(all, /amount -5.*note refuse/);
+  assert.match(all, /rows exist for 2026-07-20 but DailyLog has no such day/);
+  assert.match(all, /"Takoyaki Floor" \(2026-07-27\) is not on the StockItems list/);
+  assert.match(all, /stores Total 9999 but Cash/);
 });
 
 // ---------------------------------------------------------------------------

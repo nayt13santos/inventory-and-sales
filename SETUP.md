@@ -61,6 +61,7 @@ Open the Google Sheet and edit these tabs directly — the app picks up changes 
   There is **no GCash total to type** — the app adds it up from what you entered and shows it on the receipt, so you can check it against your GCash history. There is no "supplies bought today" card any more either: every purchase goes under **Expenses**, so nothing can be counted twice. Works with no signal; it syncs later.
 - **Adding an expense:** one tap, one amount, done. The form is a single row of buckets — **Octopus · Veggies · Eggs · Flour · Box · Other** — plus the amount and the date. Nothing to type: a named bucket files under **Supplies** with that name, Octopus and Other file under their own note lines. Edit the middle of that list under More → Maintenance (like the staff list). Mama ₱500, Electric ₱500 and backlog payments have their own buttons on the **Cutoff** screen, where that money is actually decided.
 - **When a delivery arrives:** More → **Stock on hand** → **"Stock came in"** → every product is listed; tap **+** on what arrived (whole units), one Save for the lot. Quantity only — no money, because the goods usually arrive before they are paid for. **Paying the supplier later** (whenever that happens) is a normal **Supplies** expense on the Expenses screen, like any other money leaving. Two events, two entries, and nothing can be counted twice: the quantity lives in your stock, the money in Expenses, each on the day it actually happened. (Deliveries you logged the old way — on an expense row — still count in your stock forever.)
+- **Anytime you're suspicious of the sheet** (after hand-edits): **More → Check the sheet** — the server audits every tab for stray duplicates, orphaned rows and money that disagrees with itself, in plain sentences.
 - **You, at cutoff:** Cutoff tab → check the preview (below the note sits **Stock this cutoff** — your old paper supplies count, done for you from what was logged) → adjust **Split** if this fortnight is different (it remembers per cutoff, ₱1,500 each by default) → pay a backlog from the **Pay a backlog** card if there is anything left → **Generate cutoff note** → Copy or Share it to your partner. Mama ₱500 and Electric ₱500 are pre-suggested each cutoff; add Octopus under Expenses as you pay it.
 
   The note's last line is the **residual**: `Remaining - 1,000` when there is money left in the business, or `Short - 2,000` when the fortnight came up short. Split is now an amount you enter, not whatever was left over.
@@ -84,6 +85,25 @@ Three separate things, with three different settings. Only one of them is public
 **To change the token** (if you ever think it leaked): open the Sheet → Settings tab → replace the `token` value with a new random string → re-enter it on both phones under **More → API setup**. Every old copy stops working immediately.
 
 **The public app files are safe.** They contain no data, no token, and no sheet URL — a stranger who finds your GitHub Pages link sees an empty app in demo mode with nothing in it. If you'd still rather it not be reachable at all, Cloudflare Pages can put an email login in front of it (Cloudflare Access, free for small teams), at the cost of Mama having to sign in.
+
+## Back up the sheet (set up once — strongly recommended)
+
+Everything the business records lives in one Google Sheet. Give it a safety net. This is a **separate little script**, on purpose: copying files needs Drive permission, and permissions in Apps Script are granted per project — keeping this out of the sheet's own script means it can never affect the app the phones use.
+
+1. Go to [script.google.com](https://script.google.com) → **New project** → name it **Octogo Backups**.
+2. Delete the placeholder code, paste in the whole of `apps-script/Backups.gs` from this project.
+3. Copy your sheet's **id** — in the sheet's URL it is the long string between `/d/` and `/edit` — and put it in the `SPREADSHEET_ID` line at the top.
+4. Choose **`setupBackups`** in the toolbar dropdown → **Run** → approve the prompts (it asks for Drive because it makes copies).
+
+You should see a confirmation naming the copy it just made. From then on, **every Monday morning Google copies the sheet by itself** into a Drive folder called **"Octogo Tracker Backups"**, keeping the newest 8 copies (about two months). Older ones go to Drive's trash, which holds them ~30 days more. Nothing needs to be open — not the phones, not a computer. Re-running `setupBackups` never doubles the schedule; it just makes a fresh copy on the spot.
+
+**To restore after a disaster** (sheet corrupted, tabs deleted, account mishap):
+1. Open **"Octogo Tracker Backups"** in Drive → open the newest copy → **File → Make a copy** (work on the copy; leave the backup pristine).
+2. In that copy: **Extensions → Apps Script** → paste in the current `apps-script/Code.gs` and `appsscript.json` → run **`setupSheet`** → **Deploy → New deployment** (Web app, Execute as **Me**, Who has access **Anyone**).
+3. On each phone: **More → API setup** → paste the new Web app URL and the token from the restored sheet's Settings tab → **Test connection**.
+4. Point the backup project at the new sheet: update its `SPREADSHEET_ID` and run `setupBackups` again.
+
+You lose at most the days since the last Monday copy — and those are usually still on the phones, which re-send anything queued on their next sync.
 
 ## Automatic updates (set up once, then never touch it again)
 
@@ -117,13 +137,13 @@ Nothing to do — the app updates itself. When a new version is published, the n
 
 It deliberately **waits** if Mama is mid-entry: a half-typed day is never interrupted, and the update applies after she saves or the next time the app is opened. Nothing queued is ever lost across an update.
 
-To confirm which version a phone is on: **More → About**. Current release: **app 2.7.4**, **script 2.7.4**.
+To confirm which version a phone is on: **More → About**. Current release: **app 2.7.5**, **script 2.7.5**.
 
 ## Updating by hand (if you skip the automation)
 
 The app has **two halves that must be updated separately** — the script in the sheet, and the files on the web host. A change to one usually needs the other, so do both. Takes about 5 minutes.
 
-Current versions: **script 2.7.4**, **app 2.7.4**. You can check what each phone is actually running under **More → About**.
+Current versions: **script 2.7.5**, **app 2.7.5**. You can check what each phone is actually running under **More → About**.
 
 ### 1. Update the script (in the sheet)
 

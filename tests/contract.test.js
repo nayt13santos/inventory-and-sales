@@ -276,6 +276,7 @@ const CONTRACT = {
   'saveExpense':           [['entry_id', 'entryId']],
   'saveStockCount':        [['entry_id', 'entryId'], ['on_hand', 'onHand']],
   'saveStockDelivery':     [['entry_id', 'entryId'], ['on_hand', 'onHand']],
+  'sheetCheck':            [['checked_rows', 'checkedRows']],
   'saveCutoffSplit':       [['entry_id', 'entryId'], ['split_amount', 'splitAmount'], ['per_partner', 'perPartner']],
   'cutoff':                [['note_text', 'noteText']],
   // excluded_lines is the DISPLAY-ONLY block under the note. It enters no other
@@ -451,12 +452,14 @@ function buildFixture() {
   assert.strictEqual(cutoff.ok, true, 'cutoff failed: ' + cutoff.error);
   const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
   assert.strictEqual(boot.ok, true, 'bootstrap failed: ' + boot.error);
+  const check = post(ctx, { token, action: 'sheetCheck', payload: {} });
+  assert.strictEqual(check.ok, true, 'sheetCheck failed: ' + check.error);
   return {
     ctx, ss, token,
     saveDay: saveDay.data, stockDay: stockDay.data,
     saveExpense: saveExpense.data, delivery: delivery.data, payment: payment.data,
     stockCount: stockCount.data, split: split.data,
-    cutoff: cutoff.data, boot: boot.data
+    cutoff: cutoff.data, boot: boot.data, sheetCheck: check.data
   };
 }
 
@@ -763,6 +766,21 @@ test('"Stock came in" lists every product with a stepper — nothing to choose (
   assert.ok(/count whole units \(1, 2, 3\)/.test(save), 'fractions refused naming the product, in the usual words');
 });
 
+test('"Check the sheet" is a pure read that speaks in escaped sentences (v2.7.5)', () => {
+  // The fixture's sheet is HEALTHY (its one legacy delivery row names a real
+  // product): the checker must invent nothing.
+  assert.deepStrictEqual(F.sheetCheck.findings, [], 'a clean sheet stays silent');
+  assert.ok(F.sheetCheck.checked_rows > 0);
+  // The button and its renderer are DOM-bound: source pins.
+  assert.ok(/data-act="sheet-check"/.test(HTML), 'the button exists');
+  assert.ok(HTML.indexOf("(config.apiUrl") < HTML.indexOf('data-act="sheet-check"'),
+    'and only when an API is configured — demo mode has no sheet to check');
+  const run = slab('async function runSheetCheck(btn){', 'let maintPrices = null;');
+  assert.ok(/await api\('sheetCheck', {}\)/.test(run), 'it asks the server, never guesses locally');
+  assert.ok(/esc\(txt\(f\)\)/.test(run), 'every finding is escaped exactly once — findings carry sheet data');
+  assert.ok(/Nothing looks wrong\./.test(run), 'a clean sheet is SAID, not left blank');
+});
+
 test('the Cutoff screen counts the period\'s stock for you (v2.7.4)', () => {
   // The owner's paper "Last Cutoff supplies count", computed. Demo client:
   // every row below is the phone's own arithmetic.
@@ -965,6 +983,7 @@ function contractSamples() {
     'saveExpense':          F.saveExpense,
     'saveStockCount':       F.stockCount,
     'saveStockDelivery':    F.delivery,
+    'sheetCheck':           F.sheetCheck,
     'saveCutoffSplit':      F.split,
     'cutoff':               F.cutoff,
     'cutoff.figures':       F.cutoff.figures,

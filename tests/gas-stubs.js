@@ -198,6 +198,54 @@ class FakeSpreadsheet {
   setSpreadsheetTimeZone(tz) { this.timezone = tz; return this; }
   getSpreadsheetTimeZone() { return this.timezone; }
   getUrl() { return 'https://sheets.example/fake'; }
+  getId() { return 'fake-spreadsheet-id'; }
+  getName() { return 'Octogo Takoyaki - Marikina'; }
+}
+
+/* ---- Drive + trigger stubs (v2.7.5 backups). A fake Drive holding named
+   folders of named files, and a trigger registry, so backupSheet() and
+   setupBackups() are tested for real: copies land, prunes trash the OLDEST,
+   re-arming replaces rather than stacks. ---- */
+function makeFakeDrive() {
+  const folders = new Map(); // name -> folder object
+  const iter = (arr) => { let i = 0; return { hasNext: () => i < arr.length, next: () => arr[i++] }; };
+  const makeFolder = (name) => {
+    const files = [];
+    return {
+      _files: files,
+      getName: () => name,
+      getFiles: () => iter(files.filter(f => !f._trashed)),
+    };
+  };
+  return {
+    _folders: folders,
+    getFoldersByName(name) { return iter(folders.has(name) ? [folders.get(name)] : []); },
+    createFolder(name) { const f = makeFolder(name); folders.set(name, f); return f; },
+    getFileById(id) {
+      return {
+        _id: id,
+        makeCopy(name, folder) {
+          const copy = { _trashed: false, getName: () => name, setTrashed(v) { this._trashed = !!v; } };
+          folder._files.push(copy);
+          return copy;
+        }
+      };
+    }
+  };
+}
+function makeFakeScriptApp() {
+  const triggers = [];
+  return {
+    _triggers: triggers,
+    WeekDay: { MONDAY: 'MONDAY', TUESDAY: 'TUESDAY', SUNDAY: 'SUNDAY' },
+    getProjectTriggers: () => triggers.slice(),
+    deleteTrigger(t) { const i = triggers.indexOf(t); if (i >= 0) triggers.splice(i, 1); },
+    newTrigger(fn) {
+      const make = () => { const t = { getHandlerFunction: () => fn }; triggers.push(t); return t; };
+      const chain = { timeBased: () => chain, everyWeeks: () => chain, onWeekDay: () => chain, atHour: () => chain, create: make };
+      return chain;
+    }
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -229,7 +277,9 @@ function frozenDateClass(now) {
 function makeContext(activeSpreadsheet, now) {
   return {
     Date: frozenDateClass(now || FIXED_NOW),
-    SpreadsheetApp: { getActive: () => activeSpreadsheet },
+    SpreadsheetApp: { getActive: () => activeSpreadsheet, openById: () => activeSpreadsheet },
+    DriveApp: makeFakeDrive(),
+    ScriptApp: makeFakeScriptApp(),
     Utilities: {
       formatDate,
       getUuid: () => crypto.randomUUID()

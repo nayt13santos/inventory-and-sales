@@ -541,7 +541,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.7.4';
+const APP_VERSION = '2.7.5';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -5363,6 +5363,13 @@ function renderIbapa(){
     '<div class="kv"><span class="k">Not saved to the sheet</span><span class="v">' + missing + '</span></div>' +
     (lastSyncError ? '<p class="err">' + esc(lastSyncError) + '</p>' : '') +
     '<button type="button" class="btn block" data-act="sync-now" style="margin-top:10px;">Sync now</button>' +
+    // "Check the sheet" (v2.7.5): the server audits every tab for hand-edit
+    // damage — stray duplicates, orphaned rows, money that disagrees with
+    // itself — and answers in plain sentences. Pure read; needs the API.
+    (config.apiUrl
+      ? '<button type="button" class="btn block" data-act="sheet-check" style="margin-top:10px;">Check the sheet</button>' +
+        '<div id="sheetCheckOut"></div>'
+      : '') +
   '</div>';
 
   // API setup
@@ -5632,6 +5639,35 @@ function saveArrival(){
    list without opening the sheet on a phone. Every save goes through the offline
    queue like any other mutation. The API token is never shown or sent here. ---- */
 let maintOpen = false;
+
+/** "Check the sheet" (v2.7.5): ask the server to audit every tab for
+ *  hand-edit damage and print its sentences. Pure read. The findings carry
+ *  sheet data (product names, item names), so each is escaped exactly once. */
+async function runSheetCheck(btn){
+  const out = $('sheetCheckOut');
+  if (btn) btn.disabled = true;
+  if (out) out.innerHTML = '<p class="hint" style="margin-top:8px;">Checking every tab…</p>';
+  try{
+    const data = await api('sheetCheck', {});
+    const found = asArr(asObj(data).findings);
+    let h;
+    if (!found.length){
+      h = '<div class="card" style="margin-top:10px;"><p style="font-weight:600;">Nothing looks wrong.</p>' +
+        '<p class="hint" style="margin-top:4px;">Every tab was read — no stray duplicates, no orphaned rows, no money that disagrees with itself.</p></div>';
+    } else {
+      h = '<div class="card attn-card" style="margin-top:10px;"><p class="attn-head">' +
+        (found.length === 1 ? '1 thing to look at' : found.length + ' things to look at') + '</p>';
+      for (const f of found) h += '<p style="margin-top:8px;">' + esc(txt(f)) + '</p>';
+      h += '<p class="hint" style="margin-top:10px;">These are sheet edits to make by hand — the app itself never writes rows like these.</p></div>';
+    }
+    if (out) out.innerHTML = h;
+  }catch(err){
+    if (out) out.innerHTML = '<p class="err" style="margin-top:8px;">' + esc(String(err && err.message || err)) + '</p>';
+  }finally{
+    if (btn) btn.disabled = false;
+  }
+}
+
 let maintPrices = null;   // sku -> { price, cheesePrice, active, inCutoff }
 let maintConst = null;    // the six settings, as typed
 let maintStock = null;    // product -> { unit, reorderAt, active }
@@ -6023,6 +6059,7 @@ document.addEventListener('click', (ev) => {
   else if (act === 'pay-backlog') payBacklog();
 
   // More tab
+  else if (act === 'sheet-check') runSheetCheck(el);
   else if (act === 'sync-now'){
     // Drain FIRST so the bootstrap snapshot reflects our mutations —
     // the reverse order can overwrite local edits with pre-edit rows.

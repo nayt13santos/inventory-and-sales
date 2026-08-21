@@ -236,7 +236,7 @@
  *     hand-set value — an explicit 0 included — is never overwritten.
  */
 
-var VERSION = '2.7.4';
+var VERSION = '2.7.5';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -446,6 +446,11 @@ function doPost(e) {
         break;
       case 'range':
         data = apiRange(ss, settings, payload);
+        break;
+      case 'sheetCheck':
+        // Pure read: an integrity audit of the whole sheet for hand-edit
+        // damage (v2.7.5). Writes nothing, moves no money.
+        data = apiSheetCheck(ss);
         break;
       case 'cutoff':
         // dryRun is a pure read (preview); only the archiving variant mutates.
@@ -1533,6 +1538,144 @@ function apiSaveStockItems(ss, payload) {
   });
   upsertRows(ss, TAB.STOCK_ITEMS, out, ['product']);
   return { saved: out.length };
+}
+
+/** Duplicate key values in a tab's RAW rows (the readers dedupe first-wins,
+ *  so only a raw scan can SEE the stray row a hand-edit left behind). */
+function rawDuplicates(ss, tabName, keyCols) {
+  var t = readTabOptional(ss, tabName);
+  var dups = [];
+  if (!t) return dups;
+  var seen = Object.create(null);
+  for (var i = 1; i < t.values.length; i++) {
+    var parts = [];
+    for (var k = 0; k < keyCols.length; k++) parts.push(asDateStr(cellOf(t.values[i], t, keyCols[k])));
+    var key = parts.join('');
+    if (parts.join('') === '') continue;               // blank filler row
+    if (seen[key] && dups.indexOf(parts.join(' + ')) === -1) dups.push(parts.join(' + '));
+    seen[key] = true;
+  }
+  return dups;
+}
+
+/** An integrity audit of the whole sheet (v2.7.5): everything a hand-edit can
+ *  quietly break, said in plain sentences. Pure read — it writes nothing,
+ *  moves no money, and finding nothing is the expected answer. */
+function apiSheetCheck(ss) {
+  var findings = [];
+  var say = function (s) { if (findings.length < 40) findings.push(s); };
+
+  // 1. Stray duplicate rows: every reader keeps the FIRST and ignores the
+  // rest, so a duplicate is data the owner can see in the sheet but the app
+  // silently does not use.
+  var DUP_TABS = [
+    [TAB.PRICES, ['sku'], 'Prices', 'sku'],
+    [TAB.DAILY_LOG, ['date'], 'DailyLog', 'date'],
+    [TAB.STOCK_ITEMS, ['product'], 'StockItems', 'product'],
+    [TAB.CUTOFF_INPUTS, ['start', 'end'], 'CutoffInputs', 'period'],
+    [TAB.EXPENSES, ['entry_id'], 'Expenses', 'entry_id'],
+    [TAB.STOCK_DELIVERIES, ['entry_id'], 'StockDeliveries', 'entry_id'],
+    [TAB.STOCK_COUNTS, ['entry_id'], 'StockCounts', 'entry_id'],
+    [TAB.BACKLOGS, ['name'], 'Backlogs', 'name']
+  ];
+  for (var d = 0; d < DUP_TABS.length; d++) {
+    var dups = rawDuplicates(ss, DUP_TABS[d][0], DUP_TABS[d][1]);
+    for (var i = 0; i < dups.length && i < 5; i++) {
+      say(DUP_TABS[d][2] + ': two rows share the ' + DUP_TABS[d][3] + ' "' + dups[i] +
+        '" — the app uses the first and ignores the rest. Delete the stray row.');
+    }
+  }
+
+  // 2. Prices that book money at nothing, or break the excluded-sku rule.
+  var prices = readPrices(ss).list;
+  for (var p = 0; p < prices.length; p++) {
+    var pr = prices[p];
+    if (pr.active && !(pr.price > 0)) {
+      say('Prices: "' + pr.label + '" is active with price ' + pr.price +
+        ' — every sale of it books ₱0. Set a price or set active to FALSE.');
+    }
+    if (pr.active && pr.group === 'box' && !(pr.cheese_price > 0)) {
+      say('Prices: "' + pr.label + '" is an active box with cheese price ' + pr.cheese_price +
+        ' — every cheese sale books ₱0.');
+    }
+    if (pr.group === 'box' && !pr.in_cutoff) {
+      say('Prices: "' + pr.label + '" is a box sku marked out of the cutoff — an excluded item must be group=simple. The app refuses saves against it.');
+    }
+  }
+
+  // 3. Expenses that would fold into the wrong note line.
+  var backlogNames = Object.create(null);
+  var backlogs = readBacklogs(ss, readExpenses(ss));
+  for (var b = 0; b < backlogs.length; b++) backlogNames[backlogs[b].name] = true;
+  var expenses = readExpenses(ss);
+  var badCat = 0, badRef = 0, badAmt = 0;
+  for (var e = 0; e < expenses.length; e++) {
+    var x = expenses[e];
+    if (EXPENSE_CATEGORIES.indexOf(x.category) === -1 && badCat++ < 3) {
+      say('Expenses: "' + (x.item || x.entry_id) + '" (' + x.date + ') has category "' + x.category +
+        '" — not one the note knows, so its ₱' + x.amount + ' folds into "Other payments".');
+    }
+    if (x.category === 'Backlog' && !backlogNames[x.backlog_ref] && badRef++ < 3) {
+      say('Expenses: the backlog payment "' + (x.item || x.entry_id) + '" (' + x.date + ') points at "' +
+        (x.backlog_ref || 'nothing') + '", which is not a Backlogs row — no balance drops for it.');
+    }
+    if (!(x.amount > 0) && badAmt++ < 3) {
+      say('Expenses: "' + (x.item || x.entry_id) + '" (' + x.date + ') has amount ' + x.amount +
+        ' — zero or negative money makes the note refuse to generate.');
+    }
+  }
+
+  // 4. Detail rows whose day is missing: saveDay writes DailyLog LAST, so an
+  // orphan means a save died halfway (or a hand-deleted day left debris).
+  var dayDates = Object.create(null);
+  var days = readDays(ss, 0);
+  for (var dd = 0; dd < days.length; dd++) dayDates[days[dd].date] = true;
+  var orphanCounts = Object.create(null);
+  var counts = readCounts(ss, null);
+  for (var c = 0; c < counts.length; c++) {
+    if (!dayDates[counts[c].date]) orphanCounts[counts[c].date] = true;
+  }
+  var orphanList = Object.keys(orphanCounts);
+  for (var o = 0; o < orphanList.length && o < 3; o++) {
+    say('DailyCounts: rows exist for ' + orphanList[o] + ' but DailyLog has no such day — a save died halfway, or the day row was deleted by hand. Re-save that day from the app.');
+  }
+
+  // 5. Stock rows naming products the stock list does not know: their
+  // quantities count into NOTHING on the Stock on hand card.
+  var known = readStockItems(ss).map;
+  var UNKNOWN = [
+    [readStockUsage(ss), 'StockUsage'],
+    [readStockCounts(ss), 'StockCounts'],
+    [readStockDeliveries(ss), 'StockDeliveries']
+  ];
+  for (var u = 0; u < UNKNOWN.length; u++) {
+    var said = 0;
+    for (var r = 0; r < UNKNOWN[u][0].length; r++) {
+      var row = UNKNOWN[u][0][r];
+      if (row.product && !known[row.product] && said++ < 3) {
+        say(UNKNOWN[u][1] + ': "' + row.product + '" (' + row.date + ') is not on the StockItems list — its quantity counts into no on-hand figure. Fix the name, or add the product.');
+      }
+    }
+  }
+  for (var e2 = 0; e2 < expenses.length; e2++) {
+    var xe = expenses[e2];
+    if (xe.stock_product && !known[xe.stock_product]) {
+      say('Expenses: the legacy delivery on "' + (xe.item || xe.entry_id) + '" (' + xe.date + ') names "' +
+        xe.stock_product + '", which is not on the StockItems list — those units count into no on-hand figure.');
+      break;
+    }
+  }
+
+  // 6. Days whose stored money disagrees with itself.
+  for (var d2 = 0; d2 < days.length; d2++) {
+    var day = days[d2];
+    if (Math.abs(day.total - day.cash - day.gcash) > 0.01) {
+      say('DailyLog: ' + day.date + ' stores Total ' + day.total + ' but Cash ' + day.cash +
+        ' + GCash ' + day.gcash + ' — the cells were edited by hand. Re-save that day from the app.');
+    }
+  }
+
+  return { findings: findings, checked_rows: expenses.length + days.length + counts.length };
 }
 
 function apiRange(ss, settings, payload) {
