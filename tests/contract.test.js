@@ -144,7 +144,7 @@ const S_MAINT     = slab('function priceRowError(pr, m){', 'function saveMaintPr
 // phone so it never queues a day the server will refuse.
 const S_VALIDATE  = slab('function isWhole(v){', "/** 'sku:box4' -> 'err-sku-box4'");
 // v2.7.4: the Cutoff screen's stock block, plus the window guard it consults.
-const S_PREVINC   = slab('function previewIncomplete(per){', 'function cutoffExpenseDate(per){');
+const S_PREVINC   = slab('function missingDaysInPeriod(per){', 'function cutoffExpenseDate(per){');
 const S_STOCKCUT  = slab('function stockCutoffHTML(per){', 'function excludedBlockHTML(f){');
 
 function loadClient() {
@@ -217,6 +217,7 @@ return {
   // for a deleted expense (the stock ledger must move at once), the blank-
   // omitting settings payload, and the phone's own note refusal.
   cutoffOnDay, storedPricesFor, priceOnDay, applyLocalDeleteExpense,
+  missingDaysInPeriod, previewIncomplete, addDays, todayStr,
   maintSettingsPayload, noteRefusal,
   // v2.7.0: the SOD prefill's lookup, the one rule for the GCash card starting
   // open, the expense form's picklist, and the two display-only builders.
@@ -779,6 +780,48 @@ test('"Check the sheet" is a pure read that speaks in escaped sentences (v2.7.5)
   assert.ok(/await api\('sheetCheck', {}\)/.test(run), 'it asks the server, never guesses locally');
   assert.ok(/esc\(txt\(f\)\)/.test(run), 'every finding is escaped exactly once — findings carry sheet data');
   assert.ok(/Nothing looks wrong\./.test(run), 'a clean sheet is SAID, not left blank');
+});
+
+test('the Cutoff screen names the days with nothing in them (v2.7.6)', () => {
+  // The silence this closes, from the owner's real sheet: Aug 7-15 had no entry
+  // at all, so a fortnight of missing work read as a lean fortnight and the
+  // preview said "Short". Everything below is measured against the CLIENT's own
+  // today — the first cut of this test hardcoded dates and broke when the clock
+  // rolled past midnight mid-session, which is exactly the bug class it guards.
+  const app = loadClient();
+  const T = app.todayStr();
+  const day = (d, closed) => app.applyLocalDay({ date: d, closed: !!closed, staff: 'Mama',
+    customAmount: closed ? 0 : 500, customGcash: 0, notes: '', counts: [], stock: [],
+    entryId: 'md-' + d });
+  const per = { start: app.addDays(T, -3), end: app.addDays(T, 5) };
+  day(app.addDays(T, -3));
+  day(app.addDays(T, -2), true);                  // dark on purpose: that IS an answer
+  assert.deepStrictEqual(app.missingDaysInPeriod(per), [app.addDays(T, -1), T],
+    'only the days with nothing at all, and never past today');
+
+  // A period this phone cannot fully see says NOTHING rather than inventing
+  // gaps out of history it does not hold.
+  app.cfg.apiUrl = 'https://api.example/exec';
+  app.state.window_start = app.addDays(T, -1);
+  assert.deepStrictEqual(app.missingDaysInPeriod(per), [],
+    'no guessing outside the snapshot window');
+  app.state.window_start = app.addDays(T, -30);
+  assert.strictEqual(app.missingDaysInPeriod(per).length, 2, 'and it speaks again once it can see');
+
+  // Month, year and leap rolls, since the walk is date arithmetic.
+  assert.strictEqual(app.addDays('2026-08-31', 1), '2026-09-01');
+  assert.strictEqual(app.addDays('2026-12-31', 1), '2027-01-01');
+  assert.strictEqual(app.addDays('2024-02-28', 1), '2024-02-29');
+
+  // Source pins for the DOM-bound half: the card, both actions, the
+  // no-purchases line — and the rule that none of it blocks the note.
+  assert.match(HTML, /const blanks = missingDaysInPeriod\(per\);/);
+  assert.match(HTML, /data-act="cut-open-day"/);
+  assert.match(HTML, /data-act="cut-closed-day"/);
+  assert.match(HTML, /No purchases are logged in this cutoff yet\./);
+  const gen = slab('async function generateNote(){', 'function copyNote(){');
+  assert.ok(!/missingDaysInPeriod/.test(gen),
+    'an unlogged day may be deliberate — it is said, never used to refuse the note');
 });
 
 test('the Cutoff screen counts the period\'s stock for you (v2.7.4)', () => {

@@ -541,7 +541,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.7.5';
+const APP_VERSION = '2.7.6';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -1270,6 +1270,14 @@ function isDateStr(s){ return /^\d{4}-\d{2}-\d{2}$/.test(String(s == null ? '' :
 function d2parts(s){ const [y,m,d] = String(s == null ? '' : s).split('-').map(Number); return { y, m, d }; }
 function partsToStr(y,m,d){ return y + '-' + String(m).padStart(2,'0') + '-' + String(d).padStart(2,'0'); }
 function lastDayOf(y,m){ return new Date(y, m, 0).getDate(); }
+/** The next calendar day, month and year rolls included. Built from the parts
+ *  rather than a timestamp, so it can never drift with a timezone (v2.7.6). */
+function addDays(s, n){
+  if (!isDateStr(s)) return s;
+  const p = d2parts(s);
+  const d = new Date(Date.UTC(p.y, p.m - 1, p.d + num(n), 12, 0, 0));
+  return partsToStr(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
+}
 // Noon UTC is 8pm in Manila on the same calendar day, so the weekday and
 // month names always belong to the date the user actually picked.
 function dateAt(s){ const p = d2parts(s); return new Date(Date.UTC(p.y, p.m-1, p.d, 12, 0, 0)); }
@@ -4824,6 +4832,29 @@ function cutoffMissingMoney(per){
     isDateStr(a.date) && inPeriod(a.date, per));
 }
 
+/** Days in this period with NO entry at all — not saved, not marked closed,
+ *  simply never opened (v2.7.6). This is the quiet way a cutoff comes out
+ *  short: the note is built from the days that exist, so nine unlogged nights
+ *  read as a lean fortnight rather than as missing work. A day marked CLOSED
+ *  is entered — it says "the stall was dark", which is an answer. Never looks
+ *  past today (the rest of the current period has not happened), and says
+ *  nothing at all for a period this phone cannot fully see: guessing there
+ *  would invent gaps out of history it simply does not hold. Advisory only —
+ *  an unlogged day may be perfectly deliberate, so it never blocks the note.
+ */
+function missingDaysInPeriod(per){
+  const p = asObj(per);
+  if (!isDateStr(p.start) || !isDateStr(p.end)) return [];
+  if (previewIncomplete(per)) return [];
+  const today = todayStr();
+  const last = p.end < today ? p.end : today;
+  const out = [];
+  for (let d = p.start; d <= last; d = addDays(d, 1)){
+    if (!asObj(state.days)[d]) out.push(d);
+  }
+  return out;
+}
+
 /** Whether this phone can even SEE the whole of a period. The bootstrap
  *  snapshot covers a stated window; a period that starts before it may have
  *  days this phone has never held (or pruned), so the preview cannot promise
@@ -4887,6 +4918,29 @@ function renderCutoff(){
       '</p><p>' + esc(missingMoney.map(a => fmtShort(a.date)).join(', ')) +
       '. The figures below and the sheet do not agree about ' + (one ? 'it' : 'them') +
       ' — fix ' + (one ? 'it' : 'them') + ' from the red card under More before you make the note.</p></div>';
+  }
+
+  // Days with nothing in them, and a period with no purchases at all: the two
+  // silences that make a note wrong without anything looking wrong (v2.7.6).
+  const blanks = missingDaysInPeriod(per);
+  if (blanks.length){
+    const one = blanks.length === 1;
+    h += '<div class="card" style="border-color:var(--accent);">' +
+      '<p style="font-weight:600;">' + (one ? '1 day has nothing entered' : blanks.length + ' days have nothing entered') + '</p>' +
+      '<p class="hint" style="margin-top:4px;">The figures below are built from the days that ARE entered, so ' +
+        (one ? 'this day is' : 'these days are') + ' simply missing from them. Enter ' + (one ? 'it' : 'them') +
+        ', or say the stall was closed — either way the note stops guessing.</p>';
+    for (const d of blanks.slice(0, 12)){
+      h += '<div class="gx-item"><div class="gx-main"><div class="gx-name">' + esc(fmtShort(d)) + '</div></div>' +
+        '<button type="button" class="btn small" data-act="cut-open-day" data-date="' + esc(d) + '">Enter it</button>' +
+        '<button type="button" class="btn small" data-act="cut-closed-day" data-date="' + esc(d) + '">Was closed</button>' +
+      '</div>';
+    }
+    if (blanks.length > 12) h += '<p class="hint" style="margin-top:8px;">…and ' + (blanks.length - 12) + ' more.</p>';
+    h += '</div>';
+  }
+  if (!num(f.supplies) && !num(f.octopus) && !num(f.other) && !num(f.mama) && !num(f.electric)){
+    h += '<div class="card"><p class="hint">No purchases are logged in this cutoff yet. If money has gone out — supplies, octopus, the electric bill — it is missing from every figure below.</p></div>';
   }
 
   h += '<div class="card"><div class="period-nav">' +
@@ -6049,6 +6103,31 @@ document.addEventListener('click', (ev) => {
   else if (act === 'gastos-del') deleteGasto(el.dataset.id);
 
   // Cutoff
+  // A blank day, opened for entry — or answered with "the stall was dark".
+  else if (act === 'cut-open-day'){
+    const d = txt(el.dataset.date);
+    if (!isDateStr(d)) return;
+    stashBentaDraft();
+    loadBentaForm(d);
+    showTab('benta');
+    toast('Opened ' + fmtShort(d) + '. Enter the night, then tap Save day.');
+  }
+  else if (act === 'cut-closed-day'){
+    const d = txt(el.dataset.date);
+    if (!isDateStr(d)) return;
+    if (!confirm('Mark ' + fmtShort(d) + ' as a closed day? No sales, and no wage for that day.')) return;
+    // The same shape the Sales screen sends for a closed day: the server zeroes
+    // the money, the counts and the wage from `closed` alone.
+    const payload = { date: d, closed: true, staff: txt(asArr(staffList())[0]),
+      customAmount: 0, customGcash: 0, gcashConverted: 0, lidBoxes: 0, customBoxes: [],
+      notes: '', counts: [], stock: [], entryId: uuid() };
+    applyLocalDay(payload);
+    enqueue('saveDay', payload);
+    persistState();
+    renderCutoff();
+    toast(fmtShort(d) + ' marked closed.');
+    drainQueue();
+  }
   else if (act === 'cutoff-prev'){ cutoffPer = shiftPeriod(cutoffPer, -1); renderCutoff(); }
   else if (act === 'cutoff-next'){ cutoffPer = shiftPeriod(cutoffPer, 1); renderCutoff(); }
   else if (act === 'cutoff-suggest') addSuggestedExpense(el.dataset.cat, el.dataset.item, el.dataset.amt);

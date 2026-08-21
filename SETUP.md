@@ -61,6 +61,7 @@ Open the Google Sheet and edit these tabs directly — the app picks up changes 
   There is **no GCash total to type** — the app adds it up from what you entered and shows it on the receipt, so you can check it against your GCash history. There is no "supplies bought today" card any more either: every purchase goes under **Expenses**, so nothing can be counted twice. Works with no signal; it syncs later.
 - **Adding an expense:** one tap, one amount, done. The form is a single row of buckets — **Octopus · Veggies · Eggs · Flour · Box · Other** — plus the amount and the date. Nothing to type: a named bucket files under **Supplies** with that name, Octopus and Other file under their own note lines. Edit the middle of that list under More → Maintenance (like the staff list). Mama ₱500, Electric ₱500 and backlog payments have their own buttons on the **Cutoff** screen, where that money is actually decided.
 - **When a delivery arrives:** More → **Stock on hand** → **"Stock came in"** → every product is listed; tap **+** on what arrived (whole units), one Save for the lot. Quantity only — no money, because the goods usually arrive before they are paid for. **Paying the supplier later** (whenever that happens) is a normal **Supplies** expense on the Expenses screen, like any other money leaving. Two events, two entries, and nothing can be counted twice: the quantity lives in your stock, the money in Expenses, each on the day it actually happened. (Deliveries you logged the old way — on an expense row — still count in your stock forever.)
+- **On the Cutoff screen, before you make the note:** if any day in the period has **nothing entered**, the app lists those dates at the top with two buttons each — **Enter it** (opens that night) or **Was closed** (records a dark day). It never stops you making the note; it just refuses to let a missing night look like a slow one. A period with no purchases logged says so too.
 - **Anytime you're suspicious of the sheet** (after hand-edits): **More → Check the sheet** — the server audits every tab for stray duplicates, orphaned rows and money that disagrees with itself, in plain sentences.
 - **You, at cutoff:** Cutoff tab → check the preview (below the note sits **Stock this cutoff** — your old paper supplies count, done for you from what was logged) → adjust **Split** if this fortnight is different (it remembers per cutoff, ₱1,500 each by default) → pay a backlog from the **Pay a backlog** card if there is anything left → **Generate cutoff note** → Copy or Share it to your partner. Mama ₱500 and Electric ₱500 are pre-suggested each cutoff; add Octopus under Expenses as you pay it.
 
@@ -143,13 +144,13 @@ Nothing to do — the app updates itself. When a new version is published, the n
 
 It deliberately **waits** if Mama is mid-entry: a half-typed day is never interrupted, and the update applies after she saves or the next time the app is opened. Nothing queued is ever lost across an update.
 
-To confirm which version a phone is on: **More → About**. Current release: **app 2.7.5**, **script 2.7.5**.
+To confirm which version a phone is on: **More → About**. Current release: **app 2.7.6**, **script 2.7.6**.
 
 ## Updating by hand (if you skip the automation)
 
 The app has **two halves that must be updated separately** — the script in the sheet, and the files on the web host. A change to one usually needs the other, so do both. Takes about 5 minutes.
 
-Current versions: **script 2.7.5**, **app 2.7.5**. You can check what each phone is actually running under **More → About**.
+Current versions: **script 2.7.6**, **app 2.7.6**. You can check what each phone is actually running under **More → About**.
 
 ### 1. Update the script (in the sheet)
 
