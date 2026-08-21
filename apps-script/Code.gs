@@ -1558,6 +1558,30 @@ function rawDuplicates(ss, tabName, keyCols) {
   return dups;
 }
 
+/** Date cells that are NOT a date the readers can use. asDateStr normalises
+ *  the shapes it knows and otherwise returns the cell VERBATIM — so a hand-
+ *  retyped date like "28-07-2026" survives into every reader as if it were a
+ *  date, and because every period filter is a STRING compare, that row falls
+ *  outside every cutoff forever. Nothing else in this audit can see it: the
+ *  row is present, its money is real, and no total complains (v2.7.5). */
+function badDateCells(ss, tabName, cols) {
+  var t = readTabOptional(ss, tabName);
+  var out = [];
+  if (!t) return out;
+  for (var i = 1; i < t.values.length && out.length < 5; i++) {
+    for (var c = 0; c < cols.length; c++) {
+      var raw = cellOf(t.values[i], t, cols[c]);
+      if (raw === '' || raw === null || raw === undefined) continue;   // blank is fine
+      var norm = asDateStr(raw);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(norm)) {
+        out.push({ row: i + 1, col: cols[c], shown: asStr(raw) });
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 /** An integrity audit of the whole sheet (v2.7.5): everything a hand-edit can
  *  quietly break, said in plain sentences. Pure read — it writes nothing,
  *  moves no money, and finding nothing is the expected answer. */
@@ -1621,7 +1645,8 @@ function apiSheetCheck(ss) {
     }
     if (!(x.amount > 0) && badAmt++ < 3) {
       say('Expenses: "' + (x.item || x.entry_id) + '" (' + x.date + ') has amount ' + x.amount +
-        ' — zero or negative money makes the note refuse to generate.');
+        ' — the app never saves money like that, so a hand-edit made it. Fix or delete the row; ' +
+        'if it drags a whole note category below zero, the note refuses to generate.');
     }
   }
 
@@ -1672,6 +1697,28 @@ function apiSheetCheck(ss) {
     if (Math.abs(day.total - day.cash - day.gcash) > 0.01) {
       say('DailyLog: ' + day.date + ' stores Total ' + day.total + ' but Cash ' + day.cash +
         ' + GCash ' + day.gcash + ' — the cells were edited by hand. Re-save that day from the app.');
+    }
+  }
+
+  // 7. Date cells that are not dates. The most common hand-edit there is, and
+  // the most silent: the row keeps its money and every period filter skips it,
+  // so a cutoff is quietly short and nothing else here would ever notice.
+  var DATE_TABS = [
+    [TAB.DAILY_LOG, ['date'], 'DailyLog'],
+    [TAB.DAILY_COUNTS, ['date'], 'DailyCounts'],
+    [TAB.EXPENSES, ['date'], 'Expenses'],
+    [TAB.STOCK_USAGE, ['date'], 'StockUsage'],
+    [TAB.STOCK_COUNTS, ['date'], 'StockCounts'],
+    [TAB.STOCK_DELIVERIES, ['date'], 'StockDeliveries'],
+    [TAB.CUTOFF_INPUTS, ['start', 'end'], 'CutoffInputs'],
+    [TAB.BACKLOGS, ['start_date'], 'Backlogs']
+  ];
+  for (var dt = 0; dt < DATE_TABS.length; dt++) {
+    var bad = badDateCells(ss, DATE_TABS[dt][0], DATE_TABS[dt][1]);
+    for (var bi = 0; bi < bad.length; bi++) {
+      say(DATE_TABS[dt][2] + ': row ' + bad[bi].row + ' has "' + bad[bi].shown +
+        '" in its ' + bad[bi].col + ' cell, which is not a date the app can read — ' +
+        'that row is skipped by every cutoff. Retype it as yyyy-mm-dd (2026-07-28).');
     }
   }
 

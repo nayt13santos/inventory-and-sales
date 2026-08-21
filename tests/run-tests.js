@@ -4368,6 +4368,9 @@ test('setupBackups arms ONE weekly trigger (re-running replaces, never stacks) a
   ctx.setupBackups();
   assert.strictEqual(ctx.ScriptApp._triggers.length, 1, 're-arming must replace, not stack');
   assert.strictEqual(ctx.ScriptApp._triggers[0].getHandlerFunction(), 'backupSheet');
+  assert.strictEqual(ctx.ScriptApp._triggers[0]._tz, 'Asia/Manila',
+    'the hour is pinned to Manila — atHour alone reads the NEW project\'s timezone, rarely Manila');
+  assert.ok(ctx.Logger, 'and success is logged, since the editor never shows a return value');
   const folder = ctx.DriveApp._folders.get('Octogo Tracker Backups');
   assert.ok(folder, 'the Drive folder was created');
   assert.strictEqual(folder._files.filter(f => !f._trashed).length, 1,
@@ -4409,8 +4412,10 @@ test('the BOUND script never touches Drive or triggers — the phones\' permissi
   const backups = fs.readFileSync(BACKUPS_GS, 'utf8');
   assert.ok(/DriveApp/.test(backups) && /ScriptApp/.test(backups),
     'the standalone project is where those live');
-  assert.ok(/SpreadsheetApp\.openById\(SPREADSHEET_ID\)/.test(backups),
+  assert.ok(/DriveApp\.getFileById\(SPREADSHEET_ID\)/.test(backups),
     'it reaches the sheet by id — it is not bound to it');
+  assert.ok(!/SpreadsheetApp\.\w/.test(backups),
+    'and never through SpreadsheetApp: copying a file must not ask for permission to READ the sheet');
 });
 
 test('a backup project without its sheet id refuses in one plain sentence', () => {
@@ -4418,6 +4423,38 @@ test('a backup project without its sheet id refuses in one plain sentence', () =
   assert.throws(() => ctx.setupBackups(), /Put the sheet id in SPREADSHEET_ID first/);
   assert.strictEqual(ctx.ScriptApp._triggers.length, 0, 'and arms nothing');
   assert.strictEqual(ctx.DriveApp._folders.size, 0, 'and creates no folder');
+});
+
+test('sheetCheck: a date retyped by hand is CAUGHT — the row that no cutoff can see', () => {
+  // The gate's SC-1. asDateStr normalises what it knows and returns anything
+  // else verbatim, so a retyped date survives into every reader AS a date —
+  // and because period filters are string compares, the row's money falls
+  // outside every cutoff, forever, with no total complaining.
+  const { ctx, ss, token } = freshSetup();
+  ctx.appendObjects(ss, 'Expenses', [{ date: '28-07-2026', category: 'Supplies',
+    item: 'Eggs', amount: 500, backlog_ref: '', notes: '', entry_id: 'sc1-e', updated_at: '' }]);
+  // Precondition: the money really is invisible to the cutoff it belongs to.
+  const cut = post(ctx, { token, action: 'cutoff',
+    payload: { start: '2026-07-16', end: '2026-07-31', dryRun: true } });
+  assert.strictEqual(cut.ok, true, cut.error);
+  assert.strictEqual(cut.data.figures.supplies, 0, 'the ₱500 is in no period — that is the whole danger');
+
+  const r = post(ctx, { token, action: 'sheetCheck', payload: {} });
+  assert.strictEqual(r.ok, true, r.error);
+  const said = r.data.findings.join('\n');
+  assert.match(said, /Expenses: row \d+ has "28-07-2026" in its date cell, which is not a date the app can read/);
+  assert.match(said, /skipped by every cutoff\. Retype it as yyyy-mm-dd \(2026-07-28\)\./);
+
+  // Every date-bearing tab is watched, not just Expenses — and the shapes
+  // asDateStr DOES normalise stay silent, because those rows are fine.
+  ctx.appendObjects(ss, 'StockDeliveries', [{ date: 'July 28 2026', product: 'Bonito',
+    qty: 1, entry_id: 'sc1-d', updated_at: '' }]);
+  ctx.appendObjects(ss, 'StockCounts', [{ date: '2026/7/28', product: 'Bonito',
+    counted_qty: 2, entry_id: 'sc1-c', updated_at: '' }]);
+  const r2 = post(ctx, { token, action: 'sheetCheck', payload: {} });
+  const said2 = r2.data.findings.join('\n');
+  assert.match(said2, /StockDeliveries: row \d+ has "July 28 2026"/);
+  assert.ok(!/StockCounts/.test(said2), '2026/7/28 normalises to a real date — a healthy row must stay silent');
 });
 
 test('sheetCheck: a healthy sheet answers with NO findings, and writes nothing', () => {

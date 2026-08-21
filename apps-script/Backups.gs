@@ -43,20 +43,33 @@ function setupBackups() {
   }
   // The documented weekly shape: onWeekDay + atHour. Google fires it within
   // that hour; no everyWeeks() alongside it, which errors on some runtimes.
+  // inTimezone is NOT optional here: atHour is read in the SCRIPT PROJECT's
+  // timezone, and this project is one the owner creates fresh — it inherits
+  // whatever zone Google gives it, which is rarely Manila. Without this the
+  // "Monday 6am" promise can land ~15 hours off (v2.7.5).
   ScriptApp.newTrigger('backupSheet').timeBased()
-    .onWeekDay(ScriptApp.WeekDay.MONDAY).atHour(6).create();
+    .onWeekDay(ScriptApp.WeekDay.MONDAY).atHour(6).inTimezone(TZ).create();
   var made = backupSheet();
-  return 'Weekly backup armed (Mondays, ~6am Manila). ' + made;
+  // The Apps Script editor NEVER displays a return value, so a successful run
+  // would print nothing while a failure prints a red stack — success has to be
+  // as loud as failure or the owner cannot tell it worked (v2.7.5).
+  var said = 'Weekly backup armed (Mondays, ~6am Manila). ' + made;
+  Logger.log(said);
+  return said;
 }
 
 /** One dated copy per day however many times this runs, then the OLDEST
  *  copies beyond BACKUP_KEEP go to the trash. The date lives in the NAME and
  *  is the sort key, so nothing depends on Drive's own timestamps. */
 function backupSheet() {
-  var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  // The sheet as a DRIVE FILE, never through SpreadsheetApp: its name is all
+  // this needs, and getFileById gives it without the project ever asking for
+  // permission to read or write spreadsheet CONTENT. Narrower is safer — this
+  // project can copy the file and nothing else (v2.7.5).
+  var file = DriveApp.getFileById(SPREADSHEET_ID);
   var it = DriveApp.getFoldersByName(BACKUP_FOLDER);
   var folder = it.hasNext() ? it.next() : DriveApp.createFolder(BACKUP_FOLDER);
-  var name = 'Backup ' + Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd') + ' — ' + ss.getName();
+  var name = 'Backup ' + Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd') + ' — ' + file.getName();
 
   var backups = [];
   var exists = false;
@@ -68,12 +81,14 @@ function backupSheet() {
     if (fn.indexOf('Backup ') === 0) backups.push(f);
   }
   if (!exists) {
-    backups.push(DriveApp.getFileById(SPREADSHEET_ID).makeCopy(name, folder));
+    backups.push(file.makeCopy(name, folder));
   }
   // Newest names sort first; everything past BACKUP_KEEP is trashed — Drive's
   // own trash then holds it ~30 days, a deliberate second net over a hard delete.
   backups.sort(function (a, b) { return a.getName() < b.getName() ? 1 : -1; });
   for (var k = BACKUP_KEEP; k < backups.length; k++) backups[k].setTrashed(true);
-  return 'Made "' + name + '" in Drive folder "' + BACKUP_FOLDER + '" (' +
+  var said = 'Made "' + name + '" in Drive folder "' + BACKUP_FOLDER + '" (' +
     Math.min(backups.length, BACKUP_KEEP) + ' kept).';
+  Logger.log(said);
+  return said;
 }

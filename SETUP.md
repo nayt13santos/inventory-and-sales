@@ -93,9 +93,9 @@ Everything the business records lives in one Google Sheet. Give it a safety net.
 1. Go to [script.google.com](https://script.google.com) → **New project** → name it **Octogo Backups**.
 2. Delete the placeholder code, paste in the whole of `apps-script/Backups.gs` from this project.
 3. Copy your sheet's **id** — in the sheet's URL it is the long string between `/d/` and `/edit` — and put it in the `SPREADSHEET_ID` line at the top.
-4. Choose **`setupBackups`** in the toolbar dropdown → **Run** → approve the prompts (it asks for Drive because it makes copies).
+4. Choose **`setupBackups`** in the toolbar dropdown → **Run** → approve the prompts (it asks for Drive because it makes copies). Google will likely show a scary **"Google hasn't verified this app"** screen — that is just because *you* wrote this script and never published it. Choose **Advanced → Go to Octogo Backups (unsafe)** and continue, exactly like you did for the tracker's own script.
 
-You should see a confirmation naming the copy it just made. From then on, **every Monday morning Google copies the sheet by itself** into a Drive folder called **"Octogo Tracker Backups"**, keeping the newest 8 copies (about two months). Older ones go to Drive's trash, which holds them ~30 days more. Nothing needs to be open — not the phones, not a computer. Re-running `setupBackups` never doubles the schedule; it just makes a fresh copy on the spot.
+Look at the **Execution log** panel that opens at the bottom: it prints a line naming the copy it just made ("Made \"Backup 2026-08-21 — …\""). That line is your proof it worked — the editor never shows anything else on success. From then on, **every Monday morning Google copies the sheet by itself** into a Drive folder called **"Octogo Tracker Backups"**, keeping the newest 8 copies (about two months). Older ones go to Drive's trash, which holds them ~30 days more. Nothing needs to be open — not the phones, not a computer. Re-running `setupBackups` never doubles the schedule; it just makes a fresh copy on the spot.
 
 **To restore after a disaster** (sheet corrupted, tabs deleted, account mishap):
 1. Open **"Octogo Tracker Backups"** in Drive → open the newest copy → **File → Make a copy** (work on the copy; leave the backup pristine).
@@ -104,6 +104,10 @@ You should see a confirmation naming the copy it just made. From then on, **ever
 4. Point the backup project at the new sheet: update its `SPREADSHEET_ID` and run `setupBackups` again.
 
 You lose at most the days since the last Monday copy — and those are usually still on the phones, which re-send anything queued on their next sync.
+
+**Two things worth knowing about the weekly run:**
+- **It uses a little Drive space.** Each copy counts toward your Google storage (and trashed ones keep counting ~30 days), but this sheet is well under a megabyte, so eight copies is a few MB — nothing. It only matters if your Drive is *already* full: then the copy fails.
+- **If a Monday ever fails, Google emails you** ("Summary of failures for Google Apps Script") — that email is the alarm, so don't filter it away. A 20-second habit covers the rest: open the **Octogo Tracker Backups** folder once a month and check the newest name carries a recent date.
 
 ## Automatic updates (set up once, then never touch it again)
 

@@ -224,6 +224,9 @@ function makeFakeDrive() {
     getFileById(id) {
       return {
         _id: id,
+        // A Google Sheet IS a Drive file: its name is readable here, which is
+        // why the backup project needs no spreadsheet permission at all.
+        getName: () => 'Octogo Takoyaki - Marikina',
         makeCopy(name, folder) {
           const copy = { _trashed: false, getName: () => name, setTrashed(v) { this._trashed = !!v; } };
           folder._files.push(copy);
@@ -241,8 +244,9 @@ function makeFakeScriptApp() {
     getProjectTriggers: () => triggers.slice(),
     deleteTrigger(t) { const i = triggers.indexOf(t); if (i >= 0) triggers.splice(i, 1); },
     newTrigger(fn) {
-      const make = () => { const t = { getHandlerFunction: () => fn }; triggers.push(t); return t; };
-      const chain = { timeBased: () => chain, everyWeeks: () => chain, onWeekDay: () => chain, atHour: () => chain, create: make };
+      const make = () => { const t = { getHandlerFunction: () => fn, _tz: chain._tz }; triggers.push(t); return t; };
+      const chain = { timeBased: () => chain, everyWeeks: () => chain, onWeekDay: () => chain,
+        atHour: () => chain, inTimezone: (tz) => { chain._tz = tz; return chain; }, create: make };
       return chain;
     }
   };
