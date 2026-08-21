@@ -725,6 +725,14 @@ function normPrice(p){
     price: num(p.price),
     cheese_price: (cheese === '' || cheese == null) ? '' : num(cheese),
     active: truthy(p.active),
+    // What the CONTAINER costs (v2.8.0). Read RAW, exactly like reorder_at and
+    // for a sharper reason: blank means "nobody has said what this box costs"
+    // and 0 means "it costs nothing", and the costing screen must be able to
+    // tell those apart — a blank leaves the sku OUT of the figures and names
+    // it, a 0 puts it in at nothing. Coercing a blank to 0 here would come
+    // straight back on the next savePrices and fill the owner's empty cells
+    // with a cost he never gave.
+    box_cost: rawNum(pick(p, 'box_cost', 'boxCost')),
     // FALSE = sold and counted as usual, but its money stays OUT of every cutoff
     // figure. Read with inCutoffFlag, NOT truthy: a blank or missing value is
     // TRUE. `pick` hands a real `false` straight through, so an excluded sku
@@ -843,6 +851,11 @@ function normStockItem(s){
     // Blank = no warning at all. Kept blank so the Maintenance field can show
     // "not set" instead of a 0 the owner never typed.
     reorder_at: rawNum(pick(s, 'reorder_at', 'reorderAt')),
+    // What one of THIS unit costs (v2.8.0) — the pack, the gallon. Raw for the
+    // same reason reorder_at is: a blank is "no cost known", which keeps this
+    // product's consumption out of the costing and says so, and it must never
+    // arrive back at the sheet as a ₱0 that prices a sack of flour at nothing.
+    unit_cost: rawNum(pick(s, 'unit_cost', 'unitCost')),
     // The baseline the server measured from. A server too old to send it (or a
     // seeded row) falls back to the opening figure, which is what the baseline
     // IS until the first stocktake.
@@ -2162,6 +2175,14 @@ function applyLocalPrices(p){
     if (!(row.inCutoff === null || row.inCutoff === undefined || row.inCutoff === '')){
       pr.in_cutoff = inCutoffFlag(row.inCutoff);
     }
+    // `boxCost` follows the same rule, and is applied EXACTLY as it travelled:
+    // no r2. A container costs a fraction of a centavo (box4 is ₱0.375, the
+    // bundle price over the bundle count) and rounding it here would restate
+    // the owner's own figure by half a centavo on every box he sells — the
+    // same reason apiSavePrices stores it unrounded.
+    if (!(row.boxCost === null || row.boxCost === undefined || row.boxCost === '')){
+      pr.box_cost = num(row.boxCost);
+    }
   }
 }
 function applyLocalSettings(p){
@@ -2192,7 +2213,7 @@ function applyLocalStockItems(p){
       // A brand-new product is safe to create here (unlike a price): it carries
       // no money, and it starts with a zero baseline like the seeded six.
       it = { product, unit:'', active:true, sort:++maxSort,
-        opening_qty:0, opening_date:'', reorder_at:'',
+        opening_qty:0, opening_date:'', reorder_at:'', unit_cost:'',
         baseline_qty:0, baseline_date:'', delivered_since:0, used_since:0,
         delivered_before:0, used_before:0 };
       state.stockItems.push(it);
@@ -2200,6 +2221,12 @@ function applyLocalStockItems(p){
     it.unit = txt(row.unit);
     it.active = !!row.active;
     it.reorder_at = rawNum(row.reorderAt);
+    // Only when the payload carries it, and unrounded — the same rule (and the
+    // same reason) as `boxCost` in applyLocalPrices. A batch queued by a build
+    // that knew nothing about costs must leave every cost exactly as it is.
+    if (!(row.unitCost === null || row.unitCost === undefined || row.unitCost === '')){
+      it.unit_cost = num(row.unitCost);
+    }
     // `sort`, the opening baseline and the ledger figures are never touched here.
   }
 }
@@ -5463,6 +5490,10 @@ function renderIbapa(){
   // Stock on hand
   h += stockOnHandHTML();
 
+  // "What it costs" (v2.8.0) — Nayt's costing, read from the server. Sits above
+  // Maintenance because that is where the two costs it needs are typed.
+  try{ h += costingHTML(); }catch(err){ console.error(err); }
+
   // Maintenance — the prices, the constants and the stock list, without opening
   // the sheet on a phone.
   h += maintenanceHTML();
@@ -5722,9 +5753,9 @@ async function runSheetCheck(btn){
   }
 }
 
-let maintPrices = null;   // sku -> { price, cheesePrice, active, inCutoff }
+let maintPrices = null;   // sku -> { price, cheesePrice, boxCost, active, inCutoff }
 let maintConst = null;    // the six settings, as typed
-let maintStock = null;    // product -> { unit, reorderAt, active }
+let maintStock = null;    // product -> { unit, reorderAt, unitCost, active }
 
 /** Load the forms from the current state. Called when the section is opened, so
  *  it always starts from what the sheet last said. */
@@ -5734,7 +5765,12 @@ function maintLoad(){
   maintPrices = Object.create(null);
   for (const p of asArr(state.prices)){
     if (!isObj(p) || !txt(p.sku)) continue;
+    // The two costs are the only fields here kept BLANK when they are blank
+    // (rawNum, never num): "no cost known" is a real state, and a 0 in the box
+    // would be an answer nobody gave. rawNum, not `=== ''`, because a state_v1
+    // written before v2.8.0 has no such key at all.
     maintPrices[p.sku] = { price: num(p.price), cheesePrice: num(p.cheese_price),
+      boxCost: rawNum(p.box_cost),
       active: truthy(p.active), inCutoff: inCutoffFlag(p.in_cutoff) };
   }
   const st = asObj(state.settings);
@@ -5747,7 +5783,8 @@ function maintLoad(){
   maintStock = Object.create(null);
   for (const s of asArr(state.stockItems)){
     if (!isObj(s) || !txt(s.product)) continue;
-    maintStock[s.product] = { unit: txt(s.unit), reorderAt: s.reorder_at === '' ? '' : num(s.reorder_at), active: truthy(s.active) };
+    maintStock[s.product] = { unit: txt(s.unit), reorderAt: rawNum(s.reorder_at),
+      unitCost: rawNum(s.unit_cost), active: truthy(s.active) };
   }
 }
 
@@ -5763,6 +5800,7 @@ function maintTopUp(){
     keepP[p.sku] = true;
     if (!maintPrices[p.sku]){
       maintPrices[p.sku] = { price: num(p.price), cheesePrice: num(p.cheese_price),
+        boxCost: rawNum(p.box_cost),
         active: truthy(p.active), inCutoff: inCutoffFlag(p.in_cutoff) };
     }
   }
@@ -5772,7 +5810,8 @@ function maintTopUp(){
     if (!isObj(s) || !txt(s.product)) continue;
     keepS[s.product] = true;
     if (!maintStock[s.product]){
-      maintStock[s.product] = { unit: txt(s.unit), reorderAt: s.reorder_at === '' ? '' : num(s.reorder_at), active: truthy(s.active) };
+      maintStock[s.product] = { unit: txt(s.unit), reorderAt: rawNum(s.reorder_at),
+        unitCost: rawNum(s.unit_cost), active: truthy(s.active) };
     }
   }
   for (const p in maintStock) if (!keepS[p]) delete maintStock[p];
@@ -5791,10 +5830,18 @@ function maintenanceHTML(){
     '<p class="mt-name">Prices</p>' +
     '<p class="hint">A price change counts for the days you save from now on. Days already saved keep the prices they were sold at — nothing in the past ever changes.</p>' +
     '<p class="hint" style="margin-top:6px;">Turn “Counts in the cutoff” off for something you keep separate, like nori. ' +
-      'It is still sold and counted every night; its money is just shown on its own and stays out of the cutoff and the note.</p>';
+      'It is still sold and counted every night; its money is just shown on its own and stays out of the cutoff and the note.</p>' +
+    // The COST of the container, beside the price it is sold at — the two
+    // figures the margin is the difference between. Left empty on purpose is a
+    // real answer, and it is the honest one: "What it costs" leaves an unpriced
+    // box out of every figure and names it, instead of costing it at nothing.
+    '<p class="hint" style="margin-top:6px;">“What the box costs you” is for the costing under “What it costs”. ' +
+      'It is the bundle price divided by how many boxes are in the bundle, so it can be less than ₱1. ' +
+      'Leave it empty if you do not know yet — an empty cost keeps that box out of the costing instead of ' +
+      'pretending it is free. Emptying a box that already has a cost leaves the sheet’s figure alone.</p>';
   for (const p of asArr(state.prices)){
     if (!isObj(p) || !txt(p.sku)) continue;
-    const m = maintPrices[p.sku] || { price:0, cheesePrice:0, active:false, inCutoff:true };
+    const m = maintPrices[p.sku] || { price:0, cheesePrice:0, boxCost:'', active:false, inCutoff:true };
     const sk = esc(p.sku);
     const isBox = p.group === 'box';
     h += '<div class="mt-row"><div class="mt-name">' + esc(p.label || p.sku) + '</div>' +
@@ -5810,6 +5857,12 @@ function maintenanceHTML(){
           '</div>'
         : '<div class="mt-cell"><label for="mp-' + sk + '">Price (₱)</label>' +
             '<input class="input money" id="mp-' + sk + '" data-mprice="' + sk + '" inputmode="decimal" autocomplete="off" value="' + esc(m.price) + '"></div>') +
+      // The COST of the container sits beside the price, because it is the
+      // figure the price has to beat. Empty is a real answer — see the hint
+      // above: an empty cost keeps this box OUT of the costing rather than
+      // costing it at nothing, and it never blanks a cell that has a figure.
+      '<div class="mt-cell" style="margin-top:8px;"><label for="mb-' + sk + '">What the box costs you (₱)</label>' +
+        '<input class="input money" id="mb-' + sk + '" data-mboxcost="' + sk + '" inputmode="decimal" autocomplete="off" placeholder="not set" value="' + esc(m.boxCost) + '"></div>' +
       '<label class="mt-toggle" for="ma-' + sk + '"><input type="checkbox" id="ma-' + sk + '" data-mactive="' + sk + '"' +
         (m.active ? ' checked' : '') + '><span>Still selling this</span></label>' +
       '<label class="mt-toggle" for="mx-' + sk + '"><input type="checkbox" id="mx-' + sk + '" data-mcutoff="' + sk + '"' +
@@ -5847,10 +5900,17 @@ function maintenanceHTML(){
   // Stock list
   h += '<div class="card">' +
     '<p class="mt-name">Stock list</p>' +
-    '<p class="hint">The unit is the thing you OPEN — a pack, a gallon. “Buy more at” is when the Low mark appears; leave it empty for no warning.</p>';
+    '<p class="hint">The unit is the thing you OPEN — a pack, a gallon. “Buy more at” is when the Low mark appears; leave it empty for no warning.</p>' +
+    // The cost of ONE of that unit, for the costing under “What it costs”.
+    // Same rule as the box cost: empty means nobody has said, so that product's
+    // consumption is left out of the figures and named, and emptying a box that
+    // has a figure leaves the sheet alone.
+    '<p class="hint" style="margin-top:6px;">“What one costs you” is the price of one of that unit — one pack, one gallon. ' +
+      'It is what “What it costs” prices every pack you open at. Leave it empty if you do not know yet: ' +
+      'an empty cost keeps that product out of the costing instead of counting it as free.</p>';
   for (const s of asArr(state.stockItems)){
     if (!isObj(s) || !txt(s.product)) continue;
-    const m = maintStock[s.product] || { unit:'', reorderAt:'', active:false };
+    const m = maintStock[s.product] || { unit:'', reorderAt:'', unitCost:'', active:false };
     const id = 'mt-' + esc(s.product).replace(/[^A-Za-z0-9]+/g, '-');
     h += '<div class="mt-row"><div class="mt-name">' + esc(s.product) + '</div>' +
       '<div class="mt-grid">' +
@@ -5859,6 +5919,8 @@ function maintenanceHTML(){
         '<div class="mt-cell"><label for="' + id + '-r">Buy more at</label>' +
           '<input class="input money" id="' + id + '-r" data-mreorder="' + esc(s.product) + '" inputmode="numeric" autocomplete="off" placeholder="none" value="' + esc(m.reorderAt) + '"></div>' +
       '</div>' +
+      '<div class="mt-cell" style="margin-top:8px;"><label for="' + id + '-c">What one costs you (₱)</label>' +
+        '<input class="input money" id="' + id + '-c" data-munitcost="' + esc(s.product) + '" inputmode="decimal" autocomplete="off" placeholder="not set" value="' + esc(m.unitCost) + '"></div>' +
       '<label class="mt-toggle" for="' + id + '-a"><input type="checkbox" id="' + id + '-a" data-mstockactive="' + esc(s.product) + '"' +
         (m.active ? ' checked' : '') + '><span>Still using this</span></label>' +
     '</div>';
@@ -5906,6 +5968,14 @@ function priceRowError(pr, m){
   // WRITES an explicit value: a row that says nothing about the flag (an older
   // build's queued batch) means "leave it exactly as it is", so treating a missing
   // field as false would refuse every ordinary price edit ever queued.
+  // The BOX COST (v2.8.0). A blank is left out of the payload entirely, so only
+  // a typed figure can be wrong — and a negative one is refused here in the
+  // server's own words, naming the sku exactly as apiSavePrices names it. It is
+  // never rounded on the way through: box4's real cost is ₱0.375.
+  const boxCost = txt(asObj(m).boxCost).trim();
+  if (boxCost !== '' && num(boxCost) < 0){
+    return txt(asObj(pr).sku) + ': the box cost cannot be negative.';
+  }
   const flagGiven = !(asObj(m).inCutoff === null || asObj(m).inCutoff === undefined || asObj(m).inCutoff === '');
   if (flagGiven && !inCutoffFlag(asObj(m).inCutoff) && isBox){
     return label + ' is a box with a cheese version, so it cannot be kept out of the cutoff. ' +
@@ -5957,13 +6027,25 @@ function saveMaintPrices(){
     // `inCutoff` travels because this screen KNOWS the flag — it is showing the
     // toggle. (The server writes that cell only when a payload carries it, so a
     // batch queued by an older build still leaves every flag exactly as it is.)
-    rows.push({ sku, price: r2(m.price), cheesePrice: r2(m.cheesePrice),
-      active: !!m.active, inCutoff: !!m.inCutoff });
+    const row = { sku, price: r2(m.price), cheesePrice: r2(m.cheesePrice),
+      active: !!m.active, inCutoff: !!m.inCutoff };
+    // The box cost travels ONLY when there is a figure in the field, and it
+    // travels EXACTLY as typed:
+    //   - a BLANK field means "leave the sheet's cost alone" (the key is left
+    //     out, which is what the server reads as leave-alone), never "this box
+    //     is free" and never "blank that cell" — a cost wiped by accident would
+    //     quietly drop a whole sku out of the costing;
+    //   - no r2, because r2(0.375) is 0.38. Rounding the owner's own figure on
+    //     the way past would restate it by half a centavo on every box sold,
+    //     which is exactly the bug the server refuses to commit.
+    if (txt(m.boxCost).trim() !== '') row.boxCost = num(m.boxCost);
+    rows.push(row);
   }
   setErr('err-maint-prices', '');
   const payload = { rows, entryId: uuid() };
   applyLocalPrices(payload);
   enqueue('savePrices', payload);
+  costInvalidate();
   persistState();
   maintLoad();
   renderIbapa();
@@ -5991,6 +6073,7 @@ function saveMaintSettings(){
   const payload = { settings, entryId: uuid() };
   applyLocalSettings(payload);
   enqueue('saveSettings', payload);
+  costInvalidate();
   persistState();
   maintLoad();
   updateStatus();
@@ -6008,17 +6091,364 @@ function saveMaintStock(){
       setErr('err-maint-stock', 'Use whole units for “Buy more at”, or leave it empty.');
       return;
     }
-    rows.push({ product, unit: txt(m.unit).trim(), reorderAt: m.reorderAt === '' ? '' : num(m.reorderAt), active: !!m.active });
+    // A cost is money, not a count: fractions are fine (a bundle price divided
+    // by the bundle count), a negative one is not. The server's own sentence.
+    const unitCost = txt(m.unitCost).trim();
+    if (unitCost !== '' && num(unitCost) < 0){
+      setErr('err-maint-stock', product + ': the unit cost cannot be negative.');
+      return;
+    }
+    const row = { product, unit: txt(m.unit).trim(), reorderAt: m.reorderAt === '' ? '' : num(m.reorderAt), active: !!m.active };
+    // Same rule, same reason as savePrices' boxCost: a blank field is left out
+    // (leave the sheet's cost alone), and a typed figure travels unrounded.
+    if (unitCost !== '') row.unitCost = num(unitCost);
+    rows.push(row);
   }
   setErr('err-maint-stock', '');
   const payload = { rows, entryId: uuid() };
   applyLocalStockItems(payload);
   enqueue('saveStockItems', payload);
+  costInvalidate();
   persistState();
   maintLoad();
   renderIbapa();
   toast('Stock list saved.');
   drainQueue();
+}
+
+/* ---- "What it costs" (v2.8.0). NAYT'S SCREEN — Mama never needs it, which is
+   why it lives on More, closed, behind a button.
+
+   Every figure here is computed by the SERVER (action `costing`) over one 1–15 /
+   16–end period, from the whole sheet. Nothing is worked out on the phone: the
+   costing reads StockUsage, Expenses, DailyCounts and Settings together, and a
+   phone holding only the last few weeks would answer a different question with
+   the same confidence. So there is no offline mode and no local fallback — when
+   there is no API, or the request fails, the section says that in one sentence
+   instead of drawing a screen full of zeros. It BLOCKS NOTHING: it is a pure
+   read, it never queues anything, and it never touches the cutoff or the note.
+
+   `costRes` remembers WHICH period (and which target) the figures answer, so a
+   number on screen can never belong to a different fortnight than the label
+   above it. ---- */
+let costOpen = false;     // the section is closed until he asks for it
+let costPer = null;       // the period the figures cover
+let costRes = null;       // { key, target, data } — the answer and what it answers
+let costErr = '';         // why there are no figures, in one plain sentence
+let costBusy = false;     // a request is in flight
+let costStale = false;    // a cost was edited, so the last answer was thrown away
+let costTarget = '';      // the nightly take he types. BLANK = no target at all.
+
+/** A Maintenance save changes what the costing is made of — a cost, a price, a
+ *  standing amount. The answer on screen was computed from the OLD figures, so
+ *  it is thrown away rather than left sitting under a fresh label. It is not
+ *  re-asked here: the save is still in the queue, and the server would answer
+ *  from the sheet as it is now. */
+function costInvalidate(){
+  if (!costRes && !costErr) return;
+  costRes = null; costErr = '';
+  costStale = costOpen;
+}
+
+/** A figure the server could not work out arrives as `null`, and it renders as a
+ *  dash — never ₱0. Zero balls and "we do not know" are different answers, and a
+ *  ₱0 that means the second one is a lie the whole screen is built to avoid.
+ *  The reason is always said beside it (see costWhyNone). */
+function isNone(v){ return v === null || v === undefined || v === ''; }
+function costPeso(v){ return isNone(v) ? '—' : peso(v); }
+function costNum(v){ return isNone(v) ? '—' : fmt(v); }
+
+/** Why a per-ball or per-night figure is a dash. Answered from the two things
+ *  that make the division impossible, in the order the server checks them. */
+function costWhyNone(daysOpen, balls){
+  if (!(daysOpen > 0)) return 'No night in this cutoff is open yet, so there is nothing to divide by.';
+  if (!(balls > 0)) return 'No boxes were counted in this cutoff, so there are no balls to divide by.';
+  return '';
+}
+
+function costingHTML(){
+  let h = '<div class="section-title">What it costs</div>';
+  if (!costOpen){
+    return h + '<div class="card"><p class="hint" style="margin-bottom:10px;">What a ball costs to make, what each box leaves you, ' +
+      'and what the prices would have to be to leave more. Worked out by the server from what has been logged.</p>' +
+      '<button type="button" class="btn block" data-act="cost-open">Work out the costing</button></div>';
+  }
+  const per = costPer || currentPeriod(todayStr());
+  const s = d2parts(per.start), e = d2parts(per.end);
+  const isCurrent = periodKey(per) === periodKey(currentPeriod(todayStr()));
+  // The same period navigation as the Cutoff screen, so "this cutoff" means the
+  // same fortnight on both screens.
+  h += '<div class="card"><div class="period-nav">' +
+    '<button type="button" class="nav-btn" data-act="cost-prev" aria-label="Previous cutoff">‹</button>' +
+    '<div class="p-label">' + monthName(per.start) + ' ' + s.d + ' – ' + e.d +
+      '<span class="p-sub">' + (isCurrent ? 'This cutoff' : s.y) + '</span></div>' +
+    '<button type="button" class="nav-btn" data-act="cost-next" aria-label="Next cutoff">›</button>' +
+  '</div></div>';
+
+  const answered = costRes && costRes.key === periodKey(per);
+  if (costBusy){
+    h += '<div class="card"><p class="hint">Working it out…</p></div>';
+  } else if (costErr){
+    // ONE plain sentence, and no figures at all beside it.
+    h += '<div class="card"><p class="err" style="margin-top:0;">' + esc(costErr) + '</p>' +
+      (config.apiUrl ? '<button type="button" class="btn block" data-act="cost-refresh" style="margin-top:10px;">Try again</button>' : '') +
+    '</div>';
+  } else if (!answered){
+    h += '<div class="card">' +
+      (costStale ? '<p class="hint" style="margin-bottom:10px;">A cost was changed, so the old figures were thrown away. ' +
+        'Work it out again once the change has synced.</p>' : '') +
+      '<button type="button" class="btn block" data-act="cost-refresh">Work it out</button></div>';
+  } else {
+    // A malformed response must not take the whole More tab down with it.
+    try{ h += costFiguresHTML(costRes, per); }
+    catch(err){
+      console.error(err);
+      h += '<div class="card"><p class="err" style="margin-top:0;">The server’s costing did not make sense to this app, so nothing is shown.</p></div>';
+    }
+  }
+  h += '<div class="card"><button type="button" class="btn block" data-act="cost-close">Close the costing</button></div>';
+  return h;
+}
+
+/** The figures. Every product name and sku label here is SHEET DATA and is
+ *  escaped exactly once on the way in. */
+function costFiguresHTML(res, per){
+  const d = asObj(asObj(res).data);
+  const daysOpen = num(d.days_open), balls = num(d.balls);
+  const v = asObj(d.variable), fx = asObj(d.fixed), pd = asObj(d.per_day);
+  const why = costWhyNone(daysOpen, balls);
+
+  // WHAT THIS PERIOD CANNOT HONESTLY SAY, before any figure it qualifies
+  // (v2.8.0). An UNDER-stated cost is the dangerous direction — it makes a
+  // price look safe to cut — so these sit on top, and the server withholds
+  // the price advice for as long as any of them holds.
+  let h = '';
+  const cav = asArr(d.caveats);
+  if (cav.length){
+    h += '<div class="card attn-card"><p class="attn-head">' +
+      (cav.length === 1 ? 'Read this first' : 'Read these first') + '</p>';
+    for (const c of cav) h += '<p style="margin-top:8px;">' + esc(txt(c)) + '</p>';
+    h += '<p class="hint" style="margin-top:10px;">' + (asArr(d.targets).length
+      ? 'The figures below still hold — read them knowing this, and the price advice leans to the cautious side.'
+      : 'The figures below are still worked out, because they are useful — but they are a <b>floor</b>, ' +
+        'not the whole truth, so the price advice stays switched off until this is filled in.') + '</p>' +
+    '</div>';
+  }
+
+  // WHAT THIS IS, and what KIND of figure each part is. The two cost sources are
+  // never added into one line, because over a fortnight they are not the same
+  // money: a sack of flour bought in this period may still be unopened, and a
+  // sack opened in it may have been paid for last month.
+  h += '<div class="card">' +
+    '<div class="kv"><span class="k">These nights</span><span class="v">' +
+      esc(fmtShort(txt(d.start) || per.start)) + ' – ' + esc(fmtShort(txt(d.end) || per.end)) + '</span></div>' +
+    '<div class="kv"><span class="k">Nights open</span><span class="v">' + fmt(daysOpen) + '</span></div>' +
+    '<div class="kv"><span class="k">Balls sold</span><span class="v">' + fmt(balls) + '</span></div>' +
+    '<div class="kv"><span class="k">Money taken</span><span class="v">' + peso(d.revenue) + '</span></div>' +
+    '<p class="hint" style="margin-top:10px;">Stock opened and boxes used are what was <b>used up</b> on these nights. ' +
+      'Supplies and octopus are what was <b>paid for</b> on these nights. Over a fortnight those are not the same money, ' +
+      'so they are shown apart and never added into one figure.</p>' +
+    '<p class="hint" style="margin-top:6px;">This is for you to decide with. It changes no cutoff, no note and no price.</p>' +
+  '</div>';
+
+  // THE PER-BALL STACK.
+  h += '<div class="card">' +
+    '<div class="co-row big"><span>Every ball</span><span class="v">' + costPeso(v.per_ball) + '</span></div>' +
+    '<div class="co-sub">what one ball cost to make</div>' +
+    '<div class="r-sep" role="presentation"></div>' +
+    '<div class="co-row"><span>Stock opened</span><span class="v">' + peso(v.stock) + '</span></div>' +
+    '<div class="co-row"><span>Supplies &amp; octopus paid</span><span class="v">' + peso(v.money) + '</span></div>' +
+    '<div class="co-row"><span>Boxes used</span><span class="v">' + peso(v.boxes) + '</span></div>' +
+    (isNone(v.per_ball) && why ? '<p class="hint" style="margin-top:8px;">' + why + '</p>' : '') +
+  '</div>';
+
+  // THE FIXED COST OF A NIGHT — not per ball, on purpose: it is owed whether one
+  // box sells or a hundred do.
+  h += '<div class="card">' +
+    '<div class="co-row big"><span>Every night</span><span class="v">' + costPeso(fx.per_day) + '</span></div>' +
+    '<div class="co-sub">the costs that do not follow the balls</div>' +
+    '<div class="r-sep" role="presentation"></div>' +
+    '<div class="co-row"><span>Wages</span><span class="v">' + peso(fx.salary) + '</span></div>' +
+    '<div class="co-row"><span>Mama and the electric</span><span class="v">' + peso(fx.shares) + '</span></div>' +
+    (isNone(fx.per_day)
+      ? '<p class="hint" style="margin-top:8px;">No night in this cutoff is open yet, so there is nothing to spread them over.</p>'
+      : '<p class="hint" style="margin-top:8px;">Both are for the whole cutoff, spread over the ' + fmt(daysOpen) +
+        (daysOpen === 1 ? ' night' : ' nights') + ' open.</p>') +
+  '</div>';
+
+  // PER SKU — the margin is the number he decides with, so it is the big one.
+  const skus = asArr(d.per_sku);
+  h += '<div class="card"><p class="mt-name">What each box leaves</p>';
+  if (!skus.length){
+    h += '<p class="hint">Nothing has been sold in this cutoff yet.</p>';
+  } else {
+    for (const r of skus){
+      const row = asObj(r);
+      const mpb = row.margin_per_box;
+      h += '<div class="st-item"><div class="st-top">' +
+          '<span class="st-name">' + esc(txt(row.label) || txt(row.sku)) + '</span>' +
+          '<span class="st-qty' + (!isNone(mpb) && num(mpb) < 0 ? ' neg' : '') + '">' + costPeso(mpb) + '</span>' +
+        '</div>' +
+        '<div class="st-sub">' + fmt(num(row.sold)) + ' sold · sells for ' + peso(row.price) +
+          ' · costs ' + costPeso(row.cost_per_box) + ' a box' +
+          (isNone(row.margin_per_ball) ? '' : ' · leaves ' + peso(row.margin_per_ball) + ' a ball') +
+        '</div></div>';
+    }
+    h += '<p class="hint" style="margin-top:10px;">The big figure is what one box leaves after everything above it. ' +
+      'A dash means something that box is made of has no cost on file yet.</p>';
+  }
+  h += '</div>';
+
+  // BREAK-EVEN and what a typical night leaves. break_even_balls is for the
+  // WHOLE cutoff (the server's own scope), so the nightly figure is that spread
+  // over the nights that were open — and both are shown, labelled, rather than
+  // one number that could be read as either.
+  const be = d.break_even_balls;
+  const bePerNight = (isNone(be) || !(daysOpen > 0)) ? null : r2(num(be) / daysOpen);
+  const left = pd.left;
+  h += '<div class="card">' +
+    '<div class="co-row"><span>Balls a night just to break even</span><span class="v">' + costNum(bePerNight) + '</span></div>' +
+    (isNone(bePerNight)
+      ? '<p class="hint" style="margin-top:6px;">' + (why ||
+          'The average ball costs more than it sells for, so no number of nights breaks even — the prices are what would have to change.') + '</p>'
+      : '<div class="co-sub">' + fmt(be) + ' for the whole cutoff, over ' + fmt(daysOpen) +
+        (daysOpen === 1 ? ' night' : ' nights') + '</div>') +
+    '<div class="r-sep" role="presentation"></div>' +
+    '<div class="co-row"><span>A night takes</span><span class="v">' + costPeso(pd.revenue) + '</span></div>' +
+    '<div class="co-row"><span>A night costs</span><span class="v">' + costPeso(pd.cost) + '</span></div>' +
+    // The LABEL carries the sign, exactly as the note's residual does: never
+    // "leaves -₱120".
+    '<div class="co-row split' + (!isNone(left) && num(left) < 0 ? ' neg' : '') + '">' +
+      '<span>' + (!isNone(left) && num(left) < 0 ? 'A night loses' : 'A night leaves') + '</span>' +
+      '<span class="v">' + (isNone(left) ? '—' : peso(Math.abs(num(left)))) + '</span></div>' +
+    (isNone(left) ? '<p class="hint" style="margin-top:6px;">No night in this cutoff is open yet, so there is no typical night.</p>' : '') +
+  '</div>';
+
+  // THE TARGET TABLE. Advice, never applied — nothing here writes a price. The
+  // answer lives in its OWN container so that typing in the field can replace
+  // it without re-rendering the tab under the keyboard (the same reason the
+  // Cutoff screen's split has updateSplitLive).
+  h += '<div class="card"><p class="mt-name">To leave more a night</p>' +
+    '<div class="field" style="margin-top:10px;"><label for="costTarget">What do you want a night to leave you (₱)?</label>' +
+      '<input class="input money" id="costTarget" inputmode="decimal" autocomplete="off" placeholder="none" value="' + esc(costTarget) + '"></div>' +
+    '<p class="err" id="err-cost-target" hidden></p>' +
+    '<button type="button" class="btn block" data-act="cost-target">Work out the prices</button>' +
+    '<div id="costTargetOut">' + costTargetOutHTML(res) + '</div>' +
+  '</div>';
+
+  // WHAT WAS LEFT OUT, said plainly. A cost that is quietly too low is worse
+  // than one that is visibly absent, so these are named rather than guessed.
+  const up = asArr(d.unpriced);
+  if (up.length){
+    h += '<div class="card attn-card"><p class="attn-head">' +
+      (up.length === 1 ? '1 thing has no cost on file' : up.length + ' things have no cost on file') + '</p>' +
+      '<p>These are <b>not</b> in any figure above — not even at ₱0. Give them a cost under Maintenance and work it out again.</p>';
+    for (const u of up){
+      const row = asObj(u);
+      const isBox = txt(row.kind) === 'box';
+      h += '<div class="st-item"><div class="st-top">' +
+          '<span class="st-name">' + esc(txt(row.label) || txt(row.name)) + '</span>' +
+          '<span class="st-qty">' + fmt(num(row.qty)) + '</span></div>' +
+        '<div class="st-sub">' + (isBox
+          ? 'boxes sold with no box cost — set it under Maintenance, in Prices'
+          : 'opened with no unit cost — set it under Maintenance, in the stock list') + '</div></div>';
+    }
+    h += '</div>';
+  }
+  return h;
+}
+
+/** The target answer, on its own so it can be replaced as the field is typed.
+ *
+ *  A BLANK field shows NOTHING — a target nobody asked for is a made-up figure,
+ *  and this screen is built on not inventing any. And while the field differs
+ *  from what the server was asked, the PRICES ARE NOT SHOWN AT ALL: a price
+ *  table that answers a figure no longer in the box above it is worse than no
+ *  table, exactly as a note that contradicts the split field would be. */
+function costTargetOutHTML(res){
+  const d = asObj(asObj(res).data);
+  const typed = txt(costTarget).trim();
+  const answeredFor = txt(asObj(res).target).trim();
+  if (typed === ''){
+    return '<p class="hint" style="margin-top:10px;">Empty means no target, so there is nothing to show. ' +
+      'Type what a night should leave you and this will say what each price would have to be.</p>';
+  }
+  if (num(typed) < 0) return '';        // the refusal is already on screen
+  if (typed !== answeredFor){
+    return '<p class="hint" style="margin-top:10px;">Tap “Work out the prices” to answer for ' +
+      peso(num(typed)) + ' a night.</p>';
+  }
+  const tgt = asArr(d.targets).map(asObj).find(x => r2(num(x.per_day)) === r2(num(typed)));
+  const rows = tgt ? asArr(tgt.prices) : [];
+  // Withheld on purpose (v2.8.0): the server sends no targets at all while
+  // this period's cost data is known to be incomplete. Say WHY, in the same
+  // words as the card above, rather than showing a price built on a floor.
+  if (!rows.length && asArr(d.caveats).length){
+    return '<p class="hint" style="margin-top:10px;">No price advice for this cutoff yet — see “Read this first” above. ' +
+      'Prices worked out from an incomplete cost would read too low, which is the one mistake this screen exists to prevent.</p>';
+  }
+  if (!rows.length){
+    return '<p class="hint" style="margin-top:10px;">There is nothing to work this out from yet: the prices are scaled from what ' +
+      'this cutoff actually took, and this cutoff has no open night with money in it.</p>';
+  }
+  let h = '<p class="hint" style="margin-top:12px;">To leave ' + peso(tgt.per_day) + ' a night, selling the same mix as this ' +
+    'cutoff sold, the prices would need to be:</p>';
+  for (const pr of rows){
+    const row = asObj(pr);
+    h += '<div class="co-row"><span>' + esc(skuLabel(txt(row.sku))) + '</span><span class="v">' + peso(row.price) + '</span></div>';
+  }
+  return h + '<p class="hint" style="margin-top:10px;">Advice only — nothing has been saved. Change a price under Maintenance when ' +
+    'you decide, and it counts for the days you save from then on.</p>';
+}
+
+/** Follow the target field as it is typed, rewriting ONLY the answer under it so
+ *  the keyboard stays put. */
+function updateCostTarget(){
+  const out = $('costTargetOut');
+  if (!out || !costRes) return;
+  try{ out.innerHTML = costTargetOutHTML(costRes); }
+  catch(err){ console.error(err); }
+}
+
+/** Ask the server. The ONLY way this screen gets a figure: there is no offline
+ *  answer to give, so a missing API and a failed request both end as one
+ *  sentence and no numbers. */
+async function loadCosting(){
+  const per = costPer || (costPer = currentPeriod(todayStr()));
+  const key = periodKey(per);
+  const typed = txt(costTarget).trim();
+  if (typed !== '' && num(typed) < 0){
+    setErr('err-cost-target', 'The nightly target cannot be negative.');
+    return;
+  }
+  setErr('err-cost-target', '');
+  if (!config.apiUrl){
+    costRes = null; costStale = false; costBusy = false;
+    costErr = 'The costing is worked out by the server from the whole sheet, so it needs the API — set it up above first.';
+    renderIbapa();
+    return;
+  }
+  costBusy = true; costErr = ''; costStale = false;
+  renderIbapa();
+  try{
+    // A BLANK target sends no key at all — the harmless default, and the same
+    // shape a phone that predates this screen would send.
+    const payload = { start: per.start, end: per.end };
+    if (typed !== '') payload.targetPerDay = num(typed);
+    const data = await api('costing', payload);
+    // He may have moved to another cutoff while this was in the air. The answer
+    // belongs to the period it was asked for, and nothing else.
+    if (periodKey(costPer || per) !== key) return;
+    costRes = { key, target: typed, data: asObj(data) };
+    costErr = '';
+  }catch(err){
+    console.error(err);
+    costRes = null;
+    costErr = friendlyError(err, 'Try again when there is a signal.');
+  }finally{
+    costBusy = false;
+    if (activeTab === 'ibapa') renderIbapa();
+  }
 }
 
 async function testConnection(){
@@ -6168,6 +6598,26 @@ document.addEventListener('click', (ev) => {
   }
   else if (act === 'arrive-save') saveArrival();
 
+  // What it costs (v2.8.0). Every one of these ASKS THE SERVER — there is no
+  // local answer to fall back to, and none is invented.
+  else if (act === 'cost-open'){
+    costOpen = true;
+    if (!costPer) costPer = currentPeriod(todayStr());
+    loadCosting();
+  }
+  else if (act === 'cost-close'){ costOpen = false; renderIbapa(); }
+  else if (act === 'cost-prev'){
+    costPer = shiftPeriod(costPer || currentPeriod(todayStr()), -1);
+    costRes = null; costErr = ''; costStale = false;
+    loadCosting();
+  }
+  else if (act === 'cost-next'){
+    costPer = shiftPeriod(costPer || currentPeriod(todayStr()), 1);
+    costRes = null; costErr = ''; costStale = false;
+    loadCosting();
+  }
+  else if (act === 'cost-refresh' || act === 'cost-target') loadCosting();
+
   // Maintenance
   else if (act === 'maint-open'){ maintOpen = true; maintLoad(); renderIbapa(); }
   else if (act === 'maint-close'){ maintOpen = false; renderIbapa(); }
@@ -6195,6 +6645,10 @@ document.addEventListener('input', (ev) => {
   if (ds.mcheese != null){ if (maintPrices[ds.mcheese]) maintPrices[ds.mcheese].cheesePrice = ev.target.value; return; }
   if (ds.munit != null){ if (maintStock[ds.munit]) maintStock[ds.munit].unit = ev.target.value; return; }
   if (ds.mreorder != null){ if (maintStock[ds.mreorder]) maintStock[ds.mreorder].reorderAt = ev.target.value; return; }
+  // The two costs (v2.8.0). Kept as TYPED — a cost can be ₱0.375, and coercing
+  // it through a rounder on the way in would restate the owner's own figure.
+  if (ds.mboxcost != null){ if (maintPrices[ds.mboxcost]) maintPrices[ds.mboxcost].boxCost = ev.target.value; return; }
+  if (ds.munitcost != null){ if (maintStock[ds.munitcost]) maintStock[ds.munitcost].unitCost = ev.target.value; return; }
   if (ds.mset != null){
     if (maintConst && Object.prototype.hasOwnProperty.call(SETTABLE_SETTINGS, ds.mset)) maintConst[ds.mset] = ev.target.value;
     return;
@@ -6251,6 +6705,16 @@ document.addEventListener('input', (ev) => {
 
   // More: the stocktake field
   else if (id === 'stCountIn') countDraft = ev.target.value;
+
+  // More: the costing's nightly target. Typing it does NOT re-ask the server —
+  // "Work out the prices" does, and until it is tapped the screen says so
+  // rather than showing prices for a figure that is no longer in the field.
+  else if (id === 'costTarget'){
+    costTarget = ev.target.value;
+    setErr('err-cost-target', txt(costTarget).trim() !== '' && num(costTarget) < 0
+      ? 'The nightly target cannot be negative.' : '');
+    updateCostTarget();
+  }
 
   // Config fields (auto-saved)
   else if (id === 'cfgUrl'){ config.apiUrl = ev.target.value.trim(); persistConfig(); updateStatus(); }

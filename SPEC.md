@@ -162,6 +162,32 @@ A note is built from the days that exist, so an unlogged night reads as a lean n
 
 `addDays` (parts-based, so month/year/leap rolls cannot drift with a timezone) does the walk.
 
+### v2.8.0 — "What it costs": the costing the owner asked for, computed by the app
+
+The owner's question (2026-08-19): *"Costing of the current setup, how much should the price be in correlation with the daily expenses."* Answered by hand once from nine nights; this makes it permanent and self-maintaining, so every cutoff answers it from what was actually logged. **Baseline starts 2026-08-16** — earlier days are incomplete by the owner's own account ("the user is just getting around for it").
+
+**Two cost sources, never mixed** — this is the load-bearing rule:
+- **Consumption** for the things he buys in bulk and opens: `Σ StockUsage.qty × StockItems.unit_cost` (new append-only column, seeded with his figures: Takoyaki Flour ₱120, Takoyaki Sauce ₱490, Japanese Mayo ₱300, Bonito ₱900, Aonori ₱550, Togarashi ₱320 — each *per the unit it is counted in*).
+- **Money out** for everything else that becomes a ball: `Expenses` in category `Supplies` or `Octopus`, **minus any row that is a restock of a tracked product** (an expense whose `item` matches a StockItems product, case-insensitively). Without that subtraction a sack of flour is counted twice — once as money paid, once as flour opened.
+- **Containers**: `Σ per-sku boxes sold × Prices.box_cost` (new append-only column; seeded Box 4 ₱0.375, Box 6 ₱3.00, Box 10 ₱4.60 = his bundle prices ÷ bundle counts; a `simple` sku may be 0).
+- **Fixed, not per ball**: each open day's snapshotted `salary`, plus `mama_per_cutoff` + `electric_per_cutoff` spread across the period's open days.
+
+**CAVEATS, and the one thing they switch off.** The figures are only as complete as the logging, and an **under-stated** cost is the dangerous direction — it makes a price look safe to cut. Proven on the owner's real Aug 16–31: with no purchases logged yet, cost per ball read ₱1.57 instead of ~₱5.80 and the targets advised dropping Box 10 from ₱105 to ₱83. So `costing` returns **`caveats:[sentence…]`**, of two kinds:
+- **Cost is a floor** (`no purchases logged in the period`, or a used product with no `unit_cost`) → biases advice DOWN → **`targets` is emptied**. Advice computed from data known to be incomplete is worse than no advice, and the screen says so where the table would have been.
+- **Thin period** (days with nothing entered) → the per-cutoff shares land on fewer nights, biasing cost per night UP → conservative, so the advice **stays** with its warning attached.
+Blank days are counted only up to **yesterday**: tonight has not happened at nine in the morning, and calling that a gap would cry wolf every single day. The screen renders the caveats **above** every figure they qualify, and its wording follows whether the advice is off or merely cautious.
+
+New action **`costing`** payload `{start, end, targetPerDay?}` → `{days_open, balls, revenue, caveats, variable:{stock, money, boxes, per_ball}, fixed:{salary, shares, per_day}, per_sku:[{sku, label, sold, price, cost_per_box, margin_per_box, margin_per_ball}], break_even_balls, per_day:{revenue, cost, left}, targets:[{per_day, prices:[{sku, price}]}], unpriced:[…]}`. Pure read, same 1–15 / 16–end periods as the note, and it **never touches the note or any cutoff figure** — costing is management information, not money that has moved.
+
+Honesty rules, all load-bearing:
+- A tracked product with **no `unit_cost`** is listed in `unpriced` and its consumption is left OUT of the total rather than silently costed at 0 — a cost that is quietly too low is worse than one that is visibly absent.
+- **Balls** come from the sold counts × each sku's `size` (a `simple` sku has no size and contributes none), and excluded skus (nori) are out of both revenue and cost — its money was never in the cutoff either.
+- Zero balls or zero open days ⇒ every per-ball figure is `null`, never a division by zero dressed as ₱0.
+- The screen states its window and says plainly which figures are *money paid this period* rather than *consumed this period*, because over a short window those differ.
+- **Target prices are advice, never applied**: the action returns what each price *would* need to be for a chosen nightly take; nothing writes to Prices.
+
+UI: **More → "What it costs"**, Nayt's screen (Mama never needs it) — the per-ball stack, per-box margins, break-even, and the target table. `unit_cost` and `box_cost` are editable under Maintenance beside the figures they belong to.
+
 Everything above obeys the standing rules: snapshots travel with the money; the server recomputes and is authoritative; requests camelCase, responses snake_case, both directions pinned in contract.test.js; migration is append-only; every new behaviour gets a biting test and a scratch-copy mutation revert.
 
 Tab **StockItems** (product | unit | active | sort | **opening_qty** | **opening_date** | **reorder_at**) — `opening_qty`/`opening_date` are the one-time starting baseline; `reorder_at` is the low-stock threshold (0 or blank = no warning). A **blank** `reorder_at` ships blank (`''`), not 0: it is the one figure in this row read raw, because 0 is a legitimate threshold and a coerced blank comes straight back on the next `saveStockItems` and fills the owner's untouched cells with literal 0s.

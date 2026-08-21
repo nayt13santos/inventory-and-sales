@@ -37,7 +37,7 @@
  *   REQUEST  payload keys are camelCase  (cheeseQty, gcashQty, gcashCheeseQty,
  *            customAmount, customGcash, gcashConverted, lidBoxes, customBoxes,
  *            entryId, backlogRef, stockProduct, stockQty, reorderAt,
- *            cheesePrice, dryRun)
+ *            cheesePrice, unitCost, boxCost, targetPerDay, dryRun)
  *            — see SPEC.md "API contract".
  *   RESPONSE keys are snake_case (cheese_price, custom_amount, custom_gcash,
  *            entry_id, updated_at, cheese_qty, regular_qty, gcash_qty,
@@ -46,7 +46,9 @@
  *            split_amount, stock_product, stock_qty, on_hand, reorder_at,
  *            baseline_qty, baseline_date, delivered_since, used_since,
  *            delivered_before, used_before, gcash_converted, lid_boxes,
- *            custom_qty)
+ *            custom_qty, unit_cost, box_cost, days_open, per_ball, per_day,
+ *            cost_per_box, margin_per_box, margin_per_ball, break_even_balls,
+ *            per_sku)
  *            — they mirror the sheet's own column headers and the shape the
  *            PWA persists in localStorage (state_v1). The only camelCase names
  *            a response may carry are the bootstrap/range CONTAINER keys
@@ -234,6 +236,47 @@
  *     (Takoyaki Flour 5, Takoyaki Sauce 1, Japanese Mayo 1 — the owner's
  *     figures), in the salary-backfill shape: it runs on every migration, and a
  *     hand-set value — an explicit 0 included — is never overwritten.
+ *
+ * WHAT CHANGED IN v2.8.0 — "what it costs" (owner, 2026-08-19: "Costing of the
+ * current setup, how much should the price be in correlation with the daily
+ * expenses"). It is READ-ONLY MANAGEMENT INFORMATION and that is the whole
+ * shape of it: the cutoff note, every figure in it, and every peso already in
+ * the sheet are byte-identical with these columns present and absent.
+ *   - Prices gains `box_cost` and StockItems gains `unit_cost`, appended like
+ *     every other column. Both are read RAW, the way reorder_at is: a BLANK
+ *     cell means "NO COST KNOWN", never ₱0. asNum('') is 0, 0 is a legitimate
+ *     cost, and a coerced blank comes straight back on the next save and fills
+ *     the owner's untouched cells with literal 0s — which would silently price
+ *     his balls at less than they cost.
+ *   - setupSheet BACKFILLS both, BLANK CELLS ONLY, in the backfillReorderPoints
+ *     shape (Flour 120, Sauce 490, Mayo 300, Bonito 900, Aonori 550, Togarashi
+ *     320; box4 0.375, box6 3, box10 4.6, nori 0). His live sheet therefore
+ *     gets his real figures without him typing them, and any figure he later
+ *     corrects — an explicit 0 included — is never overwritten.
+ *   - savePrices takes an OPTIONAL `boxCost` and saveStockItems an OPTIONAL
+ *     `unitCost`, both omitted-means-leave-alone: a phone on older code carries
+ *     neither key, and writing 0 for a key that was never sent would tell the
+ *     costing screen that everything is free. An EXPLICIT blank is a real
+ *     instruction ("I do not know") and is stored as a blank cell. A negative
+ *     cost is refused in one sentence naming the product or the sku.
+ *   - new action `costing` {start, end, targetPerDay?} — PURE READ, no lock.
+ *     Its two cost sources are NEVER MIXED: consumption (StockUsage x
+ *     unit_cost) is what was opened; money out (Supplies + Octopus) is what
+ *     left the tin, LESS every row that is a restock of a tracked product,
+ *     matched on `item` against StockItems case-insensitively and trimmed.
+ *     Without that subtraction a sack of flour is counted twice — once as money
+ *     paid, once as flour opened. Containers are per-sku boxes sold x box_cost.
+ *     Fixed costs are the open days' snapshotted salaries plus
+ *     mama_per_cutoff + electric_per_cutoff, spread over the open days.
+ *     Balls are sold x size (a simple sku has no size and contributes none) and
+ *     an EXCLUDED sku is out of both sides, classified by the count row's own
+ *     in_cutoff SNAPSHOT like every other historical figure in this file.
+ *     A product or container with no cost on file is LISTED in `unpriced` and
+ *     left OUT — a total that is quietly too low is worse than one that is
+ *     visibly absent, because the owner would set his prices from it. With no
+ *     balls or no open days every per-ball and per-day figure is `null`, never
+ *     a division by zero dressed as ₱0. `targets` says what each price WOULD
+ *     need to be for a chosen nightly take and writes NOTHING.
  */
 
 var VERSION = '2.7.6';
@@ -280,7 +323,14 @@ var SCHEMA = [
   // in_cutoff was appended in v2.4.0: FALSE means "sell it, count it, but keep
   // its money out of every cutoff figure". A BLANK CELL IS TRUE — see
   // asCutoffFlag. Every pre-v2.4.0 row is blank after migration.
-  { name: TAB.PRICES, headers: ['sku', 'label', 'group', 'size', 'price', 'cheese_price', 'active', 'in_cutoff'], textCols: [] },
+  // box_cost was appended in v2.8.0: what ONE container for this sku costs —
+  // his bundle price divided by the bundle count. It is COST, never money that
+  // has moved: it feeds the costing screen alone and reaches no cutoff figure,
+  // no note and no DailyLog row. A BLANK cell means "no cost known" and the
+  // sku's containers are left OUT of the costing total and listed under
+  // `unpriced`; an explicit 0 is a real answer (a sku whose container costs
+  // nothing). That is why it is read RAW, like reorder_at — see readPrices.
+  { name: TAB.PRICES, headers: ['sku', 'label', 'group', 'size', 'price', 'cheese_price', 'active', 'in_cutoff', 'box_cost'], textCols: [] },
   // custom_gcash was appended in v2.1.0 (how much of custom_amount was GCash).
   // `gcash` is computed server-side now — it is still stored, still returned.
   // salary was appended in v2.3.0: that day's wage, SNAPSHOTTED at save time so
@@ -315,7 +365,14 @@ var SCHEMA = [
   // opening_qty / opening_date / reorder_at were appended in v2.3.0 (stock
   // ledger). opening_date is a yyyy-MM-dd string and BLANK means "count the
   // whole history" — see computeStockStatus.
-  { name: TAB.STOCK_ITEMS, headers: ['product', 'unit', 'active', 'sort', 'opening_qty', 'opening_date', 'reorder_at'], textCols: ['opening_date'] },
+  // unit_cost was appended in v2.8.0: what ONE of this product's units — the
+  // thing you OPEN — costs to buy. It prices CONSUMPTION (StockUsage), which is
+  // a different question from the money that left the tin, and the two are
+  // never added together (see apiCosting). A BLANK cell means "no cost known":
+  // that product's consumption is left OUT of the costing total and the product
+  // is listed under `unpriced`, because a total that is quietly too low is
+  // worse than one that is visibly absent. Read RAW like reorder_at.
+  { name: TAB.STOCK_ITEMS, headers: ['product', 'unit', 'active', 'sort', 'opening_qty', 'opening_date', 'reorder_at', 'unit_cost'], textCols: ['opening_date'] },
   { name: TAB.STOCK_USAGE, headers: ['date', 'product', 'qty', 'entry_id', 'updated_at'], textCols: ['date', 'updated_at'] },
   // A physical stocktake. It BECOMES the new baseline, which is what stops
   // estimation drift (spoilage, breakage, miscounts) accumulating forever.
@@ -451,6 +508,11 @@ function doPost(e) {
         // Pure read: an integrity audit of the whole sheet for hand-edit
         // damage (v2.7.5). Writes nothing, moves no money.
         data = apiSheetCheck(ss);
+        break;
+      case 'costing':
+        // Pure read (v2.8.0): management information, no lock and no write.
+        // It must never reach the note or a cutoff figure — see apiCosting.
+        data = apiCosting(ss, settings, payload);
         break;
       case 'cutoff':
         // dryRun is a pure read (preview); only the archiving variant mutates.
@@ -1397,6 +1459,29 @@ function apiSavePrices(ss, payload) {
       sku: sku, price: round2(price), cheese_price: round2(cheesePrice),
       active: active
     };
+    // box_cost follows the SAME omitted-means-leave-alone rule as in_cutoff
+    // below, and for a stronger reason: it is not a flag with a safe default at
+    // all. An older phone (or a batch queued before v2.8.0) sends nothing here,
+    // and writing numOrThrow(undefined) === 0 would tell the costing screen
+    // that every container is free. An EXPLICIT blank means the same thing the
+    // sheet's blank cell means — no cost known — so it is written back blank,
+    // never coerced to 0.
+    if (!(r.boxCost === null || r.boxCost === undefined)) {
+      if (asStr(r.boxCost) === '') {
+        o.box_cost = '';
+      } else {
+        var boxCost = numOrThrow(r.boxCost, sku + ' box cost');
+        if (boxCost < 0) throw new Error(sku + ': the box cost cannot be negative.');
+        // NOT round2'd, unlike price and cheese_price. A container costs a
+        // FRACTION of a centavo — box4 is ₱0.375, his bundle price over the
+        // bundle count — and rounding it to 2 places would quietly restate the
+        // owner's own figure as ₱0.38 the first time the Maintenance screen
+        // loaded it and handed it back, which is ₱0.005 on every box he sells.
+        // What is stored is what he typed; the costing figures round only where
+        // they are shown.
+        o.box_cost = boxCost;
+      }
+    }
     // in_cutoff is written ONLY when the payload explicitly says so. Omitted (or
     // blank) means "leave it exactly as it is": upsertRows copies the existing
     // row before applying these keys, so an unmentioned column keeps its cell —
@@ -1497,10 +1582,10 @@ function apiSaveSettings(ss, payload) {
   return { saved: savedKeys, ignored: ignored };
 }
 
-/** Maintenance screen: edit each stock product's unit, reorder point and
- *  whether it is still in use. Upsert by product; opening_qty / opening_date
- *  are never touched here (the baseline is moved by "Correct the count"), and a
- *  product the payload does not mention is left alone. */
+/** Maintenance screen: edit each stock product's unit, reorder point, unit cost
+ *  (v2.8.0) and whether it is still in use. Upsert by product; opening_qty /
+ *  opening_date are never touched here (the baseline is moved by "Correct the
+ *  count"), and a product the payload does not mention is left alone. */
 function apiSaveStockItems(ss, payload) {
   var rows = payload.rows;
   if (!Array.isArray(rows)) throw new Error('rows must be an array.');
@@ -1525,6 +1610,27 @@ function apiSaveStockItems(ss, payload) {
       active: asBool(r.active),
       reorder_at: reorderAt
     };
+    // unit_cost is written ONLY when the payload carries the key at all — the
+    // same rule savePrices' box_cost and in_cutoff follow, and the same rule
+    // saveDay's v2.7.0 keys follow. reorder_at above can be unconditional
+    // because the Maintenance screen has always sent it; unit_cost cannot,
+    // because a phone on older code sends no such key and coercing that to 0
+    // would price the owner's whole consumption at nothing. An EXPLICIT blank
+    // is a real instruction ("I do not know what this costs") and is written
+    // back as a blank cell, not as ₱0.
+    if (!(r.unitCost === null || r.unitCost === undefined)) {
+      if (asStr(r.unitCost) === '') {
+        o.unit_cost = '';
+      } else {
+        var unitCost = numOrThrow(r.unitCost, product + ' unit cost');
+        if (unitCost < 0) throw new Error(product + ': the unit cost cannot be negative.');
+        // Stored exactly as typed, for the same reason box_cost is (see
+        // apiSavePrices): a cost derived by dividing a bundle price carries
+        // more than two decimals, and a save that rounds it makes the figure
+        // drift a little further every time the screen is opened.
+        o.unit_cost = unitCost;
+      }
+    }
     // A brand-new product is safe to create here (unlike a price): it carries no
     // money at all. It starts with a zero baseline and no baseline date, exactly
     // like the seeded six.
@@ -2012,6 +2118,348 @@ function excludedForPeriod(ss, start, end) {
   return { lines: lines, total: round2(total) };
 }
 
+
+/**
+ * "WHAT IT COSTS" (v2.8.0) — the costing the owner asked for on 2026-08-19
+ * ("Costing of the current setup, how much should the price be in correlation
+ * with the daily expenses"), answered from what was actually logged.
+ *
+ * PURE READ. No lock, no write, not one cell — and above all it NEVER touches
+ * the cutoff note or any figure in it. Costing is management INFORMATION;
+ * the note is money that has moved, and money that has moved is never restated.
+ * The one figure the two share is `revenue`, which is deliberately the SAME
+ * number the cutoff calls `total` (Σ DailyLog.total), read, not recomputed.
+ *
+ * TWO COST SOURCES, NEVER MIXED — the load-bearing rule of this whole action:
+ *   variable.stock = Σ StockUsage.qty × StockItems.unit_cost
+ *                    what was OPENED this period, whenever it was paid for.
+ *   variable.money = Σ Expenses.amount in Supplies/Octopus, MINUS every row
+ *                    that is a restock of a tracked product — money that LEFT
+ *                    this period, whenever it is opened.
+ * Adding a sack of flour to both counts it twice: once as money paid, once as
+ * flour opened. The subtraction is what closes that, and it is a name match
+ * (case-insensitive, trimmed) of the expense's `item` against StockItems —
+ * the same list `stock` prices its consumption from, so the two sides can never
+ * disagree about which products are tracked.
+ * Over a short window the two genuinely differ (his suppliers deliver on
+ * credit), which is why the screen says which is which rather than blending
+ * them into one word.
+ *
+ * variable.boxes = Σ per-sku boxes sold × Prices.box_cost — the container the
+ * balls leave in, priced per sku because that is how it varies.
+ *
+ * FIXED, not per ball: fixed.salary is Σ each open day's SNAPSHOTTED wage (the
+ * cutoff's own figure), fixed.shares is mama_per_cutoff + electric_per_cutoff
+ * for the period, and fixed.per_day spreads the two across the OPEN days.
+ *
+ * BALLS come from sold × the sku's `size`, so a `simple` sku (no size)
+ * contributes none, and an EXCLUDED sku is out of BOTH sides — its money was
+ * never in the cutoff either. Which rows are excluded is the count row's own
+ * `in_cutoff` SNAPSHOT, never today's Prices flag: the same rule that keeps a
+ * Maintenance tick from restating a cutoff that has already been sent.
+ *
+ * THE UNPRICED RULE: a product consumed (or a container sold) with no cost on
+ * file is LISTED in `unpriced` and left OUT of the total. A cost that is
+ * quietly too low is worse than one that is visibly absent — the owner would
+ * price his boxes off it. A blank cell means "no cost known"; an explicit 0
+ * (nori's container) is a real answer and counts as zero.
+ *
+ * NULL, NEVER ₱0: with no balls, or no open days, every per-ball and per-day
+ * figure comes back `null`. A division by zero dressed as ₱0 would read as
+ * "these balls cost nothing".
+ *
+ * TARGETS ARE ADVICE AND ARE NEVER APPLIED: `targets` says what each price
+ * WOULD need to be for a chosen nightly take, holding the sales mix as it
+ * actually was. Nothing here writes to Prices, and nothing here may.
+ */
+function apiCosting(ss, settings, payload) {
+  var start = reqDate(payload.start, 'start');
+  var end = reqDate(payload.end, 'end');
+  if (start > end) throw new Error('start (' + start + ') must be on or before end (' + end + ').');
+  var inPeriod = function (x) { return x.date >= start && x.date <= end; };
+
+  // The nightly take the targets aim at: what is LEFT per open day after every
+  // cost above, i.e. the same figure as per_day.left. Omitted means "show me a
+  // ladder of round figures" — illustrative, so the screen has something to
+  // read before the owner types his own.
+  var wants;
+  if (payload.targetPerDay === null || payload.targetPerDay === undefined ||
+      asStr(payload.targetPerDay) === '') {
+    wants = [500, 1000, 1500];
+  } else {
+    var want = numOrThrow(payload.targetPerDay, 'the nightly target');
+    if (want < 0) throw new Error('The nightly target cannot be negative.');
+    wants = [want];
+  }
+
+  var prices = readPrices(ss);
+  var items = readStockItems(ss);
+  var days = readDays(ss, dailySalaryOf(settings)).filter(inPeriod);
+  var counts = readCounts(ss, prices.map).filter(inPeriod);
+  var usage = readStockUsage(ss).filter(inPeriod);
+  var expenses = readExpenses(ss).filter(inPeriod);
+
+  // Product names are matched case-insensitively and trimmed, on BOTH sides of
+  // the double-count guard: "takoyaki flour " typed into an expense row is the
+  // same sack as "Takoyaki Flour" on the stock list, and a match that missed
+  // would count it twice.
+  var lower = function (v) { return asStr(v).toLowerCase(); };
+  var itemByName = Object.create(null);
+  items.list.forEach(function (it) {
+    var k = lower(it.product);
+    if (k && itemByName[k] === undefined) itemByName[k] = it;
+  });
+
+  // --- The period's shape. `revenue` and `salary` are the cutoff's own sums,
+  // so the two screens can never tell different stories about one fortnight.
+  // dayByDate also answers "was this date entered at all", which the caveats
+  // below need: a day that is simply missing is not a day with no sales.
+  var dayByDate = Object.create(null);
+  days.forEach(function (d) { dayByDate[d.date] = d; });
+  var daysOpen = 0, revenue = 0, salary = 0;
+  days.forEach(function (d) {
+    if (!d.closed) daysOpen++;
+    revenue += d.total;
+    salary += d.salary;   // already 0 on a closed day (readDays resolves it)
+  });
+  revenue = round2(revenue);
+  salary = round2(salary);
+
+  // --- Balls, containers, and what sold. Driven by the count rows' OWN
+  // in_cutoff snapshot; `sold` (not sold − custom_qty) is the right driver for
+  // both, because a special order's boxes were physically made and physically
+  // used — only their MONEY moved to the typed custom amount, and that amount
+  // is already inside `revenue`.
+  var soldBySku = Object.create(null);
+  var balls = 0, boxesCost = 0;
+  var unpricedBox = Object.create(null);
+  counts.forEach(function (c) {
+    if (!c.in_cutoff) return;            // excluded money is out of BOTH sides
+    var sold = asNum(c.sold);
+    soldBySku[c.sku] = (soldBySku[c.sku] || 0) + sold;
+    var p = prices.map[c.sku];
+    // A simple sku has no size and contributes no balls; so does a count row
+    // whose sku has left the Prices tab.
+    balls += sold * (p ? asNum(p.size) : 0);
+    if (sold === 0) return;
+    if (!p || p.box_cost === '') {
+      unpricedBox[c.sku] = (unpricedBox[c.sku] || 0) + sold;
+      return;
+    }
+    boxesCost += sold * asNum(p.box_cost);
+  });
+
+  // --- Consumption: what was OPENED, at the cost of the unit it is counted in.
+  var stockCost = 0;
+  var unpricedStock = Object.create(null);
+  var unpricedStockOrder = [];
+  usage.forEach(function (u) {
+    var qty = asNum(u.qty);
+    if (qty === 0) return;
+    var it = itemByName[lower(u.product)];
+    if (!it || it.unit_cost === '') {
+      // No cost on file (or a name the stock list does not know at all): the
+      // quantity is REPORTED and left out, never costed at nothing.
+      var name = it ? it.product : asStr(u.product);
+      if (unpricedStock[name] === undefined) { unpricedStock[name] = 0; unpricedStockOrder.push(name); }
+      unpricedStock[name] += qty;
+      return;
+    }
+    stockCost += qty * asNum(it.unit_cost);
+  });
+
+  // --- Money out: Supplies + Octopus, less every restock of a tracked product.
+  var moneyCost = 0;
+  expenses.forEach(function (x) {
+    if (x.category !== 'Supplies' && x.category !== 'Octopus') return;
+    // THE double-count guard. This row bought something the ledger already
+    // prices as consumption, so its money is not added again here.
+    if (itemByName[lower(x.item)]) return;
+    moneyCost += x.amount;
+  });
+
+  stockCost = round2(stockCost);
+  moneyCost = round2(moneyCost);
+  boxesCost = round2(boxesCost);
+  balls = round2(balls);
+
+  var variableTotal = round2(stockCost + moneyCost + boxesCost);
+  // mama_per_cutoff / electric_per_cutoff are per PERIOD by definition, so they
+  // are taken whole and then spread; a missing Settings row reads 0 rather than
+  // inventing a share the owner never entered.
+  var shares = round2(asNum(settings.mama_per_cutoff) + asNum(settings.electric_per_cutoff));
+  var fixedTotal = round2(salary + shares);
+
+  // The per-ball figures. `perBall` carries the containers; `ingredientPerBall`
+  // deliberately does NOT, because per_sku prices each sku's own container
+  // separately and adding both would charge every box for its box twice.
+  // Neither is rounded before it is multiplied — only what is returned is.
+  var perBall = balls > 0 ? round2(variableTotal / balls) : null;
+  var ingredientPerBall = balls > 0 ? (stockCost + moneyCost) / balls : null;
+
+  // --- Per sku: the pricing table, so this is the CURRENT price and the
+  // CURRENT flag (the question is what to charge tomorrow). `sold` beside it is
+  // the period's fact, classified by the snapshot like everything above — the
+  // two answer different questions on purpose.
+  var perSku = [];
+  prices.list.forEach(function (p) {
+    if (!p.in_cutoff) return;                       // out of both sides, so out of here
+    var sold = round2(soldBySku[p.sku] || 0);
+    if (!p.active && sold === 0) return;            // a retired sku nobody sold
+    var size = asNum(p.size);
+    var costPerBox = null, marginPerBox = null, marginPerBall = null;
+    if (ingredientPerBall !== null && p.box_cost !== '') {
+      costPerBox = round2(asNum(p.box_cost) + size * ingredientPerBall);
+      marginPerBox = round2(p.price - costPerBox);
+      // A simple sku has no balls to divide by, so it gets no per-ball margin.
+      if (size > 0) marginPerBall = round2(marginPerBox / size);
+    }
+    perSku.push({
+      sku: p.sku, label: p.label, sold: sold, price: round2(p.price),
+      cost_per_box: costPerBox, margin_per_box: marginPerBox,
+      margin_per_ball: marginPerBall
+    });
+  });
+
+  // --- Break-even, for the PERIOD (divide by days_open for a nightly figure).
+  // How many balls this fortnight had to sell for the margin on each to cover
+  // the fixed costs. Null when there are no balls to average, and null when the
+  // average ball loses money — there is no break-even then, and a number would
+  // pretend there is.
+  var breakEven = null;
+  if (balls > 0) {
+    var contribution = (revenue / balls) - (variableTotal / balls);
+    if (contribution > 0) breakEven = round2(fixedTotal / contribution);
+  }
+
+  var perDay = { revenue: null, cost: null, left: null };
+  if (daysOpen > 0) {
+    var revPerDay = revenue / daysOpen;
+    var costPerDay = (variableTotal + fixedTotal) / daysOpen;
+    perDay = {
+      revenue: round2(revPerDay),
+      cost: round2(costPerDay),
+      left: round2(revPerDay - costPerDay)
+    };
+  }
+
+  // --- Targets: ADVICE. Holding the sales mix exactly as it was, every price
+  // moves by one factor — the ratio between the revenue a night would need and
+  // the revenue a night actually made. With no open days, or no revenue to
+  // scale, there is no factor and the list is empty rather than full of
+  // invented prices.
+  var targets = [];
+  if (daysOpen > 0 && revenue > 0) {
+    var revenuePerDay = revenue / daysOpen;
+    var costsPerDay = (variableTotal + fixedTotal) / daysOpen;
+    wants.forEach(function (w) {
+      var factor = (costsPerDay + w) / revenuePerDay;
+      var rows = [];
+      prices.list.forEach(function (p) {
+        if (!p.in_cutoff || !p.active) return;
+        rows.push({ sku: p.sku, price: round2(p.price * factor) });
+      });
+      targets.push({ per_day: round2(w), prices: rows });
+    });
+  }
+
+  // --- What was left out, and why. Stock products in StockItems order first
+  // (then any name the list does not know), then containers in Prices order
+  // (then any sku the Prices tab no longer has), so the block reads the same
+  // every time.
+  var unpriced = [];
+  var emittedStock = Object.create(null);
+  items.list.forEach(function (it) {
+    if (unpricedStock[it.product] === undefined) return;
+    emittedStock[it.product] = true;
+    unpriced.push({ kind: 'stock', name: it.product, label: it.product, qty: round2(unpricedStock[it.product]) });
+  });
+  unpricedStockOrder.forEach(function (name) {
+    if (emittedStock[name]) return;
+    emittedStock[name] = true;
+    unpriced.push({ kind: 'stock', name: name, label: name, qty: round2(unpricedStock[name]) });
+  });
+  var emittedBox = Object.create(null);
+  prices.list.forEach(function (p) {
+    if (unpricedBox[p.sku] === undefined) return;
+    emittedBox[p.sku] = true;
+    unpriced.push({ kind: 'box', name: p.sku, label: p.label, qty: round2(unpricedBox[p.sku]) });
+  });
+  for (var sku in unpricedBox) {
+    if (emittedBox[sku]) continue;
+    emittedBox[sku] = true;
+    unpriced.push({ kind: 'box', name: sku, label: sku, qty: round2(unpricedBox[sku]) });
+  }
+
+  // RESPONSE: snake_case throughout. start/end echo the window the figures were
+  // computed over, because the screen has to STATE its window — the same reason
+  // apiCutoff's figures carry them.
+  // --- CAVEATS: what this period cannot honestly tell him (v2.8.0). The
+  // figures above are only ever as complete as the logging, and an
+  // UNDER-stated cost is the dangerous direction: it makes a price look
+  // safe to cut. His real Aug 16-31 proved it — with no purchases logged
+  // yet, cost per ball read 1.57 instead of ~5.80 and the targets advised
+  // dropping Box 10 from 105 to 83. So the caveats are stated plainly AND
+  // the targets are WITHHELD while any of them holds: advice computed from
+  // data we know is incomplete is worse than no advice.
+  // Two KINDS of caveat, and only one of them may switch the advice off. A
+  // caveat that makes the cost a FLOOR biases every target price DOWNWARD —
+  // "safe to cut" — and that is the one mistake this screen exists to prevent,
+  // so the targets are withheld while it holds. A caveat that merely thins the
+  // period (days not entered) spreads the per-cutoff shares across fewer
+  // nights, which biases the advice UPWARD; that is conservative, still useful,
+  // and stays on screen WITH its warning rather than being suppressed.
+  var caveats = [];
+  var costIsFloor = false;
+  if (!(moneyCost > 0)) {
+    costIsFloor = true;
+    caveats.push('No purchases are logged in this period, so the cost per ball counts only what came out of stock. ' +
+      'It is a floor, not the real cost — log the octopus, eggs, veggies and gas for these days first.');
+  }
+  if (unpriced.length > 0) {
+    costIsFloor = true;
+    caveats.push(unpriced.map(function (u) { return asStr(u.label || u.name); }).join(', ') +
+      (unpriced.length === 1 ? ' has' : ' have') + ' no cost set, so what was used of ' +
+      (unpriced.length === 1 ? 'it' : 'them') + ' is left out of every figure here. Set it under Maintenance.');
+  }
+  // Days with nothing entered, counted only up to YESTERDAY: tonight has not
+  // been logged yet at nine in the morning, and calling that a gap would cry
+  // wolf every single day.
+  var yday = addDaysStr(Utilities.formatDate(new Date(), TZ, 'yyyy-MM-dd'), -1);
+  var lastDay = end < yday ? end : yday;
+  var blankDays = 0;
+  for (var walk = start; walk <= lastDay; walk = addDaysStr(walk, 1)) {
+    if (!dayByDate[walk]) blankDays++;
+  }
+  if (blankDays > 0) {
+    caveats.push(blankDays + (blankDays === 1 ? ' day in this period has' : ' days in this period have') +
+      ' nothing entered, so every per-night figure is worked out from the ' + daysOpen +
+      (daysOpen === 1 ? ' night' : ' nights') + ' that are — and the per-cutoff shares are spread across those alone. ' +
+      'That makes the cost per night read HIGH, so the prices below are the cautious end.');
+  }
+  if (costIsFloor) targets = [];
+
+  return {
+    start: start, end: end,
+    days_open: daysOpen,
+    balls: balls,
+    revenue: revenue,
+    caveats: caveats,
+    variable: {
+      stock: stockCost, money: moneyCost, boxes: boxesCost, per_ball: perBall
+    },
+    fixed: {
+      salary: salary, shares: shares,
+      per_day: daysOpen > 0 ? round2(fixedTotal / daysOpen) : null
+    },
+    per_sku: perSku,
+    break_even_balls: breakEven,
+    per_day: perDay,
+    targets: targets,
+    unpriced: unpriced
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Cutoff note text — format must match the owner's real notes EXACTLY
 // (blank line placement, "- " with empty value for zero categories,
@@ -2266,6 +2714,12 @@ function readPrices(ss) {
     // duplicate is simply not listed, so one stray row can never double a sku
     // on the Sales screen or flip which price a save uses (v2.5.0).
     if (map[sku]) continue;
+    // box_cost is read RAW for the same reason reorder_at is (see
+    // readStockItems): asNum('') is 0, 0 is a legitimate container cost, and a
+    // coerced blank would come straight back on the next savePrices and fill
+    // the owner's untouched cells with literal 0s — turning "no cost known"
+    // into "costs nothing" and quietly understating every ball he sells.
+    var rawBoxCost = cellOf(r, t, 'box_cost');
     var p = {
       sku: sku,
       label: asStr(cellOf(r, t, 'label')) || sku,
@@ -2274,6 +2728,8 @@ function readPrices(ss) {
       price: asNum(cellOf(r, t, 'price')),
       cheese_price: asNum(cellOf(r, t, 'cheese_price')),
       active: asBool(cellOf(r, t, 'active')),
+      // What one container costs (v2.8.0). Blank = no cost known, shipped blank.
+      box_cost: asStr(rawBoxCost) === '' ? '' : asNum(rawBoxCost),
       // in_cutoff=FALSE means "sell it, count it, but keep its money out of
       // every cutoff figure". asCutoffFlag, NOT asBool: a blank cell (every
       // pre-v2.4.0 row) and a missing column both have to read TRUE.
@@ -2444,6 +2900,11 @@ function readStockItems(ss) {
       // into six blank cells the owner had never touched. `low` still computes
       // off asNum(reorder_at), so a blank still means no warning at all.
       var rawReorder = cellOf(r, t, 'reorder_at');
+      // unit_cost joins reorder_at as a RAW read, for the same reason and one
+      // more: a blank here does not mean ₱0, it means the owner has not told
+      // the app what this product costs, and apiCosting must be able to say so
+      // out loud instead of costing his consumption at nothing.
+      var rawUnitCost = cellOf(r, t, 'unit_cost');
       var o = {
         product: product,
         unit: asStr(cellOf(r, t, 'unit')),
@@ -2455,7 +2916,10 @@ function readStockItems(ss) {
         // usage row counts. Defaulting it to today would silently drop every
         // delivery already logged.
         opening_date: asDateStr(cellOf(r, t, 'opening_date')),
-        reorder_at: asStr(rawReorder) === '' ? '' : asNum(rawReorder)
+        reorder_at: asStr(rawReorder) === '' ? '' : asNum(rawReorder),
+        // What one unit costs to buy (v2.8.0). Blank = no cost known, shipped
+        // blank so the phone can show an empty box and save it back empty.
+        unit_cost: asStr(rawUnitCost) === '' ? '' : asNum(rawUnitCost)
       };
       list.push(o);
       map[product] = o;
@@ -2718,6 +3182,10 @@ function stockItemsWithStatus(ss, expensesAll, usageAll, countsAll, deliveriesAl
       opening_qty: it.opening_qty,
       opening_date: it.opening_date,
       reorder_at: it.reorder_at,
+      // What one unit costs (v2.8.0), shipped RAW like reorder_at: the phone
+      // shows it beside the reorder point under Maintenance and saves it back,
+      // and a blank must survive the round trip as a blank.
+      unit_cost: it.unit_cost,
       on_hand: s.on_hand,
       low: s.low,
       baseline_qty: s.baseline_qty,
@@ -2916,6 +3384,17 @@ function asCutoffFlag(v) {
  *  impossible (13/5/2026), because an unambiguous guess is the only safe one.
  *  Anything that is not a real calendar date is returned untouched — this
  *  normalizes, it never invents. */
+/** The date n days after a yyyy-MM-dd string, built from its PARTS so a
+ *  timezone can never shift it (mirrors the phone's addDays). Used to walk a
+ *  period looking for days with nothing in them. */
+function addDaysStr(s, n) {
+  var d = asDateStr(s);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  var p = d.split('-');
+  var t = new Date(Date.UTC(Number(p[0]), Number(p[1]) - 1, Number(p[2]) + Number(n), 12, 0, 0));
+  return Utilities.formatDate(t, 'UTC', 'yyyy-MM-dd');
+}
+
 function asDateStr(v) {
   if (v && typeof v.getTime === 'function' && typeof v.getMonth === 'function') {
     return Utilities.formatDate(v, TZ, 'yyyy-MM-dd');
@@ -3068,6 +3547,16 @@ function setupSheet() {
   // overwritten, and re-running setupSheet changes nothing the second time.
   var thresholds = backfillReorderPoints(ss);
   if (thresholds > 0) changes.push('StockItems: wrote reorder points onto ' + thresholds + ' blank row(s)');
+
+  // Backfill (v2.8.0): the owner's costs, in the SAME shape — BLANK cells only,
+  // on every migration, so the live sheet he has been logging into since August
+  // gets its real figures and every one he later edits stays his. Costing is
+  // read-only management information: neither of these touches a cutoff figure,
+  // the note, or a single peso that has already moved.
+  var unitCosts = backfillUnitCosts(ss);
+  if (unitCosts > 0) changes.push('StockItems: wrote unit costs onto ' + unitCosts + ' blank row(s)');
+  var boxCosts = backfillBoxCosts(ss);
+  if (boxCosts > 0) changes.push('Prices: wrote box costs onto ' + boxCosts + ' blank row(s)');
 
   Logger.log('setupSheet complete (v' + VERSION + '). ' +
     (changes.length ? 'Changes: ' + changes.join('; ') : 'Nothing to change.'));
@@ -3315,6 +3804,72 @@ function backfillReorderPoints(ss) {
   return filled;
 }
 
+/**
+ * Write the owner's unit costs (v2.8.0 — his figures, 2026-08-19) into every
+ * StockItems row for the six products below whose unit_cost cell is BLANK.
+ * The backfillReorderPoints shape exactly, and for the same reasons: it runs on
+ * every setupSheet, so his LIVE sheet gets its real figures without him typing
+ * them; a cell that already holds a value — an explicit 0 included — is never
+ * touched, so a cost he corrects later stays his and re-running is a no-op.
+ * A product not on the list keeps its blank, and a blank means "no cost known":
+ * apiCosting lists it under `unpriced` and leaves its consumption out of the
+ * total, rather than costing it at nothing.
+ * Returns how many cells were filled.
+ */
+function backfillUnitCosts(ss) {
+  var t = readTab(ss, TAB.STOCK_ITEMS);
+  var idx = t.col['unit_cost'];
+  if (idx === undefined) return 0; // cannot happen after migrateTab, but never throw here
+  var wanted = Object.create(null);
+  wanted['Takoyaki Flour'] = 120;
+  wanted['Takoyaki Sauce'] = 490;
+  wanted['Japanese Mayo'] = 300;
+  wanted['Bonito'] = 900;
+  wanted['Aonori'] = 550;
+  wanted['Togarashi'] = 320;
+  var filled = 0;
+  for (var i = 1; i < t.values.length; i++) {
+    var r = t.values[i];
+    var product = asStr(cellOf(r, t, 'product'));
+    if (!product || wanted[product] === undefined) continue;
+    if (asStr(cellOf(r, t, 'unit_cost')) !== '') continue; // hand-set (0 included) stands
+    t.sheet.getRange(i + 1, idx + 1).setValue(wanted[product]);
+    filled++;
+  }
+  return filled;
+}
+
+/**
+ * The container half of the same backfill (v2.8.0): the owner's bundle price
+ * divided by the bundle count, written into every Prices row below whose
+ * box_cost cell is BLANK. Same shape, same guarantee — a figure he has set by
+ * hand, an explicit 0 included, is never overwritten.
+ * Nori's 0 is deliberate and is written like any other value: it is sold in no
+ * container, so 0 is the ANSWER. Leaving it blank would put it in `unpriced`
+ * and read as "the owner has not told us yet", which is not true.
+ * Returns how many cells were filled.
+ */
+function backfillBoxCosts(ss) {
+  var t = readTab(ss, TAB.PRICES);
+  var idx = t.col['box_cost'];
+  if (idx === undefined) return 0; // cannot happen after migrateTab, but never throw here
+  var wanted = Object.create(null);
+  wanted['box4'] = 0.375;
+  wanted['box6'] = 3;
+  wanted['box10'] = 4.6;
+  wanted['nori'] = 0;
+  var filled = 0;
+  for (var i = 1; i < t.values.length; i++) {
+    var r = t.values[i];
+    var sku = asStr(cellOf(r, t, 'sku'));
+    if (!sku || wanted[sku] === undefined) continue;
+    if (asStr(cellOf(r, t, 'box_cost')) !== '') continue; // hand-set (0 included) stands
+    t.sheet.getRange(i + 1, idx + 1).setValue(wanted[sku]);
+    filled++;
+  }
+  return filled;
+}
+
 /** Seed Settings rows that are missing; generate the token if absent/blank.
  *  Returns the current token. */
 function seedSettings(ss) {
@@ -3389,11 +3944,16 @@ function seedPrices(ss) {
   // Owner sells takoyaki only — no drinks SKU. To add one later, append a row
   // here or directly in the Prices tab: group 'simple' means SOD/EOD counts with
   // a single price and no cheese split.
+  // box_cost (v2.8.0) is the owner's bundle price divided by the bundle count,
+  // i.e. what ONE container costs. Nori seeds an EXPLICIT 0 — it is sold in no
+  // container at all, and 0 here is an answer, not a missing figure, so it must
+  // not land in `unpriced`. A live sheet gets the same figures from
+  // backfillBoxCosts, blank cells only.
   var seeds = [
-    { sku: 'box4', label: 'Box 4', group: 'box', size: 4, price: 50, cheese_price: 60, active: true, in_cutoff: true },
-    { sku: 'box6', label: 'Box 6', group: 'box', size: 6, price: 65, cheese_price: 80, active: true, in_cutoff: true },
-    { sku: 'box10', label: 'Box 10', group: 'box', size: 10, price: 105, cheese_price: 125, active: true, in_cutoff: true },
-    { sku: 'nori', label: 'Nori', group: 'simple', size: '', price: 25, cheese_price: '', active: true, in_cutoff: false }
+    { sku: 'box4', label: 'Box 4', group: 'box', size: 4, price: 50, cheese_price: 60, active: true, in_cutoff: true, box_cost: 0.375 },
+    { sku: 'box6', label: 'Box 6', group: 'box', size: 6, price: 65, cheese_price: 80, active: true, in_cutoff: true, box_cost: 3 },
+    { sku: 'box10', label: 'Box 10', group: 'box', size: 10, price: 105, cheese_price: 125, active: true, in_cutoff: true, box_cost: 4.6 },
+    { sku: 'nori', label: 'Nori', group: 'simple', size: '', price: 25, cheese_price: '', active: true, in_cutoff: false, box_cost: 0 }
   ];
   appendObjects(ss, TAB.PRICES, seeds.filter(function (s) { return !have[s.sku]; }));
 }
@@ -3417,13 +3977,17 @@ function seedPrices(ss) {
 function seedStockItems(ss) {
   var t = readTab(ss, TAB.STOCK_ITEMS);
   var have = existingKeys(t, 'product');
+  // unit_cost is the owner's own figure per the unit above — per PACK of flour,
+  // per GALLON of sauce — which is what makes StockUsage.qty x unit_cost a
+  // consumption cost rather than a guess (v2.8.0). It seeds on a NEW tab; a
+  // live sheet gets the same figures from backfillUnitCosts, blank cells only.
   var seeds = [
-    { product: 'Takoyaki Flour', unit: 'pack', active: true, sort: 1 },
-    { product: 'Takoyaki Sauce', unit: 'gallon', active: true, sort: 2 },
-    { product: 'Japanese Mayo', unit: 'pack', active: true, sort: 3 },
-    { product: 'Bonito', unit: 'pack', active: true, sort: 4 },
-    { product: 'Aonori', unit: 'pack', active: true, sort: 5 },
-    { product: 'Togarashi', unit: 'pack', active: true, sort: 6 }
+    { product: 'Takoyaki Flour', unit: 'pack', active: true, sort: 1, unit_cost: 120 },
+    { product: 'Takoyaki Sauce', unit: 'gallon', active: true, sort: 2, unit_cost: 490 },
+    { product: 'Japanese Mayo', unit: 'pack', active: true, sort: 3, unit_cost: 300 },
+    { product: 'Bonito', unit: 'pack', active: true, sort: 4, unit_cost: 900 },
+    { product: 'Aonori', unit: 'pack', active: true, sort: 5, unit_cost: 550 },
+    { product: 'Togarashi', unit: 'pack', active: true, sort: 6, unit_cost: 320 }
   ];
   seeds.forEach(function (s) {
     s.opening_qty = 0;

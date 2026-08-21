@@ -914,11 +914,21 @@ test('setupSheet APPENDS the new columns and moves nothing', () => {
     ['2026-07-18', 'Supplies', 'flour', 300, '', '', 'old-exp-1', '2026-07-18 20:00:00']);
 
   const prices = ss.getSheetByName('Prices').getDataRange().getValues();
+  // PIN MOVED (v2.8.0, deliberate): box_cost is appended to the right of
+  // in_cutoff. The pin widens rather than loosens — it still names every column
+  // in order, so a reorder or a rename is as red as it ever was.
   assert.deepStrictEqual(prices[0], ['sku', 'label', 'group', 'size', 'price', 'cheese_price',
-    'active', 'in_cutoff'], 'in_cutoff must be APPENDED to the right of active');
+    'active', 'in_cutoff', 'box_cost'], 'in_cutoff, then box_cost, APPENDED to the right of active');
   assert.strictEqual(prices[1][4], 55, "the owner's edited Box 4 price must survive");
   assert.strictEqual(prices[1][7], '',
     'every EXISTING price row keeps a BLANK in_cutoff — which must read TRUE');
+  // PIN MOVED (v2.8.0, deliberate): box_cost does NOT stay blank on a live tab —
+  // backfillBoxCosts writes the owner's own bundle-price-per-container figures
+  // into the blank cells at migration, the same way the reorder points arrive,
+  // so the costing screen answers on his real sheet without him typing them.
+  assert.deepStrictEqual(prices.slice(1).map(r => [r[0], r[8]]),
+    [['box4', 0.375], ['box6', 3], ['box10', 4.6]],
+    'the migration backfills the container cost of every blank box_cost cell');
   // PIN MOVED (v2.5.0, deliberate): row seeds run only when the tab is CREATED,
   // so migrating a live Prices tab adds NO nori row — a sku the owner never set
   // up must not appear because a release happened. His real sheet already has
@@ -936,8 +946,10 @@ test('setupSheet creates and seeds the stock + cutoff tabs', () => {
   // The unit is the thing you OPEN, not a weight — that is what makes usage
   // countable in whole units like the boxes.
   const st = ss.getSheetByName('StockItems').getDataRange().getValues();
+  // PIN MOVED (v2.8.0, deliberate): unit_cost appended to the right of
+  // reorder_at. Still every column, still in order.
   assert.deepStrictEqual(st[0],
-    ['product', 'unit', 'active', 'sort', 'opening_qty', 'opening_date', 'reorder_at']);
+    ['product', 'unit', 'active', 'sort', 'opening_qty', 'opening_date', 'reorder_at', 'unit_cost']);
   assert.deepStrictEqual(st.slice(1).map(r => [r[0], r[1]]), [
     ['Takoyaki Flour', 'pack'], ['Takoyaki Sauce', 'gallon'], ['Japanese Mayo', 'pack'],
     ['Bonito', 'pack'], ['Aonori', 'pack'], ['Togarashi', 'pack']
@@ -946,11 +958,19 @@ test('setupSheet creates and seeds the stock + cutoff tabs', () => {
   // BACKFILLS the owner's reorder points into blank cells for the three products
   // he named — Flour 5, Sauce 1, Mayo 1 — so a fresh setup carries them too; the
   // other three keep their blank (no warning) until he sets one himself.
+  // PIN MOVED (v2.8.0, deliberate): every one of the six carries a unit_cost —
+  // the owner's own figure per the unit it is COUNTED in, seeded on creation and
+  // backfilled into blank cells on a live tab. All six are named here rather
+  // than a "not blank" check, because a wrong cost is a wrong price on the menu.
   const seededReorder = { 'Takoyaki Flour': 5, 'Takoyaki Sauce': 1, 'Japanese Mayo': 1 };
-  st.slice(1).forEach(r => assert.deepStrictEqual(r.slice(4, 7),
-    [0, '', seededReorder[r[0]] !== undefined ? seededReorder[r[0]] : ''],
+  const seededUnitCost = {
+    'Takoyaki Flour': 120, 'Takoyaki Sauce': 490, 'Japanese Mayo': 300,
+    'Bonito': 900, 'Aonori': 550, 'Togarashi': 320
+  };
+  st.slice(1).forEach(r => assert.deepStrictEqual(r.slice(4, 8),
+    [0, '', seededReorder[r[0]] !== undefined ? seededReorder[r[0]] : '', seededUnitCost[r[0]]],
     r[0] + ': the baseline is seeded empty (he sets it with "Correct the count"); ' +
-    'only the three named products get a reorder point'));
+    'only the three named products get a reorder point; all six get a unit cost'));
 
   assert.deepStrictEqual(ss.getSheetByName('StockUsage').getDataRange().getValues()[0],
     ['date', 'product', 'qty', 'entry_id', 'updated_at']);
@@ -2244,8 +2264,13 @@ test('savePrices edits only price/cheese_price/active, and only the listed skus'
   assert.strictEqual(r.ok, true, r.error);
   const after = ss.getSheetByName('Prices').getDataRange().getValues();
   assert.strictEqual(after.length, before.length, 'no row appended');
-  assert.deepStrictEqual(after[1], ['box4', 'Box 4', 'box', 4, 55, 65, true, true],
-    'label, group, size and in_cutoff must be left exactly as they were');
+  // PIN MOVED (v2.8.0, deliberate): the row is a column wider and its last cell
+  // is box_cost, which this payload does NOT carry — the seeded ₱0.375 must
+  // still be sitting there afterwards. That is the omitted-means-leave-alone
+  // rule pinned on the very row an ordinary price edit rewrites, so a writer
+  // that blanks (or zeroes) an unsent cost is red here first.
+  assert.deepStrictEqual(after[1], ['box4', 'Box 4', 'box', 4, 55, 65, true, true, 0.375],
+    'label, group, size, in_cutoff and box_cost must be left exactly as they were');
   assert.deepStrictEqual(after[2], before[2], 'box6 was not listed, so it must not change');
   assert.deepStrictEqual(after[3], before[3]);
   assert.deepStrictEqual(after[4], before[4], 'and nori keeps its in_cutoff FALSE');
@@ -2456,6 +2481,11 @@ test('saveStockItems edits unit/reorder point/active and keeps the baseline', ()
   assert.deepStrictEqual([row[1], row[2], row[6]], ['box', false, 3]);
   assert.deepStrictEqual([row[3], row[4], row[5]], [4, 12, '2026-07-01'],
     'sort, opening_qty and opening_date are not the phone\'s business');
+  // PIN MOVED (v2.8.0, deliberate): this payload carries no unitCost, so the
+  // seeded ₱900 must survive an ordinary unit/threshold edit untouched. A writer
+  // that fills the cell with 0 for a key it never received would tell the
+  // costing screen his bonito is free.
+  assert.strictEqual(row[7], 900, 'an unsent unit_cost is LEFT ALONE, never zeroed');
   assert.deepStrictEqual(after.slice(1).find(x => x[0] === 'Aonori'),
     before.slice(1).find(x => x[0] === 'Aonori'), 'an unlisted product must not change');
   // The baseline still stands, and a stocktake still moves it.
@@ -2473,8 +2503,12 @@ test('saveStockItems edits unit/reorder point/active and keeps the baseline', ()
   }).ok, true);
   const wasabi = ss.getSheetByName('StockItems').getDataRange().getValues().slice(1)
     .find(x => x[0] === 'Wasabi');
-  assert.deepStrictEqual(wasabi, ['Wasabi', 'tub', true, 7, 0, '', ''],
-    'a new product starts at sort 7 with an empty baseline and no threshold');
+  // PIN MOVED (v2.8.0, deliberate): a product the owner has only just named has
+  // no cost on file yet, so its unit_cost cell is BLANK — not 0. Blank is what
+  // makes apiCosting list it under `unpriced` instead of costing its
+  // consumption at nothing.
+  assert.deepStrictEqual(wasabi, ['Wasabi', 'tub', true, 7, 0, '', '', ''],
+    'a new product starts at sort 7 with an empty baseline, no threshold and no cost');
   const neg = post(ctx, {
     token, action: 'saveStockItems',
     payload: { rows: [{ product: 'Bonito', unit: 'pack', reorderAt: -2, active: true }] }
@@ -4545,6 +4579,528 @@ test('sheetCheck: every class of hand-edit damage gets its own plain sentence', 
   assert.match(all, /rows exist for 2026-07-20 but DailyLog has no such day/);
   assert.match(all, /"Takoyaki Floor" \(2026-07-27\) is not on the StockItems list/);
   assert.match(all, /stores Total 9999 but Cash/);
+});
+
+// ---------------------------------------------------------------------------
+// 25. v2.8.0 — "What it costs". Every figure here is READ-ONLY management
+// information, so this section carries two kinds of test: the arithmetic (each
+// figure hand-computed from the fixture, spelled out beside it, because the
+// owner will set his menu prices off these numbers), and the fences (the note
+// and every peso in the sheet are byte-identical whether costs are on file or
+// not — costing must never restate money that has moved).
+//
+// The load-bearing rule is the FIRST test below: consumption and money-out are
+// two different questions and a restock must never answer both.
+// ---------------------------------------------------------------------------
+console.log('\n--- 25. v2.8.0: what it costs (costing, unit_cost, box_cost) ---');
+
+const COST_PERIOD = { start: '2026-07-16', end: '2026-07-31' };
+function costing(ctx, token, extra) {
+  return post(ctx, { token, action: 'costing',
+    payload: Object.assign({}, COST_PERIOD, extra || {}) });
+}
+function expenseAt(ctx, token, date, category, item, amount, id) {
+  const r = post(ctx, { token, action: 'saveExpense',
+    payload: { date: date, category: category, item: item, amount: amount,
+      backlogRef: '', notes: '', entryId: id } });
+  assert.strictEqual(r.ok, true, r.error);
+}
+
+/** The fixture the arithmetic tests read, built through the REAL doors only.
+ *  Two open nights, one closed, on the seeded costs (Flour ₱120, Mayo ₱300;
+ *  box4 ₱0.375, box6 ₱3.00 a container; wage ₱200, Mama ₱500, Electric ₱500).
+ *
+ *  Nights   20 Jul  box4 ×100 (₱5,000) + 2 packs of Takoyaki Flour opened
+ *           21 Jul  box6 × 40 (₱2,600) + nori ×4 (₱100, EXCLUDED)
+ *                                      + 1 pack of Japanese Mayo opened
+ *           22 Jul  CLOSED
+ *  Money    Octopus ₱1,200 · Supplies "Veggies" ₱300 · Supplies
+ *           "takoyaki flour " ₱600 (a RESTOCK — the double-count guard's own
+ *           row, mis-cased and space-padded on purpose) · Other ₱900 ·
+ *           Electric ₱500 · and ₱9,999 of Supplies on 1 Aug, outside the window. */
+function costFixture() {
+  const f = freshSetup();
+  const { ctx, token } = f;
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-07-20',
+    counts: [{ sku: 'box4', sod: 100, eod: 0 }],
+    stock: [{ product: 'Takoyaki Flour', qty: 2 }], entryId: 'c-d1' }).ok, true);
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-07-21',
+    counts: [{ sku: 'box6', sod: 40, eod: 0 }, { sku: 'nori', sod: 4, eod: 0 }],
+    stock: [{ product: 'Japanese Mayo', qty: 1 }], entryId: 'c-d2' }).ok, true);
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-07-22', closed: true,
+    counts: [], entryId: 'c-d3' }).ok, true);
+  expenseAt(ctx, token, '2026-07-19', 'Octopus', 'pugita', 1200, 'c-x1');
+  expenseAt(ctx, token, '2026-07-19', 'Supplies', 'Veggies', 300, 'c-x2');
+  expenseAt(ctx, token, '2026-07-19', 'Supplies', 'takoyaki flour ', 600, 'c-x3');
+  expenseAt(ctx, token, '2026-07-19', 'Other', 'tricycle', 900, 'c-x4');
+  expenseAt(ctx, token, '2026-07-19', 'Electric', 'bill', 500, 'c-x5');
+  expenseAt(ctx, token, '2026-08-01', 'Supplies', 'next fortnight', 9999, 'c-x6');
+  return f;
+}
+
+test('THE double-count guard: a restock is consumption OR money out, never both', () => {
+  const { ctx, token } = costFixture();
+  const c = costing(ctx, token);
+  assert.strictEqual(c.ok, true, c.error);
+  // The sack of flour appears on BOTH sides of the ledger — ₱600 paid on the
+  // 19th, 2 packs opened on the 20th — and may be counted ONCE. Consumption is
+  // the side that keeps it, because it is the side that knows how much was USED.
+  assert.strictEqual(c.data.variable.stock, 540,
+    'consumption: 2 packs of Flour x 120 + 1 pack of Mayo x 300');
+  assert.strictEqual(c.data.variable.money, 1500,
+    'money out: Octopus 1,200 + Veggies 300. The 600 flour RESTOCK is NOT added — ' +
+    'with it this would read 2,100 and every ball would look dearer than it is');
+  // The match is on the NAME, case-insensitively and trimmed, against the same
+  // StockItems list the consumption side prices from — so the two can never
+  // disagree about which products are tracked.
+  assert.strictEqual(post(ctx, { token, action: 'saveExpense', payload: {
+    date: '2026-07-19', category: 'Supplies', item: '  JAPANESE MAYO  ', amount: 700,
+    backlogRef: '', notes: '', entryId: 'c-x7' } }).ok, true);
+  assert.strictEqual(costing(ctx, token).data.variable.money, 1500,
+    'shouted and padded, it is still the mayo the ledger already prices');
+  // ...and it is a NAME match, not a guess: "flour" is not a product on the
+  // list, so that money is ordinary Supplies and stays in.
+  expenseAt(ctx, token, '2026-07-19', 'Supplies', 'flour', 250, 'c-x8');
+  assert.strictEqual(costing(ctx, token).data.variable.money, 1750,
+    'a purchase whose name is NOT on the stock list is money out like any other');
+  // A restock filed under Octopus is subtracted on the same rule.
+  assert.strictEqual(post(ctx, { token, action: 'saveExpense', payload: {
+    date: '2026-07-19', category: 'Octopus', item: 'Bonito', amount: 900,
+    backlogRef: '', notes: '', entryId: 'c-x9' } }).ok, true);
+  assert.strictEqual(costing(ctx, token).data.variable.money, 1750,
+    'the category does not change what a restock is');
+});
+
+test('the costing arithmetic, figure by hand-computed figure', () => {
+  const { ctx, ss, token } = costFixture();
+  const before = JSON.stringify(snapshot(ss));
+  const c = costing(ctx, token);
+  assert.strictEqual(c.ok, true, c.error);
+  const d = c.data;
+
+  assert.strictEqual(d.start, '2026-07-16', 'the window is ECHOED — the screen has to state it');
+  assert.strictEqual(d.end, '2026-07-31');
+  assert.strictEqual(d.days_open, 2, 'the closed night is not an open day');
+  assert.strictEqual(d.revenue, 7600, "5,000 + 2,600 — the cutoff's OWN total, read not recomputed");
+  assert.strictEqual(d.balls, 640, '100 x 4 + 40 x 6; the excluded nori contributes none');
+
+  assert.strictEqual(d.variable.stock, 540, '2 x 120 + 1 x 300');
+  assert.strictEqual(d.variable.money, 1500, '1,200 + 300, the restock subtracted');
+  assert.strictEqual(d.variable.boxes, 157.5, '100 x 0.375 + 40 x 3.00');
+  // 2,197.50 of variable cost over 640 balls = 3.43359375, rounded for display.
+  assert.strictEqual(d.variable.per_ball, 3.43);
+
+  assert.strictEqual(d.fixed.salary, 400, "two open nights' snapshotted 200 — the closed one is 0");
+  assert.strictEqual(d.fixed.shares, 1000, 'Mama 500 + Electric 500, per PERIOD, taken whole');
+  assert.strictEqual(d.fixed.per_day, 700, '1,400 spread over the 2 OPEN days');
+
+  // Per sku the ingredient share is 2,040/640 = 3.1875 a ball — deliberately
+  // WITHOUT the container, because each sku is charged its own below.
+  assert.deepStrictEqual(d.per_sku, [
+    // 0.375 + 4 x 3.1875 = 13.125 -> 13.13; 50 - 13.13 = 36.87; /4 = 9.2175 -> 9.22
+    { sku: 'box4', label: 'Box 4', sold: 100, price: 50, cost_per_box: 13.13, margin_per_box: 36.87, margin_per_ball: 9.22 },
+    // 3 + 6 x 3.1875 = 22.125 -> 22.13; 65 - 22.13 = 42.87; /6 = 7.145 -> 7.15
+    { sku: 'box6', label: 'Box 6', sold: 40, price: 65, cost_per_box: 22.13, margin_per_box: 42.87, margin_per_ball: 7.15 },
+    // Sold nothing, still ACTIVE, so still priced: the question is what to
+    // charge tomorrow. 4.6 + 10 x 3.1875 = 36.475 -> 36.48
+    { sku: 'box10', label: 'Box 10', sold: 0, price: 105, cost_per_box: 36.48, margin_per_box: 68.52, margin_per_ball: 6.85 }
+  ], 'nori is EXCLUDED, so it is not in the pricing table at all');
+
+  // (7,600 - 2,197.50)/640 = 8.44140625 of margin a ball; 1,400/8.44140625.
+  assert.strictEqual(d.break_even_balls, 165.85, 'balls the FORTNIGHT had to sell to cover the fixed costs');
+  assert.deepStrictEqual(d.per_day, { revenue: 3800, cost: 1798.75, left: 2001.25 },
+    '7,600/2 a night; (2,197.50 + 1,400)/2 out; the rest is what a night leaves');
+  assert.deepStrictEqual(d.unpriced, [], 'every product opened and every box sold has a cost on file');
+
+  assert.strictEqual(JSON.stringify(snapshot(ss)), before,
+    'costing is a PURE READ: not one cell of the sheet may move');
+});
+
+test('costing spends the fixed costs on OPEN days only, never on a dark stall', () => {
+  const { ctx, token } = costFixture();
+  const two = costing(ctx, token).data;
+  // Three more closed nights. Nothing was sold, no wage was paid, and the
+  // fortnight's Mama + Electric did not grow — so not one per-day figure moves.
+  ['2026-07-23', '2026-07-24', '2026-07-25'].forEach((dt, i) => {
+    assert.strictEqual(saveDay(ctx, token, { date: dt, closed: true, counts: [], entryId: 'dark-' + i }).ok, true);
+  });
+  const more = costing(ctx, token).data;
+  assert.strictEqual(more.days_open, 2, 'a closed night is an ANSWER, not an open day');
+  assert.strictEqual(more.fixed.salary, 400, 'a dark stall pays no wage');
+  assert.deepStrictEqual(more.fixed, two.fixed, 'the spread is unchanged');
+  assert.deepStrictEqual(more.per_day, two.per_day);
+  assert.deepStrictEqual(more.targets, two.targets,
+    'spreading over ALL five days would make every night look ₱1,000 cheaper than it was');
+});
+
+test('an EXCLUDED sku is out of both sides — by the count row\'s own snapshot', () => {
+  const { ctx, token } = freshSetup();
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-07-20',
+    counts: [{ sku: 'box4', sod: 100, eod: 0 }, { sku: 'nori', sod: 8, eod: 0 }],
+    entryId: 'x-1' }).ok, true);
+  const before = costing(ctx, token).data;
+  assert.strictEqual(before.revenue, 5000, "nori's ₱200 was never inside the day's total");
+  assert.strictEqual(before.balls, 400, 'and it contributes no balls');
+  assert.strictEqual(before.variable.boxes, 37.5, '100 x 0.375 only — no container is costed for it');
+  assert.deepStrictEqual(before.per_sku.map(s => s.sku), ['box4', 'box6', 'box10']);
+
+  // Maintenance ticks nori back INTO the cutoff. The night has already been
+  // saved, so its 8 nori stay out of every figure above: history is classified
+  // by the row's OWN in_cutoff snapshot, the same rule that stops a tick from
+  // restating a fortnight that has already been sent.
+  assert.strictEqual(post(ctx, { token, action: 'savePrices',
+    payload: { rows: [{ sku: 'nori', price: 25, cheesePrice: '', active: true, inCutoff: true }] } }).ok, true);
+  const after = costing(ctx, token).data;
+  assert.strictEqual(after.revenue, 5000, 'the money that moved does not move again');
+  assert.strictEqual(after.balls, 400);
+  assert.strictEqual(after.variable.boxes, 37.5);
+  assert.strictEqual(after.per_sku.find(s => s.sku === 'nori').sold, 0,
+    'the flip cannot retro-count 8 nori it was not counting when they sold');
+  assert.ok(after.per_sku.find(s => s.sku === 'nori'),
+    'it IS in the pricing table now, because that table answers what to charge TOMORROW');
+});
+
+test('balls come from size: a simple sku sells, prices and contributes none', () => {
+  const { ctx, ss, token } = freshSetup();
+  // A drinks-shaped sku: no size, its own container cost, counting IN the
+  // cutoff. Added the way a product is really added — straight to the tab.
+  ctx.appendObjects(ss, 'Prices', [{ sku: 'juice', label: 'Juice', group: 'simple',
+    size: '', price: 20, cheese_price: '', active: true, in_cutoff: true, box_cost: 1.5 }]);
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-07-20',
+    counts: [{ sku: 'box4', sod: 100, eod: 0 }, { sku: 'juice', sod: 10, eod: 0 }],
+    stock: [{ product: 'Takoyaki Flour', qty: 2 }], entryId: 'j-1' }).ok, true);
+  const d = costing(ctx, token).data;
+  assert.strictEqual(d.revenue, 5200, 'its ₱200 IS revenue — it counts in the cutoff');
+  assert.strictEqual(d.balls, 400, 'but 10 juices are 0 balls: a simple sku has no size');
+  assert.strictEqual(d.variable.boxes, 52.5, '100 x 0.375 + 10 x 1.50 — its cup is still a container');
+  // 240 of stock over 400 balls = 0.60 a ball.
+  assert.strictEqual(d.variable.per_ball, 0.73, '(240 + 0 + 52.50)/400');
+  const juice = d.per_sku.find(s => s.sku === 'juice');
+  assert.strictEqual(juice.cost_per_box, 1.5, 'its container and nothing else — it holds no balls');
+  assert.strictEqual(juice.margin_per_box, 18.5);
+  assert.strictEqual(juice.margin_per_ball, null,
+    'no size, so no per-ball margin — a figure here would be a division by zero');
+});
+
+test('a cost NOT on file is listed and left OUT, never quietly costed at 0', () => {
+  const { ctx, ss, token } = freshSetup();
+  // "I do not know what bonito costs" is a real answer, and it is stored as a
+  // BLANK cell — the one instruction the phone may send that clears a cost.
+  assert.strictEqual(post(ctx, { token, action: 'saveStockItems',
+    payload: { rows: [{ product: 'Bonito', unit: 'pack', reorderAt: '', active: true, unitCost: '' }] } }).ok, true);
+  assert.strictEqual(post(ctx, { token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box6', price: 65, cheesePrice: 80, active: true, boxCost: '' }] } }).ok, true);
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-07-20',
+    counts: [{ sku: 'box4', sod: 100, eod: 0 }, { sku: 'box6', sod: 40, eod: 0 }],
+    stock: [{ product: 'Takoyaki Flour', qty: 2 }, { product: 'Bonito', qty: 3 }],
+    entryId: 'u-1' }).ok, true);
+  const d = costing(ctx, token).data;
+  assert.strictEqual(d.variable.stock, 240,
+    'the 3 packs of bonito are NOT in here — a total quietly too low is worse than one visibly absent');
+  assert.strictEqual(d.variable.boxes, 37.5, "and neither are box6's 40 containers");
+  assert.deepStrictEqual(d.unpriced, [
+    { kind: 'stock', name: 'Bonito', label: 'Bonito', qty: 3 },
+    { kind: 'box', name: 'box6', label: 'Box 6', qty: 40 }
+  ], 'both are SAID, with how much of each went uncosted, stock first then containers');
+  // box6 keeps its sold count and its price; only the cost figures go null.
+  const b6 = d.per_sku.find(s => s.sku === 'box6');
+  assert.strictEqual(b6.sold, 40);
+  assert.strictEqual(b6.price, 65);
+  assert.deepStrictEqual([b6.cost_per_box, b6.margin_per_box, b6.margin_per_ball], [null, null, null],
+    'no container cost, no margin — never a margin computed as if the box were free');
+  // An EXPLICIT 0 is an answer, not a gap: nori is sold in no container at all.
+  assert.strictEqual(post(ctx, { token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box10', price: 105, cheesePrice: 125, active: true, boxCost: 0 }] } }).ok, true);
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-07-21',
+    counts: [{ sku: 'box10', sod: 5, eod: 0 }], entryId: 'u-2' }).ok, true);
+  const d2 = costing(ctx, token).data;
+  assert.strictEqual(d2.unpriced.filter(u => u.name === 'box10').length, 0,
+    'an explicit 0 counts as zero and must never appear as "no cost known"');
+  assert.strictEqual(d2.variable.boxes, 37.5, '5 x 0 adds nothing, and nothing was skipped');
+  // A usage row naming a product the stock list has never heard of (renamed in
+  // the sheet, or hand-typed) is reported under the name it CARRIES, rather
+  // than dropped — a quantity nobody can cost is still a quantity that went out.
+  ctx.appendObjects(ss, 'StockUsage', [{ date: '2026-07-21', product: 'Takoyaki Floor',
+    qty: 4, entry_id: 'u-ghost', updated_at: '2026-07-21 21:00:00' }]);
+  const d3 = costing(ctx, token).data;
+  assert.deepStrictEqual(d3.unpriced.filter(u => u.kind === 'stock'), [
+    { kind: 'stock', name: 'Bonito', label: 'Bonito', qty: 3 },
+    { kind: 'stock', name: 'Takoyaki Floor', label: 'Takoyaki Floor', qty: 4 }
+  ], 'the products the list knows in sheet order, then the name it does not');
+  assert.strictEqual(d3.variable.stock, 240, 'and neither is costed at a guess');
+});
+
+test('no balls and no open days give NULL, never a division by zero dressed as ₱0', () => {
+  const { ctx, token } = freshSetup();
+  // Nothing logged at all.
+  let d = costing(ctx, token).data;
+  assert.strictEqual(d.days_open, 0);
+  assert.strictEqual(d.balls, 0);
+  assert.strictEqual(d.variable.per_ball, null);
+  assert.strictEqual(d.fixed.per_day, null);
+  assert.strictEqual(d.break_even_balls, null);
+  assert.deepStrictEqual(d.per_day, { revenue: null, cost: null, left: null });
+  assert.deepStrictEqual(d.targets, [], 'no revenue to scale, so no invented prices');
+  d.per_sku.forEach(s => assert.deepStrictEqual(
+    [s.cost_per_box, s.margin_per_box, s.margin_per_ball], [null, null, null],
+    s.sku + ': with no balls there is no per-ball share to add to its container'));
+  // An OPEN night that sold nothing but boxes with no balls in them: days_open
+  // is 1, so the per-DAY figures are real, and only the per-BALL ones are null.
+  assert.strictEqual(saveDay(ctx, token, { date: '2026-07-20', counts: [], entryId: 'z-1' }).ok, true);
+  d = costing(ctx, token).data;
+  assert.strictEqual(d.days_open, 1);
+  assert.strictEqual(d.balls, 0);
+  assert.strictEqual(d.variable.per_ball, null, 'still no balls to divide by');
+  assert.strictEqual(d.break_even_balls, null);
+  assert.strictEqual(d.fixed.per_day, 1200, 'but a night DID happen: 200 + 1,000');
+  assert.deepStrictEqual(d.per_day, { revenue: 0, cost: 1200, left: -1200 },
+    'a night that took nothing still cost the wage and the shares — and says so');
+});
+
+test('targets are ADVICE: computed from the mix, written nowhere', () => {
+  const { ctx, ss, token } = costFixture();
+  const pricesBefore = JSON.stringify(ss.getSheetByName('Prices').getDataRange().getValues());
+  // One asked-for figure -> one row. ₱1,798.75 of cost a night + ₱1,000 wanted
+  // against ₱3,800 actually taken = a factor of 0.7365..., applied to every
+  // active in-cutoff price, holding the sales mix exactly as it was.
+  const one = costing(ctx, token, { targetPerDay: 1000 }).data;
+  assert.strictEqual(one.targets.length, 1);
+  assert.strictEqual(one.targets[0].per_day, 1000);
+  assert.deepStrictEqual(one.targets[0].prices, [
+    { sku: 'box4', price: 36.83 },     // 50 x 2,798.75/3,800
+    { sku: 'box6', price: 47.87 },     // 65 x the same factor
+    { sku: 'box10', price: 77.33 }     // 105 x the same factor
+  ], 'nori is excluded, so it is not in the advice either');
+  // No figure asked for -> the illustrative ladder, so the screen has something
+  // to read before he types his own.
+  assert.deepStrictEqual(costing(ctx, token).data.targets.map(t => t.per_day), [500, 1000, 1500]);
+  assert.strictEqual(costing(ctx, token, { targetPerDay: '' }).data.targets.length, 3,
+    'a blank field means the ladder, never ₱0');
+  assert.strictEqual(JSON.stringify(ss.getSheetByName('Prices').getDataRange().getValues()),
+    pricesBefore, 'ADVICE. Not one price cell may be written by asking for a target');
+  const neg = costing(ctx, token, { targetPerDay: -1 });
+  assert.strictEqual(neg.ok, false);
+  assert.strictEqual(neg.error, 'The nightly target cannot be negative.');
+  const back = costing(ctx, token, { start: '2026-07-31', end: '2026-07-16' });
+  assert.strictEqual(back.ok, false);
+  assert.strictEqual(back.error, 'start (2026-07-31) must be on or before end (2026-07-16).');
+});
+
+test('THE FENCE: the cutoff note and its figures are byte-identical with and without costs', () => {
+  const { ctx, ss, token } = costFixture();
+  const withCosts = cutoffFor(ctx, token, '2026-07-16', '2026-07-31');
+  assert.strictEqual(withCosts.ok, true, withCosts.error);
+  // Ask for the costing in between, so a hidden write would show up here.
+  const sheetBefore = JSON.stringify(snapshot(ss));
+  assert.strictEqual(costing(ctx, token).ok, true);
+  assert.strictEqual(JSON.stringify(snapshot(ss)), sheetBefore, 'the read wrote nothing');
+
+  // Now empty both cost columns — the sheet exactly as it stood before v2.8.0
+  // backfilled it — by hand, so no writer's side effects are in play.
+  [['Prices', 'box_cost'], ['StockItems', 'unit_cost']].forEach(pair => {
+    const sh = ss.getSheetByName(pair[0]);
+    const v = sh.getDataRange().getValues();
+    const col = v[0].indexOf(pair[1]);
+    assert.ok(col >= 0, pair[0] + ' must have a ' + pair[1] + ' column');
+    for (let i = 1; i < v.length; i++) sh.getRange(i + 1, col + 1).setValue('');
+  });
+  const noCosts = cutoffFor(ctx, token, '2026-07-16', '2026-07-31');
+  assert.strictEqual(noCosts.ok, true, noCosts.error);
+  assert.strictEqual(noCosts.data.note_text, withCosts.data.note_text,
+    'the note his partner receives does not change by a single byte');
+  assert.deepStrictEqual(noCosts.data, withCosts.data,
+    'and neither does one figure on the Cutoff screen');
+  // ...and with no costs at all, the costing screen says so instead of pricing
+  // his balls at nothing.
+  const d = costing(ctx, token).data;
+  assert.strictEqual(d.variable.stock, 0);
+  assert.strictEqual(d.variable.boxes, 0);
+  assert.deepStrictEqual(d.unpriced.map(u => u.kind + ':' + u.name),
+    ['stock:Takoyaki Flour', 'stock:Japanese Mayo', 'box:box4', 'box:box6'],
+    'every uncosted product and container is named, in sheet order');
+  assert.strictEqual(d.revenue, 7600, 'revenue is the cutoff\'s own figure and never depends on a cost');
+});
+
+test('the cost backfills fill BLANK cells only, and re-running is a no-op', () => {
+  // His LIVE tabs, migrated once: box_cost and unit_cost appended and filled.
+  const { ctx, ss } = load(legacySpreadsheet());
+  ctx.setupSheet();
+  const prices = ss.getSheetByName('Prices');
+  const items = ss.getSheetByName('StockItems');
+  const boxCol = prices.getDataRange().getValues()[0].indexOf('box_cost') + 1;
+  const unitCol = items.getDataRange().getValues()[0].indexOf('unit_cost') + 1;
+  const rowOf = (sh, key) => sh.getDataRange().getValues().slice(1)
+    .findIndex(r => r[0] === key) + 2;
+  const boxCell = sku => prices.getDataRange().getValues()[rowOf(prices, sku) - 1][boxCol - 1];
+  const unitCell = p => items.getDataRange().getValues()[rowOf(items, p) - 1][unitCol - 1];
+  assert.strictEqual(boxCell('box6'), 3, 'precondition: the first migration filled the blanks');
+  assert.strictEqual(unitCell('Takoyaki Flour'), 120);
+
+  // The owner's own answers, typed over the backfill: box6 at an EXPLICIT 0 (a
+  // sack of boxes he was given), flour at 135 (the price went up)...
+  prices.getRange(rowOf(prices, 'box6'), boxCol).setValue(0);
+  items.getRange(rowOf(items, 'Takoyaki Flour'), unitCol).setValue(135);
+  // ...and Aonori emptied, because he no longer knows what it costs.
+  items.getRange(rowOf(items, 'Aonori'), unitCol).setValue('');
+
+  const after = JSON.stringify(snapshot(ss));
+  ctx.setupSheet();   // the migration runs again, as it does on every release
+  assert.strictEqual(boxCell('box6'), 0,
+    'an EXPLICIT 0 is a figure he set — the backfill must never read it as blank and overwrite it');
+  assert.strictEqual(unitCell('Takoyaki Flour'), 135, 'a hand-corrected cost stays his');
+  assert.strictEqual(unitCell('Aonori'), 550,
+    'a cell he emptied IS blank, so the backfill fills it — that is what makes the release self-installing');
+  assert.strictEqual(boxCell('box4'), 0.375, 'and the untouched cells are exactly as they were');
+  // Idempotent from here on: the third and fourth migrations must not move one
+  // cell, because setupSheet is run by hand on every release.
+  const settled = JSON.stringify(snapshot(ss));
+  ctx.setupSheet();
+  ctx.setupSheet();
+  assert.strictEqual(JSON.stringify(snapshot(ss)), settled,
+    're-running the migration is a no-op once every blank cost cell is filled');
+  assert.notStrictEqual(after, settled,
+    'sanity: the run that filled the emptied Aonori cell DID change the sheet');
+});
+
+test('an omitted cost key leaves the cell alone; a negative one is refused by name', () => {
+  const { ctx, ss, token } = freshSetup();
+  const boxCostOf = sku => {
+    const v = ss.getSheetByName('Prices').getDataRange().getValues();
+    return v.slice(1).find(r => r[0] === sku)[v[0].indexOf('box_cost')];
+  };
+  const unitCostOf = product => {
+    const v = ss.getSheetByName('StockItems').getDataRange().getValues();
+    return v.slice(1).find(r => r[0] === product)[v[0].indexOf('unit_cost')];
+  };
+  // A phone on OLDER code sends no cost key at all. Writing 0 for a key that
+  // was never sent would tell the costing screen everything is free.
+  assert.strictEqual(post(ctx, { token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box6', price: 70, cheesePrice: 85, active: true }] } }).ok, true);
+  assert.strictEqual(boxCostOf('box6'), 3, 'the seeded container cost survives an ordinary price edit');
+  assert.strictEqual(post(ctx, { token, action: 'saveStockItems',
+    payload: { rows: [{ product: 'Bonito', unit: 'box', reorderAt: 2, active: true }] } }).ok, true);
+  assert.strictEqual(unitCostOf('Bonito'), 900, 'and the unit cost survives a unit/threshold edit');
+  // An EXPLICIT blank is a real instruction and clears the cell.
+  assert.strictEqual(post(ctx, { token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box6', price: 70, cheesePrice: 85, active: true, boxCost: '' }] } }).ok, true);
+  assert.strictEqual(boxCostOf('box6'), '', '"I do not know" is stored as blank, never as 0');
+  // Byte-exact refusals — the phone shows these sentences on its red card.
+  let r = post(ctx, { token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box6', price: 70, cheesePrice: 85, active: true, boxCost: -1 }] } });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.error, 'box6: the box cost cannot be negative.');
+  r = post(ctx, { token, action: 'saveStockItems',
+    payload: { rows: [{ product: 'Bonito', unit: 'pack', reorderAt: 2, active: true, unitCost: -5 }] } });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.error, 'Bonito: the unit cost cannot be negative.');
+  // A cost of 0.375 is a third of a centavo and must survive un-rounded, or a
+  // hundred boxes drift by pesos. Both on the seeded cell AND through the
+  // writer: r2 anywhere on this path would store 0.38 and quietly restate the
+  // owner's own bundle-price-over-bundle-count figure.
+  assert.strictEqual(boxCostOf('box4'), 0.375);
+  assert.strictEqual(post(ctx, { token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box10', price: 105, cheesePrice: 125, active: true, boxCost: 0.375 }] } }).ok, true);
+  assert.strictEqual(boxCostOf('box10'), 0.375,
+    'savePrices stores the cost EXACTLY as typed — 0.38 here is a peso every 267 boxes');
+  assert.strictEqual(post(ctx, { token, action: 'saveStockItems',
+    payload: { rows: [{ product: 'Aonori', unit: 'pack', reorderAt: '', active: true, unitCost: 137.625 }] } }).ok, true);
+  assert.strictEqual(unitCostOf('Aonori'), 137.625, 'and so does saveStockItems');
+  const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
+  assert.strictEqual(boot.data.prices.find(p => p.sku === 'box4').box_cost, 0.375,
+    'and it reaches the phone unrounded');
+  assert.strictEqual(boot.data.prices.find(p => p.sku === 'box6').box_cost, '',
+    'a blank cell ships as BLANK, not as 0 — or the next save would write a literal 0 back');
+  assert.strictEqual(boot.data.stockItems.find(i => i.product === 'Bonito').unit_cost, 900);
+});
+
+test('costing CAVEATS: a floor switches the price advice OFF, a thin period leaves it ON', () => {
+  // The finding that made this exist: run over the owner's real Aug 16-31,
+  // where no purchases were logged yet, the cost read P1.57 a ball instead of
+  // ~P5.80 and the advice said to drop Box 10 from P105 to P83. An
+  // UNDER-stated cost is the one direction that loses money, so it withholds.
+  const { ctx, token } = freshSetup();
+  const D1 = ymdDaysAgo(3), D2 = ymdDaysAgo(2);
+  const night = (d, id) => assert.strictEqual(post(ctx, { token, action: 'saveDay', payload: {
+    date: d, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box10', sod: 20, eod: 0, cheeseQty: 0, gcashQty: 0, gcashCheeseQty: 0 }],
+    stock: [{ product: 'Takoyaki Flour', qty: 1 }], entryId: id } }).ok, true);
+  night(D1, 'cav-1'); night(D2, 'cav-2');
+  const ask = () => post(ctx, { token, action: 'costing',
+    payload: { start: ymdDaysAgo(4), end: ymdDaysAgo(1), targetPerDay: 750 } });
+
+  // No purchases logged: the cost is a floor, so no advice — and it SAYS so.
+  let r = ask();
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.data.variable.money, 0, 'nothing was paid out in this period');
+  assert.match(r.data.caveats.join('\n'), /No purchases are logged in this period/);
+  assert.match(r.data.caveats.join('\n'), /floor, not the real cost/);
+  assert.deepStrictEqual(r.data.targets, [], 'advice withheld while the cost is a floor');
+
+  // Log the octopus and the advice comes back — same nights, same balls.
+  assert.strictEqual(post(ctx, { token, action: 'saveExpense', payload: { date: D1,
+    category: 'Octopus', item: 'Octopus', amount: 1700, backlogRef: '', notes: '',
+    entryId: 'cav-octo' } }).ok, true);
+  r = ask();
+  assert.ok(r.data.variable.money > 0);
+  assert.ok(!/No purchases are logged/.test(r.data.caveats.join('\n')), 'that caveat is gone');
+  assert.strictEqual(r.data.targets.length, 1, 'and the advice is back on');
+
+  // A tracked product with no cost set is the OTHER floor: named, left out of
+  // every figure, advice off again.
+  assert.strictEqual(post(ctx, { token, action: 'saveStockItems',
+    payload: { rows: [{ product: 'Takoyaki Flour', unitCost: '' }] } }).ok, true);
+  r = ask();
+  assert.match(r.data.caveats.join('\n'), /Takoyaki Flour has no cost set/);
+  assert.deepStrictEqual(r.data.targets, [], 'an unpriced ingredient withholds it too');
+});
+
+test('costing: a day not entered is said, but never crying wolf about TONIGHT', () => {
+  // A thin period biases the cost per night HIGH (the per-cutoff shares land on
+  // fewer nights), which is the cautious direction — so it is stated and the
+  // advice STAYS. And today is not a gap: at nine in the morning tonight has
+  // simply not happened, so counting it would raise a false alarm every day.
+  const ss = new FakeSpreadsheet();
+  const now = new Date('2026-08-22T04:00:00Z');            // a real Manila morning
+  const ctx = makeContext(ss, now);
+  vm.createContext(ctx);
+  vm.runInContext(source, ctx, { filename: 'Code.gs' });
+  const token = ctx.setupSheet();
+  const p = (b) => JSON.parse(ctx.doPost({ postData: { contents: JSON.stringify(b) } }).getContent());
+  const night = (d, id) => assert.strictEqual(p({ token, action: 'saveDay', payload: {
+    date: d, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box10', sod: 10, eod: 0, cheeseQty: 0, gcashQty: 0, gcashCheeseQty: 0 }],
+    stock: [{ product: 'Takoyaki Flour', qty: 1 }], entryId: id } }).ok, true);
+  // Every night from the 16th to YESTERDAY is logged; today (the 22nd) is not.
+  ['2026-08-16','2026-08-17','2026-08-18','2026-08-19','2026-08-20','2026-08-21']
+    .forEach((d, i) => night(d, 'wolf-' + i));
+  assert.strictEqual(p({ token, action: 'saveExpense', payload: { date: '2026-08-17',
+    category: 'Supplies', item: 'Veggies', amount: 300, backlogRef: '', notes: '',
+    entryId: 'wolf-exp' } }).ok, true);
+  let r = p({ token, action: 'costing', payload: { start: '2026-08-16', end: '2026-08-31' } });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.deepStrictEqual(r.data.caveats, [],
+    "tonight is not a gap — nothing to warn about, so it says nothing");
+
+  // Miss the 19th and it says so, in nights not dates — and keeps the advice.
+  const ss2 = new FakeSpreadsheet();
+  const ctx2 = makeContext(ss2, now);
+  vm.createContext(ctx2);
+  vm.runInContext(source, ctx2, { filename: 'Code.gs' });
+  const token2 = ctx2.setupSheet();
+  const p2 = (b) => JSON.parse(ctx2.doPost({ postData: { contents: JSON.stringify(b) } }).getContent());
+  ['2026-08-16','2026-08-17','2026-08-18','2026-08-20','2026-08-21'].forEach((d, i) =>
+    assert.strictEqual(p2({ token: token2, action: 'saveDay', payload: {
+      date: d, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+      counts: [{ sku: 'box10', sod: 10, eod: 0, cheeseQty: 0, gcashQty: 0, gcashCheeseQty: 0 }],
+      stock: [{ product: 'Takoyaki Flour', qty: 1 }], entryId: 'gap-' + i } }).ok, true));
+  assert.strictEqual(p2({ token: token2, action: 'saveExpense', payload: { date: '2026-08-17',
+    category: 'Supplies', item: 'Veggies', amount: 300, backlogRef: '', notes: '',
+    entryId: 'gap-exp' } }).ok, true);
+  r = p2({ token: token2, action: 'costing', payload: { start: '2026-08-16', end: '2026-08-31', targetPerDay: 900 } });
+  assert.match(r.data.caveats.join('\n'), /1 day in this period has nothing entered/);
+  assert.match(r.data.caveats.join('\n'), /read HIGH, so the prices below are the cautious end/);
+  assert.strictEqual(r.data.targets.length, 1,
+    'a thin period is cautious, not wrong — the advice stays, with its warning');
 });
 
 // ---------------------------------------------------------------------------

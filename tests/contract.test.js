@@ -146,6 +146,13 @@ const S_VALIDATE  = slab('function isWhole(v){', "/** 'sku:box4' -> 'err-sku-box
 // v2.7.4: the Cutoff screen's stock block, plus the window guard it consults.
 const S_PREVINC   = slab('function missingDaysInPeriod(per){', 'function cutoffExpenseDate(per){');
 const S_STOCKCUT  = slab('function stockCutoffHTML(per){', 'function excludedBlockHTML(f){');
+// The readable name for a sku — what the target table prints, and the one thing
+// in the costing screen that reads a sku out of state rather than the response.
+const S_SKULABEL  = slab('function prettySku(sku){', 'function listPhrase(names){');
+// v2.8.0 "What it costs": costInvalidate, the null helpers, and the three
+// builders that turn a `costing` response into the screen. Lifted whole so the
+// tests render the REAL markup from the REAL server reply.
+const S_COSTING   = slab('let costOpen = false;', 'async function testConnection(){');
 
 function loadClient() {
   const src = `
@@ -164,6 +171,8 @@ ${S_MAINT}
 ${S_VALIDATE}
 ${S_PREVINC}
 ${S_STOCKCUT}
+${S_SKULABEL}
+${S_COSTING}
 let state = freshState();
 let queue = [];
 let config = freshConfig();
@@ -181,6 +190,16 @@ function persistDrafts(){}
 // Chrome the extracted slabs call but that has no DOM here.
 function updateStatus(){}
 function toast(){}
+// The costing screen's chrome. api() throws by default: the DEFAULT state here
+// is "no server", which is exactly the state the screen must survive without
+// drawing a page of zeros.
+let activeTab = 'ibapa';
+let lastErr = {};
+function $(){ return null; }
+function setErr(id, msg){ lastErr[id] = msg; }
+function renderIbapa(){}
+function friendlyError(err, nextStep){ return String((err && err.message) || err) + ' ' + nextStep; }
+async function api(){ throw new Error('no wire in this harness'); }
 return {
   get state(){ return state; },
   get benta(){ return benta; },
@@ -192,7 +211,7 @@ return {
   normStockDelivery, sanitizeQueue, sanitizeState,
   applyBootstrap, applyLocalDay, applyLocalExpense, applyLocalStockCount,
   applyLocalStockDelivery,
-  applyLocalCutoffSplit, applyLocalPrices, applyServerDay, reapplyQueue,
+  applyLocalCutoffSplit, applyLocalPrices, applyLocalStockItems, applyServerDay, reapplyQueue,
   backlogBalance,
   loadBentaForm, bentaPayload, computeDay, computeCutoff, buildNote,
   // The stock ledger the phone computes for itself (never stored) and the two
@@ -222,6 +241,23 @@ return {
   // v2.7.0: the SOD prefill's lookup, the one rule for the GCash card starting
   // open, the expense form's picklist, and the two display-only builders.
   prevEodFor, gcashHeld, supplyPicklist, cashRecapHTML, gcashSummaryText,
+  // v2.8.0: the costing screen. The three builders, the null helpers, the
+  // invalidator a Maintenance save calls, and live handles on the section's
+  // state so a test can put it in any of its rendering states.
+  costingHTML, costFiguresHTML, costTargetOutHTML, costInvalidate,
+  isNone, costPeso, costNum, costWhyNone, skuLabel,
+  costState(v){
+    if (v && 'open' in v) costOpen = v.open;
+    if (v && 'per' in v) costPer = v.per;
+    if (v && 'res' in v) costRes = v.res;
+    if (v && 'err' in v) costErr = v.err;
+    if (v && 'busy' in v) costBusy = v.busy;
+    if (v && 'stale' in v) costStale = v.stale;
+    if (v && 'target' in v) costTarget = v.target;
+    return { open: costOpen, per: costPer, res: costRes, err: costErr,
+      busy: costBusy, stale: costStale, target: costTarget };
+  },
+  errs: lastErr,
   // Live refs so a test can put the client in demo / API / still-queued states.
   // enqueue() is not in the extracted slabs, so tests push onto q directly.
   cfg: config, q: queue
@@ -240,7 +276,11 @@ const CONTRACT = {
   // of every cutoff figure". A camelCase slip here would arrive as undefined —
   // and the phone's fallback for an unknown flag has to be "counts in", so the
   // owner's excluded sku would quietly rejoin the note.
-  'bootstrap.prices[]':    [['cheese_price', 'cheesePrice'], ['in_cutoff', 'inCutoff']],
+  // box_cost (v2.8.0) is what ONE container for this sku costs. A camelCase slip
+  // would arrive as undefined, rawNum('') it to blank, and the costing screen
+  // would report every box the owner sells as having no cost on file — or, worse
+  // on the way back, write a literal 0 into the cell and price his boxes free.
+  'bootstrap.prices[]':    [['cheese_price', 'cheesePrice'], ['in_cutoff', 'inCutoff'], ['box_cost', 'boxCost']],
   // gcash_converted (v2.7.0) is tin cash swapped for a GCash transfer — already
   // inside the stored `gcash` and out of `cash`. lid_boxes is a plain count with
   // no money. A camelCase slip on either would read as 0 on the phone: the
@@ -261,7 +301,9 @@ const CONTRACT = {
   // delivered_before/used_before (v2.5.1) are the pre-window parts the phone
   // ADDS to its own in-window rows — a slip here silently drops every delivery
   // older than the bootstrap window from on-hand.
-  'bootstrap.stockItems[]':    [['on_hand', 'onHand'], ['reorder_at', 'reorderAt'], ['opening_qty', 'openingQty'], ['opening_date', 'openingDate'], ['baseline_qty', 'baselineQty'], ['baseline_date', 'baselineDate'], ['delivered_since', 'deliveredSince'], ['used_since', 'usedSince'], ['delivered_before', 'deliveredBefore'], ['used_before', 'usedBefore']],
+  // unit_cost (v2.8.0) is what one of THIS unit costs — the pack, the gallon —
+  // and it is what makes StockUsage.qty x unit_cost an answer at all.
+  'bootstrap.stockItems[]':    [['on_hand', 'onHand'], ['reorder_at', 'reorderAt'], ['opening_qty', 'openingQty'], ['opening_date', 'openingDate'], ['baseline_qty', 'baselineQty'], ['baseline_date', 'baselineDate'], ['delivered_since', 'deliveredSince'], ['used_since', 'usedSince'], ['delivered_before', 'deliveredBefore'], ['used_before', 'usedBefore'], ['unit_cost', 'unitCost']],
   'bootstrap.stockCounts[]':   [['counted_qty', 'countedQty'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt']],
   // v2.6.0: goods arriving are their own rows now. A camelCase slip here would
   // read as 0 delivered on the phone — a full shelf shown empty.
@@ -283,7 +325,16 @@ const CONTRACT = {
   // excluded_lines is the DISPLAY-ONLY block under the note. It enters no other
   // figure, but the Cutoff screen has to be able to read it.
   'cutoff.figures':        [['per_partner', 'perPartner'], ['excluded_lines', 'excludedLines']],
-  'bootstrap.lastCutoff':  [['per_partner', 'perPartner'], ['note_text', 'noteText'], ['generated_at', 'generatedAt']]
+  'bootstrap.lastCutoff':  [['per_partner', 'perPartner'], ['note_text', 'noteText'], ['generated_at', 'generatedAt']],
+  // v2.8.0 `costing`. Every one of these is read by the costing screen and by
+  // nothing else, so a camelCase slip is silent: costPeso(undefined) prints the
+  // dash the screen reserves for "no cost on file", and the owner would read a
+  // page of dashes as "the app cannot cost this" instead of a key mismatch.
+  'costing':               [['days_open', 'daysOpen'], ['per_sku', 'perSku'], ['break_even_balls', 'breakEvenBalls'], ['per_day', 'perDay']],
+  'costing.variable':      [['per_ball', 'perBall']],
+  'costing.fixed':         [['per_day', 'perDay']],
+  'costing.per_sku[]':     [['cost_per_box', 'costPerBox'], ['margin_per_box', 'marginPerBox'], ['margin_per_ball', 'marginPerBall']],
+  'costing.targets[]':     [['per_day', 'perDay']]
 };
 
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
@@ -455,12 +506,19 @@ function buildFixture() {
   assert.strictEqual(boot.ok, true, 'bootstrap failed: ' + boot.error);
   const check = post(ctx, { token, action: 'sheetCheck', payload: {} });
   assert.strictEqual(check.ok, true, 'sheetCheck failed: ' + check.error);
+  // The costing over the SAME period the cutoff above covers (v2.8.0). A target
+  // is asked for so `targets` is populated — an empty collection would make the
+  // contract pins on it assert nothing.
+  const costing = post(ctx, { token, action: 'costing',
+    payload: { start: PERIOD.start, end: PERIOD.end, targetPerDay: 800 } });
+  assert.strictEqual(costing.ok, true, 'costing failed: ' + costing.error);
   return {
     ctx, ss, token,
     saveDay: saveDay.data, stockDay: stockDay.data,
     saveExpense: saveExpense.data, delivery: delivery.data, payment: payment.data,
     stockCount: stockCount.data, split: split.data,
-    cutoff: cutoff.data, boot: boot.data, sheetCheck: check.data
+    cutoff: cutoff.data, boot: boot.data, sheetCheck: check.data,
+    costing: costing.data
   };
 }
 
@@ -1030,7 +1088,12 @@ function contractSamples() {
     'saveCutoffSplit':      F.split,
     'cutoff':               F.cutoff,
     'cutoff.figures':       F.cutoff.figures,
-    'bootstrap.lastCutoff': F.boot.lastCutoff
+    'bootstrap.lastCutoff': F.boot.lastCutoff,
+    'costing':              F.costing,
+    'costing.variable':     F.costing.variable,
+    'costing.fixed':        F.costing.fixed,
+    'costing.per_sku[]':    F.costing.per_sku,
+    'costing.targets[]':    F.costing.targets
   };
 }
 
@@ -1749,10 +1812,20 @@ test('MIGRATION: setupSheet appends the new columns and moves no existing cell',
   // The one appended column whose BLANK means TRUE. Asserted here, at the
   // migration itself, because this is the moment every live price row gets one.
   const priceRows = ss.getSheetByName('Prices').getDataRange().getValues();
+  // PIN MOVED (v2.8.0, deliberate): box_cost is appended after in_cutoff, and
+  // the two appended columns behave OPPOSITELY on purpose — in_cutoff stays
+  // BLANK (a blank reads TRUE, so the money stays in the cutoff), while
+  // box_cost is BACKFILLED with the owner's own container costs (a blank would
+  // mean "no cost known" and drop his boxes out of the costing total). Both
+  // halves are pinned here, at the migration, because this is the moment every
+  // live price row gets both cells.
   assert.deepStrictEqual(priceRows[0], ['sku', 'label', 'group', 'size', 'price',
-    'cheese_price', 'active', 'in_cutoff']);
+    'cheese_price', 'active', 'in_cutoff', 'box_cost']);
   assert.deepStrictEqual(priceRows.slice(1, 4).map(r => r[7]), ['', '', ''],
     'box4/box6/box10 keep a BLANK in_cutoff — and a blank must read TRUE');
+  assert.deepStrictEqual(priceRows.slice(1, 4).map(r => [r[0], r[8]]),
+    [['box4', 0.375], ['box6', 3], ['box10', 4.6]],
+    'box_cost is backfilled onto the live rows — his bundle price per container');
   assert.deepStrictEqual(ss.getSheetByName('Expenses').getDataRange().getValues()[0].slice(8),
     ['stock_product', 'stock_qty']);
 
@@ -1933,6 +2006,7 @@ test('NO response anywhere contains a camelCase key (only the named containers)'
   assertNoCamelKeys('saveCutoffSplit', F.split);
   assertNoCamelKeys('cutoff', F.cutoff);
   assertNoCamelKeys('spec cutoff', SP.cutoff);
+  assertNoCamelKeys('costing', F.costing);
   const ping = post(BK.ctx, { token: BK.token, action: 'ping', payload: {} });
   assertNoCamelKeys('ping', ping.data);
 });
@@ -4603,6 +4677,397 @@ atest('a queued pre-2.7.0 saveDay drains and lands byte-identical to the explici
   // And the phone's mirror says the same after the drain's own refresh.
   assert.strictEqual(app.state.days[D].gcash_converted, 0);
   assert.strictEqual(app.state.days[D].lid_boxes, 0);
+});
+
+// ---------------------------------------------------------------------------
+// 20. v2.8.0 "What it costs" across the seam. The costing is computed ENTIRELY
+// on the server and rendered entirely on the phone, so there is no arithmetic
+// to cross-check here — the seam itself is the whole risk. Every one of these
+// keys is read by ONE screen and by nothing else, which is what makes a slip
+// silent: the screen prints a dash for a missing figure on purpose, so a
+// camelCase key would render as "we do not know" rather than as an error.
+//
+// The two editable costs get the harsher treatment, because they travel BACK:
+// a blank that arrives as 0 does not just display wrong, it is written into the
+// owner's sheet on the next Maintenance save and prices his balls at nothing.
+// ---------------------------------------------------------------------------
+console.log('\n--- 20. v2.8.0 across the seam: what it costs, unit_cost, box_cost ---');
+
+/** A client with the costing section OPEN on a given server reply. */
+function costingClient(bootData, costData, target) {
+  const app = syncedClient(bootData);
+  app.costState({ open: true, per: { start: PERIOD.start, end: PERIOD.end },
+    target: target === undefined ? '' : target,
+    res: costData ? { key: PERIOD.start + '_' + PERIOD.end,
+      target: target === undefined ? '' : target, data: costData } : null });
+  return app;
+}
+
+test('box_cost and unit_cost round-trip the normalizers — blank stays BLANK, 0.375 stays 0.375', () => {
+  const app = syncedClient(F.boot);
+  const box4 = app.state.prices.find(p => p.sku === 'box4');
+  assert.strictEqual(box4.box_cost, 0.375,
+    'a third of a centavo survives the seam unrounded — r2 here would restate his own figure');
+  assert.strictEqual(app.state.prices.find(p => p.sku === 'nori').box_cost, 0,
+    'an explicit 0 is an ANSWER and must arrive as 0, not as blank');
+  const flour = app.state.stockItems.find(i => i.product === 'Takoyaki Flour');
+  assert.strictEqual(flour.unit_cost, 120);
+
+  // The blank half, which is the one that can write ₱0 into the sheet. Cleared
+  // through the REAL server, read back through the REAL normalizers.
+  assert.strictEqual(post(F.ctx, { token: F.token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box6', price: 65, cheesePrice: 80, active: true, boxCost: '' }] } }).ok, true);
+  assert.strictEqual(post(F.ctx, { token: F.token, action: 'saveStockItems',
+    payload: { rows: [{ product: 'Bonito', unit: 'pack', reorderAt: '', active: true, unitCost: '' }] } }).ok, true);
+  const boot2 = post(F.ctx, { token: F.token, action: 'bootstrap', payload: {} });
+  assertPairs('bootstrap.prices[]', boot2.data.prices, CONTRACT['bootstrap.prices[]']);
+  assertPairs('bootstrap.stockItems[]', boot2.data.stockItems, CONTRACT['bootstrap.stockItems[]']);
+  const app2 = syncedClient(boot2.data);
+  assert.strictEqual(app2.state.prices.find(p => p.sku === 'box6').box_cost, '',
+    'a blank cell must reach the phone as BLANK — as 0 it would come straight back and price the box free');
+  assert.strictEqual(app2.state.stockItems.find(i => i.product === 'Bonito').unit_cost, '');
+
+  // ...and an OLDER deployment that still spells them camelCase must not zero
+  // them either (the compatibility fallback every other key gets).
+  const legacyBoot = Object.assign({}, F.boot, {
+    prices: toLegacy(F.boot.prices, CONTRACT['bootstrap.prices[]']),
+    stockItems: toLegacy(F.boot.stockItems, CONTRACT['bootstrap.stockItems[]'])
+  });
+  const app3 = syncedClient(legacyBoot);
+  assert.strictEqual(app3.state.prices.find(p => p.sku === 'box4').box_cost, 0.375);
+  assert.strictEqual(app3.state.stockItems.find(i => i.product === 'Takoyaki Flour').unit_cost, 120);
+});
+
+test('a cost the payload does not mention is LEFT ALONE on the phone too', () => {
+  const app = syncedClient(F.boot);
+  // What a build that predates this release still has sitting in queue_v1: a
+  // price row and a stock row with no cost key at all. Applied locally, both
+  // costs must be exactly where they were, or the phone and the sheet start
+  // disagreeing about what a box costs.
+  app.applyLocalPrices({ rows: [{ sku: 'box4', price: 55, cheesePrice: 65, active: true, inCutoff: true }] });
+  const box4 = app.state.prices.find(p => p.sku === 'box4');
+  assert.strictEqual(box4.price, 55, 'the price DID move');
+  assert.strictEqual(box4.box_cost, 0.375, 'and the cost did not');
+  app.applyLocalStockItems({ rows: [{ product: 'Takoyaki Flour', unit: 'sako', reorderAt: 9, active: true }] });
+  const flour = app.state.stockItems.find(i => i.product === 'Takoyaki Flour');
+  assert.strictEqual(flour.unit, 'sako');
+  assert.strictEqual(flour.unit_cost, 120, 'an omitted unitCost is not a ₱0 unit cost');
+  // An explicitly typed figure travels and lands UNROUNDED.
+  app.applyLocalPrices({ rows: [{ sku: 'box4', price: 55, cheesePrice: 65, active: true, boxCost: 0.425 }] });
+  assert.strictEqual(app.state.prices.find(p => p.sku === 'box4').box_cost, 0.425,
+    'r2 here would round his 0.425 to 0.43 and drift by pesos over a hundred boxes');
+});
+
+test('the Maintenance payload OMITS a blank cost field, on both cards', () => {
+  // saveMaintPrices / saveMaintStock are DOM-bound (they read the live inputs
+  // and then enqueue), so the omission rule is pinned against the source — the
+  // behaviour it produces is pinned above, through applyLocal*, and on the
+  // server side in run-tests.js.
+  assert.match(HTML, /if \(txt\(m\.boxCost\)\.trim\(\) !== ''\) row\.boxCost = num\(m\.boxCost\);/,
+    'a blank box-cost field must leave the KEY OUT — never send 0, never blank the cell');
+  assert.match(HTML, /if \(unitCost !== ''\) row\.unitCost = num\(unitCost\);/,
+    'and the same on the stock list');
+  assert.ok(!/row\.boxCost = r2\(/.test(HTML), 'the box cost is never rounded on the way out');
+  assert.ok(!/row\.unitCost = r2\(/.test(HTML), 'nor the unit cost');
+  // Both fields exist beside the figures they belong to, and an unset cost says
+  // so rather than showing a 0 the owner never typed.
+  assert.match(HTML, /data-mboxcost="' \+ sk \+ '" inputmode="decimal" autocomplete="off" placeholder="not set"/);
+  assert.match(HTML, /data-munitcost="' \+ esc\(s\.product\) \+ '" inputmode="decimal" autocomplete="off" placeholder="not set"/);
+  // A negative cost is refused on the phone in the SERVER's own sentence, byte
+  // for byte — asserted against what the live server actually returns.
+  const app = syncedClient(F.boot);
+  const serverBox = post(F.ctx, { token: F.token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box6', price: 65, cheesePrice: 80, active: true, boxCost: -1 }] } });
+  assert.strictEqual(serverBox.ok, false);
+  assert.strictEqual(
+    app.priceRowError({ sku: 'box6', label: 'Box 6', group: 'box', size: 6 },
+      { price: 65, cheesePrice: 80, active: true, inCutoff: true, boxCost: '-1' }),
+    serverBox.error, 'the phone and the server must refuse a negative box cost in the same words');
+  const serverUnit = post(F.ctx, { token: F.token, action: 'saveStockItems',
+    payload: { rows: [{ product: 'Bonito', unit: 'pack', reorderAt: '', active: true, unitCost: -5 }] } });
+  assert.strictEqual(serverUnit.ok, false);
+  assert.strictEqual(serverUnit.error, 'Bonito: the unit cost cannot be negative.');
+  assert.ok(HTML.indexOf("product + ': the unit cost cannot be negative.'") >= 0,
+    'the stock card refuses it in that same sentence');
+  // Every Maintenance save throws the costing answer away: it was computed from
+  // the figures that just changed. Wired three times, and it really does throw
+  // the answer away — an answer left sitting under a fresh label is a figure
+  // that no longer describes anything on the sheet.
+  assert.strictEqual((HTML.match(/costInvalidate\(\);/g) || []).length, 3,
+    'all three Maintenance savers invalidate the costing');
+  const inv = costingClient(F.boot, F.costing, '800');
+  assert.ok(inv.costState().res, 'precondition: an answer is on screen');
+  inv.costInvalidate();
+  const after = inv.costState();
+  assert.strictEqual(after.res, null, 'the answer is thrown away, not relabelled');
+  assert.strictEqual(after.err, '');
+  assert.strictEqual(after.stale, true, 'and the screen SAYS the figures were thrown away');
+  assert.match(inv.costingHTML(), /A cost was changed, so the old figures were thrown away\./);
+});
+
+test('the screen shows the caveats ABOVE the figures they qualify (v2.8.0)', () => {
+  // The card exists because the owner's real Aug 16-31 read P1.57 a ball with
+  // no purchases logged and advised cutting Box 10 to P83. The warning has to
+  // sit above every number it qualifies, and it must say whether the advice is
+  // switched off or merely cautious — those are different sentences.
+  const app = costingClient(F.boot, F.costing, '800');
+  const withFloor = Object.assign({}, F.costing, {
+    caveats: ['No purchases are logged in this period, so the cost per ball counts only what came out of stock.'],
+    targets: []
+  });
+  const hOff = app.costFiguresHTML({ key: 'k', target: '800', data: withFloor },
+    { start: PERIOD.start, end: PERIOD.end });
+  assert.match(hOff, /Read this first/);
+  assert.match(hOff, /No purchases are logged in this period/);
+  assert.match(hOff, /price advice stays switched off/);
+  assert.ok(hOff.indexOf('Read this first') < hOff.indexOf('These nights'),
+    'the warning sits ABOVE the figures it qualifies');
+
+  const thin = Object.assign({}, F.costing, {
+    caveats: ['9 days in this period have nothing entered, so the prices below are the cautious end.'],
+    targets: [{ per_day: 800, prices: [{ sku: 'box10', price: 120 }] }]
+  });
+  const hOn = app.costFiguresHTML({ key: 'k', target: '800', data: thin },
+    { start: PERIOD.start, end: PERIOD.end });
+  assert.match(hOn, /9 days in this period have nothing entered/);
+  assert.match(hOn, /leans to the cautious side/,
+    'advice still on: the wording must not claim it was switched off');
+  assert.ok(!/stays switched off/.test(hOn));
+
+  // A caveat carries no sheet data today, but it is server text rendered into
+  // markup — escaped exactly once, like every other sentence on this screen.
+  const nasty = Object.assign({}, F.costing, { caveats: ['<img src=x onerror=1> & "flour"'], targets: [] });
+  const hEsc = app.costFiguresHTML({ key: 'k', target: '', data: nasty },
+    { start: PERIOD.start, end: PERIOD.end });
+  assert.ok(hEsc.indexOf('<img src=x') === -1, 'never raw');
+  assert.match(hEsc, /&lt;img src=x onerror=1&gt; &amp; &quot;flour&quot;|&lt;img src=x onerror=1&gt; &amp; "flour"/);
+
+  // And no caveats means no card at all — a clean period says nothing.
+  const clean = Object.assign({}, F.costing, { caveats: [] });
+  const hClean = app.costFiguresHTML({ key: 'k', target: '800', data: clean },
+    { start: PERIOD.start, end: PERIOD.end });
+  assert.ok(!/Read this first/.test(hClean));
+});
+
+test('the REAL costing reply renders the REAL screen: every figure, escaped once', () => {
+  const app = costingClient(F.boot, F.costing, '800');
+  const h = app.costFiguresHTML({ key: PERIOD.start + '_' + PERIOD.end, target: '800', data: F.costing },
+    { start: PERIOD.start, end: PERIOD.end });
+  // The window is STATED, because the figures mean nothing without it.
+  assert.ok(h.indexOf('These nights') >= 0);
+  assert.ok(h.indexOf('Nights open') >= 0 && h.indexOf('Balls sold') >= 0);
+  // The consumed-vs-paid sentence, which is the whole reason the two cost
+  // sources are shown apart.
+  assert.match(h, /Stock opened and boxes used are what was <b>used up<\/b>/);
+  assert.match(h, /Supplies and octopus are what was <b>paid for<\/b>/);
+  assert.match(h, /never added into one figure/);
+  // ...and the fence, said on the screen itself.
+  assert.match(h, /It changes no cutoff, no note and no price\./);
+  // The per-ball stack, the fixed-cost card, the per-sku margins, break-even
+  // and the night — all present, and every sku label escaped exactly once.
+  assert.ok(h.indexOf('Every ball') >= 0 && h.indexOf('Every night') >= 0);
+  assert.ok(h.indexOf('What each box leaves') >= 0);
+  assert.ok(h.indexOf('Balls a night just to break even') >= 0);
+  assert.ok(h.indexOf('A night takes') >= 0 && h.indexOf('A night costs') >= 0);
+  F.costing.per_sku.forEach(r => assert.ok(h.indexOf('>' + r.label + '<') >= 0,
+    r.sku + ': its label must be on the screen'));
+  assert.ok(h.indexOf('&amp;amp;') < 0, 'nothing may be double-escaped');
+  // The target table answers the figure that was ASKED for, and says it is advice.
+  assert.match(h, /To leave more a night/);
+  assert.match(h, /Advice only — nothing has been saved\./);
+  F.costing.targets[0].prices.forEach(pr => assert.ok(
+    h.indexOf('>' + app.skuLabel(pr.sku) + '<') >= 0, pr.sku + ': its target price must be listed'));
+});
+
+test('sheet data in the costing reply is escaped exactly once, label and name', () => {
+  // A product and a sku whose names carry markup — the shape a hand-typed sheet
+  // row really takes. Both reach the screen through `label`/`name`, so both are
+  // the phone's to escape.
+  const app = costingClient(F.boot, null);
+  const nasty = {
+    start: PERIOD.start, end: PERIOD.end, days_open: 1, balls: 40, revenue: 500,
+    variable: { stock: 10, money: 20, boxes: 5, per_ball: 0.88 },
+    fixed: { salary: 200, shares: 1000, per_day: 1200 },
+    per_sku: [{ sku: 'box4', label: '<img src=x onerror=1>', sold: 10, price: 50,
+      cost_per_box: 4, margin_per_box: 46, margin_per_ball: 11.5 }],
+    break_even_balls: 100, per_day: { revenue: 500, cost: 1235, left: -735 },
+    targets: [], unpriced: [{ kind: 'stock', name: 'Bad & "Worse"', label: 'Bad & "Worse"', qty: 3 }]
+  };
+  const h = app.costFiguresHTML({ key: PERIOD.start + '_' + PERIOD.end, target: '', data: nasty },
+    { start: PERIOD.start, end: PERIOD.end });
+  assert.ok(h.indexOf('<img src=x') < 0, 'a sku label may never reach the DOM as markup');
+  assert.match(h, /&lt;img src=x onerror=1&gt;/);
+  assert.match(h, /Bad &amp; &quot;Worse&quot;/);
+  assert.ok(h.indexOf('&amp;amp;') < 0, 'escaped exactly ONCE, not twice');
+  // And the label carries the sign: a night that loses money never prints -₱735.
+  assert.match(h, /A night loses/);
+  assert.ok(h.indexOf('-₱') < 0 && h.indexOf('₱-') < 0, 'the sign lives in the label, never in the figure');
+});
+
+test('a NULL from the server is a dash with a reason, never ₱0', () => {
+  const app = costingClient(F.boot, null);
+  assert.strictEqual(app.costPeso(null), '—');
+  assert.strictEqual(app.costNum(null), '—');
+  assert.strictEqual(app.costPeso(''), '—', 'and an absent key is the same answer');
+  assert.ok(app.costPeso(0) !== '—' && app.costPeso(0).indexOf('0') >= 0,
+    'a real 0 is a real figure and prints as one — the dash is reserved for "not known"');
+  assert.ok(app.costNum(0) !== '—');
+  // The two reasons, in the order the server checks them.
+  assert.match(app.costWhyNone(0, 0), /No night in this cutoff is open yet/);
+  assert.match(app.costWhyNone(2, 0), /No boxes were counted in this cutoff/);
+  assert.strictEqual(app.costWhyNone(2, 40), '');
+  // A whole reply of nulls — the empty fortnight the server really returns.
+  const srv = loadServer();
+  const empty = post(srv.ctx, { token: srv.token, action: 'costing',
+    payload: { start: PERIOD.start, end: PERIOD.end } });
+  assert.strictEqual(empty.ok, true, empty.error);
+  assert.strictEqual(empty.data.variable.per_ball, null);
+  assert.strictEqual(empty.data.fixed.per_day, null);
+  assert.strictEqual(empty.data.break_even_balls, null);
+  assertNoCamelKeys('empty costing', empty.data);
+  const h = app.costFiguresHTML({ key: PERIOD.start + '_' + PERIOD.end, target: '', data: empty.data },
+    { start: PERIOD.start, end: PERIOD.end });
+  assert.ok(h.indexOf('—') >= 0, 'the unknowns render as dashes');
+  assert.match(h, /No night in this cutoff is open yet, so there is nothing to divide by\./);
+  assert.match(h, /so there is nothing to spread them over/);
+  assert.match(h, /so there is no typical night/);
+  assert.ok(h.indexOf('Nothing has been sold in this cutoff yet.') >= 0 ||
+    h.indexOf('What each box leaves') >= 0, 'the per-sku card still says something');
+});
+
+test('unpriced things are NAMED on the screen, with what went uncosted', () => {
+  // Built through the real server: a cost cleared, then a night that opens that
+  // product and sells that box.
+  const srv = loadServer();
+  const D = ymdDaysAgo(2);
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveStockItems',
+    payload: { rows: [{ product: 'Bonito', unit: 'pack', reorderAt: '', active: true, unitCost: '' }] } }).ok, true);
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'savePrices',
+    payload: { rows: [{ sku: 'box6', price: 65, cheesePrice: 80, active: true, boxCost: '' }] } }).ok, true);
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
+    date: D, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box6', sod: 12, eod: 0, cheeseQty: 0, gcashQty: 0, gcashCheeseQty: 0 }],
+    stock: [{ product: 'Bonito', qty: 2 }], entryId: 'unp-1' } }).ok, true);
+  const cur = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} });
+  const app = syncedClient(cur.data);
+  // The window the fixture's night actually falls in. Taken from the DATE, not
+  // from the client's clock: the stubbed server's today and this machine's today
+  // are different days on purpose (see ymdDaysAgo).
+  const window = { start: PERIOD.start, end: PERIOD.end };
+  const cost = post(srv.ctx, { token: srv.token, action: 'costing',
+    payload: { start: window.start, end: window.end } });
+  assert.strictEqual(cost.ok, true, cost.error);
+  assert.deepStrictEqual(cost.data.unpriced, [
+    { kind: 'stock', name: 'Bonito', label: 'Bonito', qty: 2 },
+    { kind: 'box', name: 'box6', label: 'Box 6', qty: 12 }
+  ], 'the server names both, stock first');
+  assertNoCamelKeys('unpriced costing', cost.data);
+  app.costState({ open: true, per: window,
+    res: { key: window.start + '_' + window.end, target: '', data: cost.data } });
+  const h = app.costFiguresHTML({ key: window.start + '_' + window.end, target: '', data: cost.data }, window);
+  assert.match(h, /2 things have no cost on file/);
+  assert.match(h, /These are <b>not<\/b> in any figure above — not even at ₱0\./);
+  assert.match(h, /opened with no unit cost/);
+  assert.match(h, /boxes sold with no box cost/);
+  assert.ok(h.indexOf('>Bonito<') >= 0 && h.indexOf('>Box 6<') >= 0);
+  // And the figures they were left out of really do exclude them.
+  assert.strictEqual(cost.data.variable.stock, 0);
+  assert.strictEqual(cost.data.variable.boxes, 0);
+  const b6 = cost.data.per_sku.find(s => s.sku === 'box6');
+  assert.deepStrictEqual([b6.cost_per_box, b6.margin_per_box], [null, null]);
+});
+
+test('the target field never shows prices that answer a figure it no longer holds', () => {
+  const app = costingClient(F.boot, F.costing, '800');
+  // Answered for 800, field says 800: the prices show.
+  let out = app.costTargetOutHTML({ key: PERIOD.start + '_' + PERIOD.end, target: '800', data: F.costing });
+  assert.match(out, /To leave ₱800 a night/);
+  assert.match(out, /Advice only — nothing has been saved\./);
+  // Typed past it: the table is REPLACED by an instruction, never left standing
+  // under a figure it does not answer — the same rule as the split field's
+  // refusal on the Cutoff screen.
+  app.costState({ target: '1200' });
+  out = app.costTargetOutHTML({ key: PERIOD.start + '_' + PERIOD.end, target: '800', data: F.costing });
+  assert.match(out, /Tap “Work out the prices” to answer for ₱1,200 a night\./);
+  assert.ok(out.indexOf('Advice only') < 0, 'no price table may survive the figure changing');
+  // Blank means no target at all — not ₱0.
+  app.costState({ target: '' });
+  out = app.costTargetOutHTML({ key: PERIOD.start + '_' + PERIOD.end, target: '', data: F.costing });
+  assert.match(out, /Empty means no target, so there is nothing to show\./);
+  assert.ok(out.indexOf('₱0') < 0, 'a blank field is never answered as zero');
+});
+
+test('the costing section is wired, closed by default, and asks the SERVER for everything', () => {
+  // DOM-bound halves, pinned against the source the way every other renderer
+  // guard in this suite is.
+  assert.match(HTML, /try\{ h \+= costingHTML\(\); \}catch\(err\)\{ console\.error\(err\); \}/,
+    'rendered from renderIbapa, and a bad reply cannot take the More tab down');
+  // Every action is both OFFERED (a button) and HANDLED (a branch in the tap
+  // router) — a button with no branch is a dead control, a branch with no button
+  // is dead code.
+  ['cost-open', 'cost-close', 'cost-refresh', 'cost-prev', 'cost-next', 'cost-target'].forEach(a => {
+    assert.ok(HTML.indexOf('data-act="' + a + '"') >= 0, a + ': no button offers it');
+    assert.ok(HTML.indexOf("act === '" + a + "'") >= 0, a + ': nothing handles the tap');
+  });
+  assert.match(HTML, /await api\('costing', payload\)/, 'the figures come from the server, always');
+  assert.match(HTML, /if \(typed !== ''\) payload\.targetPerDay = num\(typed\);/,
+    'a blank target sends NO key — the harmless default, and the shape an older phone sends');
+  // No local fallback: a phone with no API says so in one sentence instead of
+  // drawing a screen of zeros it invented.
+  assert.match(HTML, /The costing is worked out by the server from the whole sheet, so it needs the API/);
+  // It never queues anything and never touches the note.
+  assert.ok(!/enqueue\('costing'/.test(HTML), 'costing is a pure read and must never be queued');
+  const app = costingClient(F.boot, null);
+  app.costState({ open: false });
+  const closed = app.costingHTML();
+  assert.match(closed, /data-act="cost-open"/, 'it starts closed, behind a button — Mama never needs it');
+  assert.ok(closed.indexOf('Every ball') < 0, 'and shows no figures until he asks');
+  // The period navigation is the Cutoff screen's, so "this cutoff" means the
+  // same fortnight on both screens.
+  app.costState({ open: true, per: app.currentPeriod(app.todayStr()) });
+  assert.match(app.costingHTML(), /class="period-nav"/);
+  assert.match(app.costingHTML(), /This cutoff/);
+});
+
+test('THE FENCE across the seam: the costing changes no figure the cutoff shows', () => {
+  // One server, one period. Take the cutoff and the phone's own preview, ask
+  // for the costing, then take both again: not a peso may differ, and not a
+  // cell of the sheet.
+  const srv = loadServer();
+  const D = ymdDaysAgo(2);
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
+    date: D, closed: false, staff: 'Mama', customAmount: 200, customGcash: 100, notes: '',
+    counts: [{ sku: 'box4', sod: 10, eod: 0, cheeseQty: 2, gcashQty: 1, gcashCheeseQty: 0 }],
+    stock: [{ product: 'Takoyaki Flour', qty: 1 }], entryId: 'fence-1' } }).ok, true);
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveExpense', payload: {
+    date: D, category: 'Supplies', item: 'Veggies', amount: 400, backlogRef: '', notes: '',
+    entryId: 'fence-x1' } }).ok, true);
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} });
+  const app = syncedClient(boot.data);
+  const per = { start: PERIOD.start, end: PERIOD.end };   // the fortnight D falls in
+  const cutBefore = post(srv.ctx, { token: srv.token, action: 'cutoff',
+    payload: { start: per.start, end: per.end, dryRun: true } });
+  assert.strictEqual(cutBefore.ok, true, cutBefore.error);
+  const previewBefore = JSON.stringify(app.computeCutoff(per));
+
+  const cost = post(srv.ctx, { token: srv.token, action: 'costing',
+    payload: { start: per.start, end: per.end, targetPerDay: 900 } });
+  assert.strictEqual(cost.ok, true, cost.error);
+  assert.ok(cost.data.targets.length === 1, 'the advice was computed');
+
+  const cutAfter = post(srv.ctx, { token: srv.token, action: 'cutoff',
+    payload: { start: per.start, end: per.end, dryRun: true } });
+  assert.strictEqual(cutAfter.data.note_text, cutBefore.data.note_text,
+    'the note is byte-identical — costing is information, not money that has moved');
+  assert.deepStrictEqual(cutAfter.data.figures, cutBefore.data.figures);
+  // The phone's own preview, computed from the mirror, is untouched too: nothing
+  // the costing returned may enter it.
+  const app2 = syncedClient(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+  assert.strictEqual(JSON.stringify(app2.computeCutoff(per)), previewBefore,
+    'the phone\'s preview agrees with itself before and after');
+  // And the revenue the costing reports IS the cutoff's own total, so the two
+  // screens can never tell different stories about one fortnight.
+  assert.strictEqual(cost.data.revenue, cutAfter.data.figures.total);
 });
 
 // ---------------------------------------------------------------------------
