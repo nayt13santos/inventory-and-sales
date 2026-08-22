@@ -577,7 +577,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.9.0';
+const APP_VERSION = '2.9.1';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -6955,6 +6955,10 @@ function normReading(raw, date){
     custom_amount: paperMoney(pick(d, 'custom_amount', 'customAmount')),
     custom_gcash: paperMoney(pick(d, 'custom_gcash', 'customGcash')),
     total_on_paper: paperMoney(pick(d, 'total_on_paper', 'totalOnPaper')),
+    // What the PEN wrote at the top of the page (v2.9.1). It decides nothing —
+    // the night saved is always the one on screen — it only lets the phone
+    // notice that this page is not that night.
+    date_on_paper: paperText(pick(d, 'date_on_paper', 'dateOnPaper'), 40),
     notes: paperText(d.notes, 400),
     unread: asArr(d.unread).map(u => paperText(u, 160)).filter(Boolean).slice(0, 24),
     photo_url: paperLink(pick(d, 'photo_url', 'photoUrl')),
@@ -7187,6 +7191,38 @@ function updatePaperCross(errs){
 /** The whole card: the camera, what is happening, and the reading itself.
  *  Returns '' when the photo reader is not set up on this phone — the feature is
  *  absent rather than present and broken. */
+/** Whether the page in the photograph is dated as a DIFFERENT night from the
+ *  one on screen (v2.9.1). This gap was invisible and dangerous: an old page's
+ *  figures agree with its own total perfectly, so the cross-check blesses them,
+ *  and May's night saves onto an August day with nothing on screen objecting.
+ *
+ *  The pen writes "5/18" with no year and in no agreed order, so a mismatch is
+ *  only claimed when NEITHER reading of those numbers can be the night on
+ *  screen — day/month and month/day both. Anything unparsable is silence: an
+ *  unreadable corner is not evidence of anything. Returns the resolved date it
+ *  believes the page is, so the card can offer to go there. */
+function paperPageDate(){
+  const rd = asObj(asObj(paper).reading);
+  const raw = txt(rd.date_on_paper).trim();
+  const on = txt(asObj(benta).date);
+  if (!raw || !isDateStr(on)) return null;
+  const nums = raw.match(/\d{1,4}/g);
+  if (!nums || nums.length < 2) return null;           // no two figures: say nothing
+  const a = num(nums[0]), b = num(nums[1]);
+  const here = d2parts(on);
+  // Either order may be what the pen meant, so either matching is a match.
+  if ((a === here.m && b === here.d) || (a === here.d && b === here.m)) return null;
+  // It differs. Resolve the most likely night it IS: month/day first (the
+  // owner's own pages read that way), in this year unless that is still to
+  // come, in which case the same date last year.
+  const pick2 = (mm, dd) => (mm >= 1 && mm <= 12 && dd >= 1 && dd <= lastDayOf(here.y, mm)) ? [mm, dd] : null;
+  const guess = pick2(a, b) || pick2(b, a);
+  if (!guess) return { raw, date: '' };               // differs, but unresolvable
+  let iso = partsToStr(here.y, guess[0], guess[1]);
+  if (iso > todayStr()) iso = partsToStr(here.y - 1, guess[0], guess[1]);
+  return { raw, date: iso };
+}
+
 function paperCardHTML(){
   if (!visionReady() || !isObj(benta)) return '';
   // A closed day has no page of figures to read.
@@ -7207,6 +7243,20 @@ function paperCardHTML(){
   }
   if (paperErr) h += '<p class="err">' + esc(paperErr) + '</p>';
   if (showing){
+    // BEFORE any figure: this page may not be this night. Said first, because
+    // every number below it is right for the page and wrong for the screen.
+    const pd = paperPageDate();
+    if (pd){
+      h += '<div class="card attn-card" style="margin:10px 0;"><p class="attn-head">This page is dated ' +
+        esc(pd.raw) + '</p><p>You are entering <b>' + esc(fmtShort(benta.date)) + '</b>. The figures below ' +
+        'were read off that page, so they belong to the night it is dated' +
+        (pd.date ? ' — ' + esc(fmtShort(pd.date)) : '') + ', not to this one.</p>' +
+        (pd.date
+          ? '<div class="btn-row"><button type="button" class="btn small primary" data-act="paper-goto" data-date="' +
+            esc(pd.date) + '">Enter ' + esc(fmtShort(pd.date)) + ' instead</button></div>'
+          : '<p class="hint" style="margin-top:8px;">Move to that night on the date above before saving.</p>') +
+      '</div>';
+    }
     try{ h += paperReviewHTML(asObj(paper.reading)); }
     catch(err){
       console.error(err);
@@ -7445,6 +7495,27 @@ document.addEventListener('click', (ev) => {
   // Read it from the paper (v2.9.0). Neither of these saves anything: one opens
   // the camera, the other puts the reading away.
   else if (act === 'paper-shoot') paperShoot();
+  // "Enter that night instead" (v2.9.1). Moves the form to the night the PAGE
+  // is dated, keeping the reading, so the figures land where they belong. The
+  // date change goes through the ordinary path — the draft for the night being
+  // left is stashed exactly as it is when she taps the date herself.
+  else if (act === 'paper-goto'){
+    const d = txt(el.dataset.date);
+    if (!isDateStr(d)) return;
+    stashBentaDraft();
+    const rd = isObj(paper) ? paper : null;
+    loadBentaForm(d);
+    if (rd){
+      // The reading belongs to the page, so it follows the page's night — and
+      // is applied there, where it is finally about the right day.
+      paper = { date: d, reading: rd.reading, at: rd.at };
+      try{ applyReadingToForm(asObj(paper.reading)); }
+      catch(err){ console.error(err); paperErr = 'The reading could not be put on this night — type it in by hand.'; }
+    }
+    renderBenta();
+    validateBentaLive();
+    toast('Now entering ' + fmtShort(d) + ' — the figures from the page are on it.');
+  }
   else if (act === 'paper-hide') paperHide();
 
   // Expenses

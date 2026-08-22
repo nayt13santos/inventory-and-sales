@@ -43,7 +43,7 @@
  * ========================================================================== */
 'use strict';
 
-var VERSION = '2.9.0';
+var VERSION = '2.9.1';
 var TZ = 'Asia/Manila';
 
 /** The Gemini API key, from aistudio.google.com. This project's only paid
@@ -394,6 +394,10 @@ function buildPrompt_(date, skus) {
     '    out means 2605.',
     '  * The LAST STANDING total on the page is the night\'s own total: report it as',
     '    total_on_paper. If two totals appear and one is crossed out, the standing one wins.',
+    '  * The page usually carries a DATE, often at the top ("DATE 5/18"). Report it in',
+    '    date_on_paper EXACTLY as it is written — do not reformat it, do not add a year, and',
+    '    do not work it out from anything else. If no date is written, or you cannot read it,',
+    '    leave date_on_paper out.',
     '  * A special order taken outside the menu is written as a PESO AMOUNT, not a box count:',
     '    report it as custom_amount, and whatever part of it was paid by GCash as custom_gcash.',
     '',
@@ -459,6 +463,11 @@ function readingSchema_() {
       custom_amount: money,
       custom_gcash: money,
       total_on_paper: money,
+      // The date WRITTEN on the page, exactly as the pen wrote it ("5/18"),
+      // never normalised and never guessed (v2.9.1). It is not what the night
+      // gets saved as — the phone's date always wins — it exists so the phone
+      // can notice that this page is not the night on screen.
+      date_on_paper: { type: 'STRING', nullable: true },
       notes: { type: 'STRING', nullable: true },
       unread: { type: 'ARRAY', items: { type: 'STRING' } }
     },
@@ -682,11 +691,19 @@ function normaliseReading_(reply, date, skus) {
   // plainly rather than left for the phone to discover as a blank.
   if (total === '') note('the night\'s own total on the paper');
 
+  // The date the PEN wrote, kept exactly as read and never resolved here
+  // (v2.9.1). It decides nothing — it exists so the phone can notice that the
+  // page in the photograph is not the night on its screen, which is otherwise
+  // invisible: an old page's figures agree with its own total perfectly, so the
+  // cross-check would bless a May night saved onto an August day.
+  var onPaper = asStr_(got.date_on_paper).trim().slice(0, 40);
+
   return {
     // The DATE IS THE PHONE'S, not the model's. The phone knows which night it
     // photographed; a model reading a date off a smudged corner does not, and a
     // reading filed under the wrong night is worse than no reading at all.
     date: date,
+    date_on_paper: onPaper,
     counts: counts,
     custom_amount: customAmount,
     custom_gcash: customGcash,

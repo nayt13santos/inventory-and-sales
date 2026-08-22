@@ -3571,6 +3571,7 @@ return {
   // states and drive the real flow end to end.
   visionReady, visionApi, paperTake, paperShoot, shrinkPhoto, b64Bytes, paperSkus,
   normReading, applyReadingToForm, paperCross, paperCrossHTML, paperCardHTML,
+  paperPageDate, todayStr, d2parts,
   paperReviewHTML, paperFormFigures, paperSuspects, paperLink, paperInt, paperMoney,
   paperClear, paperShowingFor, bentaSkuList,
   isBlankVal, stepVal, uiVal, soldVal,
@@ -5544,6 +5545,46 @@ test('money kept OUT of the cutoff is not a mismatch — the paper counts the ti
 });
 
 function asArrLike(v){ return Array.isArray(v) ? v.slice() : []; }
+
+test('a page dated another night is CALLED OUT, not quietly believed (v2.9.1)', () => {
+  // The trap the owner was one tap away from: his sample page is dated 5/18. An
+  // old page photographed while the form is on today fills TODAY with May's
+  // figures — and the cross-check AGREES, because those figures match that
+  // page's own total perfectly. Nothing on screen would have objected.
+  const t = showing(readVia(paperWith({ date_on_paper: '5/18' })));
+  const app = t.app;
+  assert.strictEqual(t.reading.date_on_paper, '5/18', 'kept exactly as the pen wrote it');
+  const pd = app.paperPageDate();
+  assert.ok(pd, 'a page dated 5/18 is not the night this form is on');
+  assert.strictEqual(pd.raw, '5/18');
+  assert.match(pd.date, /^\d{4}-05-18$/, 'and it resolves to the night it IS: May 18');
+  assert.ok(pd.date <= app.todayStr(), 'never resolved into the future');
+
+  // The page's own date matching the form is SILENCE — either way round, since
+  // the pen writes no year and no agreed order.
+  const on = app.benta.date, parts = app.d2parts(on);
+  for (const written of [parts.m + '/' + parts.d, parts.d + '/' + parts.m,
+                         parts.m + '-' + parts.d, 'DATE ' + parts.m + '/' + parts.d]){
+    const q = showing(readVia(paperWith({ date_on_paper: written })));
+    assert.strictEqual(q.app.paperPageDate(), null, 'no complaint about ' + written);
+  }
+  // An unreadable or absent date says NOTHING — a smudged corner is not evidence.
+  for (const written of ['', 'DATE', 'aug']){
+    const q = showing(readVia(paperWith({ date_on_paper: written })));
+    assert.strictEqual(q.app.paperPageDate(), null, 'silence on ' + JSON.stringify(written));
+  }
+  // RENDERED, not merely present in the source: the mutation round proved a
+  // source pin passes happily while the check itself is dead.
+  const shown = app.paperCardHTML();
+  assert.match(shown, /This page is dated 5\/18/, 'the warning is on the screen');
+  assert.match(shown, /data-act="paper-goto"/, 'with the offer to go to that night');
+  assert.ok(shown.indexOf('This page is dated') < shown.indexOf('Box 10'),
+    'and it sits ABOVE the figures it qualifies');
+  // A page dated tonight renders no warning at all.
+  const same = showing(readVia(paperWith({ date_on_paper: parts.m + '/' + parts.d })));
+  assert.ok(!/This page is dated/.test(same.app.paperCardHTML()),
+    'no false alarm when the page IS this night');
+});
 
 test('an empty end count is REFUSED at Save day — the guard that outlives the card (v2.9.0)', () => {
   // The gate's RI-2, and the worst outcome this release could cause. An unread
