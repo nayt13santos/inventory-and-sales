@@ -3540,6 +3540,15 @@ const $ = (id) => (hooks.els[String(id)] || null);
 function renderPanel(t){ hooks.panels.push(String(t)); }
 function toast(m){ hooks.toasts.push(String(m)); }
 function fetch(url, opts){ return hooks.fetch(url, opts); }
+/* Timers, so a 30-SECOND deadline is checkable in milliseconds. hooks.timerCap
+   is the longest any wait may actually last; the code still asks for its real
+   30000/75000, and the message it writes still says "30 seconds". Without this
+   the only honest test of the deadline would take half a minute. */
+const _realST = globalThis.setTimeout, _realCT = globalThis.clearTimeout;
+function setTimeout(fn, ms){
+  return _realST(fn, hooks.timerCap === undefined ? ms : Math.min(ms, hooks.timerCap));
+}
+function clearTimeout(t){ return _realCT(t); }
 // v2.9.0. The camera and the canvas, as thin as they can be and still exercise
 // the REAL shrink ladder: createImageBitmap hands back the dimensions the test
 // chose, and toDataURL reports a base64 body whose LENGTH is what the test says
@@ -3568,6 +3577,8 @@ return {
   get queue(){ return queue; },
   get attention(){ return attention; },
   get storageFull(){ return storageFull; },
+  get syncing(){ return syncing; },
+  get lastSyncError(){ return lastSyncError; },
   hooks, cfg: config, nav: navigator,
   applyBootstrap, applyLocalDay, applyLocalExpense, applyLocalStockCount,
   applyLocalStockDelivery, applyLocalDeleteExpense, sanitizeQueue,
@@ -3609,6 +3620,9 @@ return {
 // of the file (the summary waits for them).
 const ASYNC_TESTS = [];
 function atest(name, fn) { ASYNC_TESTS.push({ name, fn }); }
+const WATCHDOG_MS = 10000;   // generous: the slowest real test is milliseconds
+let summaryPrinted = false;
+let lastStarted = '';
 
 /** A wire that forwards every request to a REAL server's doPost. */
 function liveWire(srv) {
@@ -5819,9 +5833,13 @@ test('SOURCE PIN: the photo-reader module cannot save, queue or persist anything
   // URL. Pinned as the CALL rather than the word, because the module's comments
   // name api() deliberately (to explain that it shares its transport and
   // nothing else).
-  const wire = paperSrc.match(/fetch\([^,)]*/g) || [];
-  assert.deepStrictEqual(wire, ['fetch(config.visionUrl'],
-    'the photo reader must reach the wire exactly once, through its own URL');
+  // Pinned as ANY fetch-shaped call, so reintroducing a bare unbounded fetch()
+  // here goes red too: a photograph that hangs forever spends her data and her
+  // patience with nothing on screen to cancel (v2.9.3).
+  const wire = paperSrc.match(/[A-Za-z]*fetch[A-Za-z]*\([^,)]*/g) || [];
+  assert.deepStrictEqual(wire, ['fetchWithTimeout(config.visionUrl'],
+    'the photo reader must reach the wire exactly once, through its own URL, and through the BOUNDED call');
+  assert.ok(/VISION_TIMEOUT_MS/.test(paperSrc), 'and that call must carry a deadline');
   // The reading writes `benta` and the paper card, and nothing else.
   assert.ok(/benta\.fromPaper = true;/.test(paperSrc), 'the form must SAY where the figures came from');
   // The ordinary save is what clears the marker — pinned at the save itself,
@@ -5984,13 +6002,249 @@ atest('the reader\'s own refusals reach the screen as themselves, and fill nothi
 });
 
 
+
+// ---------------------------------------------------------------------------
+// v2.9.3 — THE SCREEN SHE READS, MEASURED.
+// The app is used at night, outdoors, at whatever brightness the phone is left
+// on, by a woman in her sixties. Contrast is not decoration here, so it is
+// arithmetic in a test rather than an opinion in a review: these ratios are
+// recomputed from the palette in the shipped file every run.
+// ---------------------------------------------------------------------------
+
+function _lum(hex){
+  const h = hex.replace('#', '');
+  const c = [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16) / 255)
+    .map(v => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)));
+  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+}
+function contrast(a, b){
+  const la = _lum(a), lb = _lum(b);
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+function cssVar(src, name){
+  const m = src.match(new RegExp('--' + name + ':\\s*(#[0-9A-Fa-f]{6})'));
+  assert.ok(m, 'the palette must still define --' + name);
+  return m[1];
+}
+
+test('the palette MEASURES up: boundaries 3:1, accent-as-text 4.5:1 (v2.9.3)', () => {
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+  const bg = cssVar(src, 'bg'), paper = cssVar(src, 'paper'), ink = cssVar(src, 'ink');
+  const strong = cssVar(src, 'line-strong'), accentText = cssVar(src, 'accent-text');
+
+  // WCAG 1.4.11: a boundary that tells her WHICH BOX a figure goes in is a UI
+  // component, and needs 3:1. The old --line was 1.25:1 — beautiful, and very
+  // nearly invisible on a dimmed screen.
+  assert.ok(contrast(strong, bg) >= 3, '--line-strong on --bg is ' + contrast(strong, bg).toFixed(2) + ', needs 3');
+  assert.ok(contrast(strong, paper) >= 3, '--line-strong on --paper is ' + contrast(strong, paper).toFixed(2) + ', needs 3');
+
+  // 1.4.3: text needs 4.5:1. --accent is 4.04 — fine as a FILL behind white,
+  // thin as a colour ON the background, which is how the date kicker uses it.
+  assert.ok(contrast(accentText, bg) >= 4.5,
+    '--accent-text on --bg is ' + contrast(accentText, bg).toFixed(2) + ', needs 4.5');
+  assert.ok(contrast(accentText, paper) >= 4.5,
+    '--accent-text on --paper is ' + contrast(accentText, paper).toFixed(2) + ', needs 4.5');
+
+  // The body text was always fine; pinned so a future "softening" cannot pass.
+  assert.ok(contrast(ink, bg) >= 7, 'body text should clear AAA, is ' + contrast(ink, bg).toFixed(2));
+
+  // A white-on-accent FILL (primary button, pressed chip) still has to work.
+  assert.ok(contrast('#FFFFFF', cssVar(src, 'accent')) >= 3,
+    'white on the accent fill is ' + contrast('#FFFFFF', cssVar(src, 'accent')).toFixed(2));
+});
+
+test('every boundary a finger aims at uses the STRONG line (v2.9.3)', () => {
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+  // The rules whose border IS the target: the card that groups a night's
+  // figures, the fields, the steppers, the chips. A hairline here is what makes
+  // her tap the wrong box.
+  for (const rule of ['.card{', '.input{', '.chip{', '.step-btn{', '.step-val{']) {
+    // Anchored to the start of a line: '.step-btn{' also occurs inside
+    // '.stepper.sm .step-btn{', and reading the wrong rule's body would let a
+    // hairline through while the test went green.
+    const at = src.indexOf('\n' + rule);
+    assert.ok(at > 0, 'the rule ' + rule + ' must still exist as its own rule');
+    const body = src.slice(at, src.indexOf('}', at));
+    assert.ok(/var\(--line-strong\)/.test(body),
+      rule + ' must draw its border with --line-strong, not the hairline');
+    assert.ok(!/border:[^;]*var\(--line\)/.test(body),
+      rule + ' must not fall back to the 1.25:1 --line for its border');
+  }
+});
+
+test('the selected tab says so with more than colour, and the theme is declared (v2.9.3)', () => {
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+  const at = src.indexOf('.tab[aria-selected="true"]{');
+  assert.ok(at > 0);
+  const body = src.slice(at, src.indexOf('}', at));
+  // 1.4.1: colour may not be the ONLY way of conveying which screen she is on.
+  assert.ok(/box-shadow:inset/.test(body),
+    'the selected tab needs a shape cue too — colour alone fails a colour-blind eye and bright sun');
+  // aria-selected is the cue a screen reader gets; it was already there.
+  assert.ok(/aria-selected=/.test(src), 'and the tab must still announce itself');
+
+  // Without this, Android/Chrome forced-dark invents its own inversion of a
+  // design that has exactly one intended appearance — and money turns unreadable.
+  assert.ok(/<meta name="color-scheme" content="light">/.test(src),
+    'the page must declare its scheme so forced-dark does not reinvent it');
+  assert.ok(/color-scheme:light;/.test(src), 'and declare it in CSS as well');
+});
+
+// ---------------------------------------------------------------------------
+// v2.9.3 — NOTHING WAITS FOREVER.
+// ---------------------------------------------------------------------------
+
+atest('a request that never comes back GIVES UP, and the night stays in the queue (v2.9.3)', async () => {
+  const app = loadSyncClient();
+  app.cfg.apiUrl = 'https://api.example/exec';
+  app.cfg.token = 'tok';
+  app.hooks.timerCap = 5;          // the code still asks for its real 30s
+  const D = ymdDaysAgo(2);
+
+  const v = dayPayload(D, 100, 'stalled');
+  app.applyLocalDay(v);
+  app.enqueue('saveDay', v);
+
+  // The way mobile data actually fails mid-request: the socket is open, the
+  // tower is gone, and the promise simply never settles. No error, ever.
+  let calls = 0;
+  app.hooks.fetch = () => { calls++; return new Promise(() => {}); };
+
+  await app.drainQueue();
+
+  assert.strictEqual(calls, 1, 'precondition: it did reach the wire');
+  assert.strictEqual(app.syncing, false,
+    'the drain must END — a stuck syncing flag silently stops every later night');
+  assert.strictEqual(app.queue.length, 1,
+    'giving up must not throw the night away — it is still queued to retry');
+  assert.strictEqual(app.state.days[D].total, 5000,
+    'and her figures are still on the phone, untouched');
+  // What she READS matters as much as what happens: a save that timed out may
+  // in fact have landed, and the retry is safe, so the sentence must not tell
+  // her the night failed.
+  assert.match(app.lastSyncError, /did not answer within 30 seconds/,
+    'the wait is named in seconds, in her words');
+  assert.match(app.lastSyncError, /Nothing is lost/,
+    'and it must NOT say the night failed — it may even have landed');
+  assert.ok(!/AbortError|Failed to fetch|signal/i.test(app.lastSyncError),
+    'no browser string ever reaches the screen');
+
+  // A retry is safe BECAUSE every queued action upserts on a key: the same
+  // save landing twice rewrites one row. Proven here end to end.
+  const srv = loadServer();
+  app.cfg.token = srv.token;
+  app.hooks.fetch = liveWire(srv);
+  await app.drainQueue();
+  assert.strictEqual(app.queue.length, 0, 'the retry lands');
+  const rows = srv.ss.getSheetByName('DailyLog').getDataRange().getValues().slice(1)
+    .filter(r => r[0] === D);
+  assert.strictEqual(rows.length, 1, 'ONE row for that night, not one per attempt');
+});
+
+atest('the deadline is the app\'s own, not the platform\'s (v2.9.3)', async () => {
+  const app = loadSyncClient();
+  app.cfg.apiUrl = 'https://api.example/exec';
+  app.cfg.token = 'tok';
+  app.hooks.timerCap = 5;
+
+  // A WebView that ACCEPTS a signal and then ignores it — real behaviour on
+  // some old Android builds. If the deadline were a callback on the signal
+  // alone, this request would hang forever and this test would time out.
+  app.hooks.fetch = (url, opts) => {
+    assert.ok(opts.signal, 'the abort is still sent, so a cooperating platform can drop the socket');
+    return new Promise(() => {});
+  };
+  const D = ymdDaysAgo(3);
+  const v = dayPayload(D, 100, 'ignored-signal');
+  app.applyLocalDay(v);
+  app.enqueue('saveDay', v);
+
+  await app.drainQueue();
+  assert.strictEqual(app.syncing, false, 'released by the race, not by the signal');
+  assert.strictEqual(app.queue.length, 1);
+});
+
+atest('a throw on the FAILURE path cannot jam sync forever (v2.9.3)', async () => {
+  const srv = loadServer();
+  const app = loadSyncClient();
+  app.cfg.apiUrl = 'https://api.example/exec';
+  app.cfg.token = srv.token;
+  const D = ymdDaysAgo(4);
+
+  const v = dayPayload(D, 100, 'jam');
+  app.applyLocalDay(v);
+  app.enqueue('saveDay', v);
+
+  // The server REFUSES, and then the code that reports the refusal throws —
+  // the one path where an escape used to leave `syncing` true for the life of
+  // the app, so the pill said "Syncing…" and nothing ever left the phone again.
+  app.hooks.fetch = () => Promise.resolve({
+    ok: true,
+    text: async () => JSON.stringify({ ok: false, error: 'refused for the test' })
+  });
+  const realToast = app.hooks.toasts;
+  Object.defineProperty(app.hooks, 'toasts', {
+    get(){ throw new Error('the reporting itself broke'); },
+    configurable: true
+  });
+
+  let escaped = null;
+  try{ await app.drainQueue(); }catch(err){ escaped = err; }
+
+  Object.defineProperty(app.hooks, 'toasts', { value: realToast, configurable: true, writable: true });
+
+  assert.ok(escaped, 'precondition: the failure path really did throw');
+  assert.strictEqual(app.syncing, false,
+    'and syncing was released anyway — the finally, not the line after the loop');
+
+  // The proof that matters: the NEXT night still gets out.
+  const D2 = ymdDaysAgo(5);
+  const v2 = dayPayload(D2, 60, 'after-the-jam');
+  app.applyLocalDay(v2);
+  app.enqueue('saveDay', v2);
+  app.hooks.fetch = liveWire(srv);
+  await app.drainQueue();
+  assert.strictEqual(srv.ss.getSheetByName('DailyLog').getDataRange().getValues().slice(1)
+    .filter(r => r[0] === D2).length, 1,
+    'the night after a jam reaches the sheet');
+});
+
 // ---------------------------------------------------------------------------
 // The async race tests run through the REAL drainQueue/doBootstrap promises,
 // so they are awaited in order here — and the summary waits for them.
 (async () => {
+  /* EVERY ASYNC TEST GETS A WATCHDOG (v2.9.3).
+     A test that awaits a promise which never settles does not hang node — it
+     empties the event loop, and node EXITS 0, silently, without the summary
+     and without the tests that were still queued behind it. So a real forever
+     -hang used to read as a clean pass, which is precisely the bug the timeout
+     work is about. A hang now fails, loudly, as itself. */
+  process.on('exit', (code) => {
+    if (!summaryPrinted && code === 0) {
+      console.error('\nFAILED: the suite exited before printing its summary — an async test' +
+        ' awaited something that never settled (node exits 0 when the event loop empties).' +
+        '\n        The last test to start was: ' + (lastStarted || '(none)'));
+      process.exitCode = 1;
+    }
+  });
   for (const t of ASYNC_TESTS) {
+    lastStarted = t.name;
     try {
-      await t.fn();
+      let w = null;
+      try{
+        await Promise.race([
+          t.fn(),
+          new Promise((_, rej) => {
+            w = setTimeout(() => rej(new Error('TIMED OUT after ' + (WATCHDOG_MS / 1000) +
+              's — something in this test never settles')), WATCHDOG_MS);
+          })
+        ]);
+      }finally{
+        // Cleared on the winning path, so a passing suite is not held open for
+        // ten seconds per test — and NOT unref'd, so a real hang reaches the
+        // watchdog and gets named instead of vanishing into a silent exit.
+        if (w) clearTimeout(w);
+      }
       passed++;
       console.log('  PASS  ' + t.name);
     } catch (err) {
@@ -5999,6 +6253,7 @@ atest('the reader\'s own refusals reach the screen as themselves, and fill nothi
       console.log('  FAIL  ' + t.name + '\n        ' + String(err.message).split('\n').join('\n        '));
     }
   }
+  summaryPrinted = true;
   console.log('\n============================================');
   console.log('  ' + passed + ' passed, ' + failed + ' failed  (' + path.basename(__filename) + ')');
   console.log('============================================');

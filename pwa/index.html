@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light">
 <title>Octogo Tracker</title>
 <meta name="description" content="Daily sales and expenses tracker for Octogo Takoyaki.">
 <meta name="theme-color" content="#C25E0A">
@@ -22,6 +23,7 @@
    nori / GCash blue / alert. Type: Baloo 2 display + system body.
    ============================================================ */
 :root{
+  color-scheme:light;
   --bg:#FBF8F2;
   --ink:#2B1D12;
   --accent:#C25E0A;
@@ -31,6 +33,15 @@
   --alert:#B3402E;
   --paper:#FFFFFF;
   --line:#E8DFD0;
+  /* Boundaries and accent TEXT, measured rather than eyeballed (v2.9.3). The
+     palette reads beautifully on a bright screen indoors: --line on --bg is
+     1.25:1 where a UI boundary needs 3:1, and --accent as TEXT is 4.04:1 where
+     text needs 4.5 — fine for a fill, thin for a woman in her sixties reading
+     14px bold on a cheap phone at low brightness. So: a stronger line for the
+     edges that tell her which box a figure belongs to, and a darker accent for
+     accent-as-text only. --accent stays exactly as it was wherever it FILLS. */
+  --line-strong:#9C8465;   /* 3.36:1 on --bg, 3.56:1 on --paper */
+  --accent-text:#9C4A07;   /* 5.83:1 on --bg, 6.18:1 on white */
   --soft:#F3ECDF;
   --muted:#7A6A58;
   --radius:16px;
@@ -118,7 +129,7 @@ button{ font:inherit; color:inherit; }
 /* Layout */
 main{ max-width:560px; margin:0 auto; padding:16px 16px 8px; }
 .card{
-  background:var(--paper); border:1px solid var(--line);
+  background:var(--paper); border:1px solid var(--line-strong);
   border-radius:var(--radius); padding:16px; margin-bottom:14px;
 }
 .section-title{ font-family:var(--display); font-weight:700; font-size:18px; margin:20px 0 10px; }
@@ -147,7 +158,7 @@ main{ max-width:560px; margin:0 auto; padding:16px 16px 8px; }
 .chips{ display:flex; flex-wrap:wrap; gap:8px; }
 .chip{
   min-height:48px; padding:10px 18px; border-radius:999px;
-  border:1.5px solid var(--line); background:var(--paper);
+  border:1.5px solid var(--line-strong); background:var(--paper);
   font-family:var(--display); font-weight:600; font-size:16px; cursor:pointer;
 }
 .chip[aria-pressed="true"]{ background:var(--accent); border-color:var(--accent); color:#fff; }
@@ -158,7 +169,7 @@ main{ max-width:560px; margin:0 auto; padding:16px 16px 8px; }
 .field > label{ display:block; font-weight:600; font-size:15px; margin-bottom:6px; }
 .input{
   width:100%; min-height:52px; padding:10px 14px; font-size:18px;
-  border:1.5px solid var(--line); border-radius:12px;
+  border:1.5px solid var(--line-strong); border-radius:12px;
   background:var(--paper); color:var(--ink); font-family:var(--body);
   font-variant-numeric:tabular-nums;
 }
@@ -169,7 +180,7 @@ select.input{ appearance:auto; }
 /* Date card (tap anywhere to open the native picker) */
 .date-card{ position:relative; display:flex; align-items:center; justify-content:space-between; gap:10px; }
 .date-card:focus-within{ outline:3px solid var(--ink); outline-offset:2px; }
-.date-kicker{ font-family:var(--display); font-weight:700; font-size:14px; color:var(--accent); text-transform:uppercase; letter-spacing:.08em; }
+.date-kicker{ font-family:var(--display); font-weight:700; font-size:14px; color:var(--accent-text); text-transform:uppercase; letter-spacing:.08em; }
 .date-kicker.backfill{ color:var(--gcash); }
 .date-big{ font-family:var(--display); font-weight:800; font-size:24px; line-height:1.15; }
 .date-hint{ font-size:13px; color:var(--muted); margin-top:2px; }
@@ -204,14 +215,14 @@ select.input{ appearance:auto; }
 .stepper.sm .step-val{ height:48px; font-size:20px; }
 .step-btn{
   width:48px; height:52px; border-radius:14px; cursor:pointer;
-  border:1.5px solid var(--line); background:var(--bg);
+  border:1.5px solid var(--line-strong); background:var(--bg);
   font-family:var(--display); font-size:28px; font-weight:700; color:var(--deep); line-height:1;
 }
 .step-btn:active{ background:var(--deep); border-color:var(--deep); color:#fff; }
 .step-val{
   width:100%; height:52px; min-width:0; text-align:center;
   font-family:var(--display); font-size:22px; font-weight:700;
-  border:1.5px solid var(--line); border-radius:12px; background:var(--paper);
+  border:1.5px solid var(--line-strong); border-radius:12px; background:var(--paper);
   color:var(--ink); font-variant-numeric:tabular-nums;
 }
 
@@ -492,7 +503,9 @@ select.input{ appearance:auto; }
   background:none; border:none; cursor:pointer;
   color:var(--muted); font-family:var(--display); font-weight:700; font-size:13px;
 }
-.tab[aria-selected="true"]{ color:var(--accent); }
+/* The selected tab used to say so in colour ALONE — invisible to a colour-blind
+   eye and washed out in sunlight. It now carries a bar as well (v2.9.3). */
+.tab[aria-selected="true"]{ color:var(--accent-text); box-shadow:inset 0 3px 0 var(--deep); }
 .tab svg{ width:24px; height:24px; }
 
 /* Toast */
@@ -577,7 +590,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.9.2';
+const APP_VERSION = '2.9.3';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -2493,6 +2506,53 @@ function badResponseError(msg){
   return err;
 }
 
+/* NOTHING WAITS FOREVER (v2.9.3).
+   fetch() has no timeout of its own. A phone that holds a TCP connection open
+   against a dead cell tower — the ordinary way mobile data fails, mid-request,
+   without an error — leaves the promise pending for as long as the OS allows.
+   The queue is strictly in-order and drains one item at a time, so that one
+   pending promise froze the pill at "Syncing…" and blocked every night behind
+   it until the app was closed and reopened. She would have no way to know.
+   Every mutating action upserts on a key it carries (day by date, the rest by
+   entry_id/sku/product), so an abort that fires AFTER the sheet was written is
+   harmless: the retry rewrites the same row rather than adding a second one.
+   That is what makes giving up early safe here. */
+const API_TIMEOUT_MS = 30000;      // a cold Apps Script start is genuinely slow
+const VISION_TIMEOUT_MS = 75000;   // a photo has to upload AND be read
+
+async function fetchWithTimeout(url, opts, ms, whatFor){
+  const late = () => {
+    const secs = Math.max(1, Math.round(ms / 1000));
+    return plainError('The ' + (whatFor || 'server') + ' did not answer within ' +
+      secs + (secs === 1 ? ' second' : ' seconds') + '. Nothing is lost — it will try again.');
+  };
+  // AbortSignal.timeout() is missing on the older Android WebViews this runs
+  // on, and a few of them accept a signal and then ignore it. So the deadline
+  // is a RACE, not a callback: the abort is still sent (it tears the socket
+  // down when it is honoured), but the caller is released by the race whether
+  // the platform cooperates or not. AbortController itself is guarded for the
+  // same reason — a missing constructor must not be what breaks her save.
+  let ctl = null;
+  try{ ctl = new AbortController(); }catch(e){ ctl = null; }
+  let timer = 0;
+  const deadline = new Promise((resolve, reject) => {
+    timer = setTimeout(() => {
+      if (ctl){ try{ ctl.abort(); }catch(e){} }
+      reject(late());
+    }, ms);
+  });
+  const opened = ctl ? Object.assign({}, opts, { signal: ctl.signal }) : opts;
+  try{
+    return await Promise.race([fetch(url, opened), deadline]);
+  }catch(err){
+    // Our own abort, honoured: the same sentence, not "Failed to fetch".
+    if (err && err.name === 'AbortError') throw late();
+    throw err;
+  }finally{
+    clearTimeout(timer);
+  }
+}
+
 // An error whose message is already plain English and safe to show.
 function plainError(msg){
   const err = new Error(msg);
@@ -2514,11 +2574,11 @@ async function api(action, payload){
   if (!config.apiUrl) throw plainError('No API URL is set yet.');
   // POST + JSON string body, NO custom headers -> text/plain default,
   // so Apps Script never sees a CORS preflight. Follow redirects.
-  const res = await fetch(config.apiUrl, {
+  const res = await fetchWithTimeout(config.apiUrl, {
     method:'POST',
     redirect:'follow',
     body: JSON.stringify({ token: config.token, action, payload: payload || {} })
-  });
+  }, API_TIMEOUT_MS, 'server');
   const text = await res.text();
   let data;
   try{ data = JSON.parse(text); }
@@ -2547,6 +2607,13 @@ async function drainQueue(){
   syncing = true; updateStatus();
   let attnChanged = false;
   let landed = false;   // did anything reach the sheet this drain?
+  /* syncing is released in the finally, NOT after the loop (v2.9.3). Every
+     api() throw is caught below, but the catch itself runs code that can throw
+     — noteAttention, persistQueue (a full localStorage), toast — and an escape
+     from here used to leave syncing stuck true, which makes drainQueue return
+     at its own front door forever: the pill reads "Syncing…" and not one night
+     ever leaves the phone again, with no error anywhere. */
+  try{
   while (queue.length){
     const item = queue[0];
     try{
@@ -2621,7 +2688,9 @@ async function drainQueue(){
       }
     }
   }
-  syncing = false;
+  }finally{
+    syncing = false;
+  }
   persistState(); persistQueue(); updateStatus();
   // A new warning has to reach the screen she is actually looking at.
   if (attnChanged) renderPanel(activeTab);
@@ -3750,7 +3819,7 @@ function renderBenta(){
   // Never claim a day is saved while it is sitting on the needs-attention list:
   // the sheet does not have it.
   if (benta.fromDraft){
-    h += '<p class="saved-hint" style="color:var(--accent);">Your unsent numbers for this day were kept. Tap Save day when it is complete.</p>';
+    h += '<p class="saved-hint" style="color:var(--accent-text);">Your unsent numbers for this day were kept. Tap Save day when it is complete.</p>';
   } else if (benta.saved && !dateNotInSheet(benta.date)){
     h += '<p class="saved-hint">✓ This day is already saved. You are editing it.</p>';
   }
@@ -3760,7 +3829,7 @@ function renderBenta(){
   // never look like one. It says so even after a reload, when the review card
   // itself is gone — the draft keeps the marker with the numbers.
   if (benta.fromPaper){
-    h += '<p class="saved-hint" style="color:var(--accent);">These figures came from the paper — check them against it before you tap Save day. Nothing has been saved.</p>';
+    h += '<p class="saved-hint" style="color:var(--accent-text);">These figures came from the paper — check them against it before you tap Save day. Nothing has been saved.</p>';
   }
   // The paper a SAVED night was read from, so the figures can always be taken
   // back to the page they came from. The link is validated before it is ever an
@@ -6766,11 +6835,11 @@ function visionReady(){ return !!(txt(config.visionUrl) && txt(config.visionToke
  *  so Apps Script never sees a CORS preflight it cannot answer. */
 async function visionApi(action, payload){
   if (!visionReady()) throw plainError('The photo reader is not set up on this phone yet — set it up under More.');
-  const res = await fetch(config.visionUrl, {
+  const res = await fetchWithTimeout(config.visionUrl, {
     method:'POST',
     redirect:'follow',
     body: JSON.stringify({ token: config.visionToken, action, payload: payload || {} })
-  });
+  }, VISION_TIMEOUT_MS, 'photo reader');
   const text = await res.text();
   let data;
   try{ data = JSON.parse(text); }
