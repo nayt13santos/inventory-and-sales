@@ -99,7 +99,7 @@ Three separate things (four if you set up the photo reader), with their own sett
 Everything the business records lives in one Google Sheet. Give it a safety net. This is a **separate little script**, on purpose: copying files needs Drive permission, and permissions in Apps Script are granted per project — keeping this out of the sheet's own script means it can never affect the app the phones use.
 
 1. Go to [script.google.com](https://script.google.com) → **New project** → name it **Octogo Backups**.
-2. Delete the placeholder code, paste in the whole of `apps-script/Backups.gs` from this project.
+2. Delete the placeholder code, paste in the whole of `standalone-scripts/Backups.gs` from this project.
 3. Put your sheet in the `SPREADSHEET_ID` line at the top: paste **either** its id (in the sheet's URL, the long string between `/d/` and `/edit`) **or** the whole sheet URL — both work. Then **save** (the disk icon, or ⌘S/Ctrl+S): Run always uses the *saved* code.
 4. Choose **`setupBackups`** in the toolbar dropdown → **Run** → approve the prompts (it asks for Drive because it makes copies). Google will likely show a scary **"Google hasn't verified this app"** screen — that is just because *you* wrote this script and never published it. Choose **Advanced → Go to Octogo Backups (unsafe)** and continue, exactly like you did for the tracker's own script.
 
@@ -125,7 +125,7 @@ Mama writes the night on paper before anything is typed in. This lets the app **
 
 1. Get a free key: [aistudio.google.com](https://aistudio.google.com) → **Get API key** → **Create API key**. Copy it. (Google's free tier is generous; a photo a night is nowhere near it.)
 2. Go to [script.google.com](https://script.google.com) → **New project** → name it **Octogo Vision**.
-3. Delete the placeholder code, paste in the whole of `apps-script/Vision.gs` from this project.
+3. Delete the placeholder code, paste in the whole of `standalone-scripts/Vision.gs` from this project.
 4. Fill in the **two** constants at the top:
    - `GEMINI_API_KEY` — the key from step 1.
    - `VISION_TOKEN` — invent a **long random string of its own**. **Never the sheet's token.** Two doors, two keys: if this project is ever compromised, the worst it can do is read photographs — it has no way to reach your sheet at all.
@@ -176,13 +176,13 @@ Nothing to do — the app updates itself. When a new version is published, the n
 
 It deliberately **waits** if Mama is mid-entry: a half-typed day is never interrupted, and the update applies after she saves or the next time the app is opened. Nothing queued is ever lost across an update.
 
-To confirm which version a phone is on: **More → About**. Current release: **app 2.8.0**, **script 2.8.0**.
+To confirm which version a phone is on: **More → About**. Current release: **app 2.9.0**, **script 2.9.0**.
 
 ## Updating by hand (if you skip the automation)
 
 The app has **two halves that must be updated separately** — the script in the sheet, and the files on the web host. A change to one usually needs the other, so do both. Takes about 5 minutes.
 
-Current versions: **script 2.8.0**, **app 2.8.0**. You can check what each phone is actually running under **More → About**.
+Current versions: **script 2.9.0**, **app 2.9.0**. You can check what each phone is actually running under **More → About**.
 
 ### 1. Update the script (in the sheet)
 

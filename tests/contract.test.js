@@ -143,6 +143,9 @@ const S_MAINT     = slab('function priceRowError(pr, m){', 'function saveMaintPr
 // validateBenta + excludedRowError: every rule apiSaveDay enforces, mirrored on the
 // phone so it never queues a day the server will refuse.
 const S_VALIDATE  = slab('function isWhole(v){', "/** 'sku:box4' -> 'err-sku-box4'");
+// BLANK IS NOT ZERO (v2.9.0): the display-only readers, needed by validateBenta
+// too — its empty-end-count refusal is the guard that stops an inflated night.
+const S_BLANKS   = slab('function rowUI(r){', 'function syncRowInputs(sku, r){');
 // v2.7.4: the Cutoff screen's stock block, plus the window guard it consults.
 const S_PREVINC   = slab('function missingDaysInPeriod(per){', 'function cutoffExpenseDate(per){');
 const S_STOCKCUT  = slab('function stockCutoffHTML(per){', 'function excludedBlockHTML(f){');
@@ -169,6 +172,7 @@ ${S_FORM}
 ${S_CARDS}
 ${S_MAINT}
 ${S_VALIDATE}
+${S_BLANKS}
 ${S_PREVINC}
 ${S_STOCKCUT}
 ${S_SKULABEL}
@@ -341,7 +345,7 @@ const CONTRACT = {
   'costing.per_sku[]':     [['cost_per_box', 'costPerBox'], ['margin_per_box', 'marginPerBox'], ['margin_per_ball', 'marginPerBall']],
   'costing.targets[]':     [['per_day', 'perDay']],
   // v2.9.0 `readSheet` — the READING, and the one response in this app that
-  // comes from a DIFFERENT project (apps-script/Vision.gs, its own deployment,
+  // comes from a DIFFERENT project (standalone-scripts/Vision.gs, its own deployment,
   // its own token, its own key). It obeys the same standing rule for the same
   // reason: the phone reads snake_case, and a camelCase slip on any of these is
   // silent. total_on_paper is the worst of them — it is the figure the whole
@@ -552,13 +556,13 @@ const F = buildFixture();
 // those run before the sync harness exists. The behavioural tests are in
 // section 21.
 //
-// The photo reader is a THIRD Apps Script project (apps-script/Vision.gs) with
+// The photo reader is a THIRD Apps Script project (standalone-scripts/Vision.gs) with
 // its own deployment, its own token and its own Gemini key, so it is loaded the
 // way it runs: alone, in its own context, with a CANNED model reply. The suite
 // must never make a live call — and a canned reply is also the only way to
 // exercise a half-read page, a quota wall or prose-instead-of-a-reading at all.
 // ---------------------------------------------------------------------------
-const VISION_GS = path.join(ROOT, 'apps-script', 'Vision.gs');
+const VISION_GS = path.join(ROOT, 'standalone-scripts', 'Vision.gs');
 // Shaped like a real Google API key and a real random token, and never equal to
 // each other or to the sheet's: half the point of the third project is that the
 // secret that writes money and the key that costs money never share a file.
@@ -3445,7 +3449,6 @@ const S_ARRFNS   = slab('function arriveStep(i, dir){', 'let maintOpen = false;'
 //   S_PAPER   — the whole photo-reader module: visionApi, shrinkPhoto, the
 //               reading's normalizer, THE PREFILL, THE CROSS-CHECK, and every
 //               builder that turns model text into markup.
-const S_BLANKS   = slab('function rowUI(r){', 'function syncRowInputs(sku, r){');
 const S_SKULIST  = slab('function bentaSkuList(){', '// Plain-English breakdown of one sku row:');
 const S_LISTPHR  = slab('function listPhrase(names){', 'function applyDroppedSkus(p, skus){');
 const S_PAPER    = slab('function visionReady(){ return !!(txt(config.visionUrl)',
@@ -5526,10 +5529,90 @@ test('money kept OUT of the cutoff is not a mismatch — the paper counts the ti
   // total, while it is deliberately outside the day's Total here. When THAT is
   // the whole difference, the two DO agree, and crying mismatch would be a
   // false alarm on an ordinary night.
+  // PIN MOVED (v2.9.0, deliberate): the gate was right that this branch cannot
+  // claim proof. A reading that fell short by EXACTLY the excluded amount lands
+  // here too, so the wording now states the assumption and hands the judgement
+  // to the one person who knows whether the page's total counted the nori in.
   const app = showing(readVia(paperWith({ total_on_paper: PAPER_TOTAL + PAPER_EXCL }))).app;
   const cx = app.paperCross();
   assert.strictEqual(cx.state, 'agree', cx.said);
-  assert.ok(cx.said.indexOf('₱50 that is kept out of the cutoff') > -1, cx.said);
+  assert.ok(cx.said.indexOf('₱50 kept out of the cutoff') > -1, cx.said);
+  assert.match(cx.said, /agree IF the paper’s total counts the nori in/,
+    'the assumption is STATED, not hidden behind "Good."');
+  assert.match(cx.said, /If it does not, then something is ₱50 out/,
+    'and the other reading of the same arithmetic is named too');
+});
+
+function asArrLike(v){ return Array.isArray(v) ? v.slice() : []; }
+
+test('an empty end count is REFUSED at Save day — the guard that outlives the card (v2.9.0)', () => {
+  // The gate's RI-2, and the worst outcome this release could cause. An unread
+  // end count leaves the box empty; every sum reads empty as 0, so a start
+  // count of 55 prices all 55 as sold. The paper card said so loudly — but the
+  // card is dismissible and is NOT persisted, so after "Hide this" or a reload
+  // the inflated night saved silently. The refusal therefore lives in
+  // validateBenta, where Save day cannot get past it.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const D = ymdDaysAgo(1);
+  app.loadBentaForm(D);
+  const row = app.benta.rows.find(r => r.sku === 'box10');
+  row.sod = 55; row.eod = '';                 // exactly what an unread figure leaves
+  const errs = app.validateBenta();
+  assert.ok(errs['sku:box10'], 'it must refuse — nothing else stops this night');
+  assert.match(errs['sku:box10'],
+    /Box 10: the end count is empty, so all 55 would count as sold\. Type what was left — 0 if the tray emptied\./);
+  // And the inflation it prevents is real: with the blank read as 0, that line
+  // prices the whole shelf.
+  const line = () => app.computeDay(app.bentaPayload()).lines.find(l => l.sku === 'box10');
+  assert.strictEqual(line().sold, 55, 'the blank is summed as 0, so all 55 read as sold');
+  assert.strictEqual(line().amount, 55 * 105, 'the figure the refusal exists to stop');
+  // ZERO is a real answer and always accepted — that is the whole distinction.
+  row.eod = 0;
+  assert.ok(!app.validateBenta()['sku:box10'], 'a typed 0 is an answer, not a gap');
+  assert.strictEqual(line().amount, 55 * 105, 'and it books the same money, now on purpose');
+  // A blank on a row nobody touched stays silent: an untouched row is not a gap.
+  const other = app.benta.rows.find(r => r.sku === 'box4');
+  other.sod = ''; other.eod = '';
+  assert.ok(!app.validateBenta()['sku:box4'], 'an empty row is just an empty row');
+});
+
+test('a gap in the reading is NAMED, never blamed on Mama\'s arithmetic (v2.9.0)', () => {
+  // The gate's RI-3 and XC-1: when the totals disagreed, the cross-check could
+  // say "every figure was read clearly, so the difference is more likely in the
+  // adding-up on the paper itself" — while the SAME reading listed unread
+  // figures, or was missing a whole product row. It blamed her arithmetic for
+  // the app's own blind spot. Three shapes of gap, all of them named now.
+  const FALSE_CLAIM = /Every figure on the page came back read/;
+
+  // 1. the model itself said it could not read the special order
+  const raw1 = paperWith({ total_on_paper: PAPER_TOTAL + 500 });
+  delete raw1.custom_amount;
+  const cx1 = showing(readVia(raw1)).app.paperCross();
+  assert.strictEqual(cx1.state, 'differ');
+  assert.match(cx1.said, /did not get/, cx1.said);
+  assert.match(cx1.said, /special-order amount/, cx1.said);
+  assert.ok(!FALSE_CLAIM.test(cx1.said), 'and it does not claim everything was read');
+
+  // 2. a whole product ROW never came back — which can appear in no list, since
+  //    an omitted row cannot name itself.
+  const raw2 = paperWith({ total_on_paper: PAPER_TOTAL + 900 });
+  raw2.counts = asArrLike(raw2.counts).filter(c => c.sku !== 'box10');
+  const t2 = showing(readVia(raw2));
+  const cx2 = t2.app.paperCross();
+  assert.strictEqual(cx2.state, 'differ');
+  assert.match(cx2.said, /no line for it came back at all/, cx2.said);
+  assert.ok(!FALSE_CLAIM.test(cx2.said));
+
+  // 3. nothing missing and nothing unsure: only THEN may it point at the paper,
+  //    and even then it says to check the adding-up before changing figures.
+  const clean = paperWith({ total_on_paper: PAPER_TOTAL + 40 });
+  const cx3 = showing(readVia(clean)).app.paperCross();
+  assert.strictEqual(cx3.state, 'differ');
+  assert.ok(FALSE_CLAIM.test(cx3.said) || /Look at /.test(cx3.said),
+    'a clean reading may point at the paper, or at its least-sure line: ' + cx3.said);
+  // Whatever it says, it never blocks the night.
+  assert.match(cx3.said, /Nothing is saved yet/);
 });
 
 test('no total on the paper claims nothing — it says there is nothing to check against', () => {

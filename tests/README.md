@@ -213,7 +213,7 @@ A 34-agent hostile gate then swept all four surfaces (buckets, conversion, cutof
 
 ### v2.7.5 — backups in their own project, and the sheet checker
 
-`run-tests.js` 146 → 152 (section 24). The release adds a **standalone** backup project (`apps-script/Backups.gs`) and `sheetCheck`, a pure-read integrity audit surfaced as More → "Check the sheet".
+`run-tests.js` 146 → 152 (section 24). The release adds a **standalone** backup project (`standalone-scripts/Backups.gs`) and `sheetCheck`, a pure-read integrity audit surfaced as More → "Check the sheet".
 
 The separation is itself a pinned behaviour: one test reads `Code.gs` and fails if `DriveApp`, `ScriptApp`, `MailApp`, `GmailApp` or `UrlFetchApp` ever appears in it, because Apps Script grants permissions per project and the bound project serves the phones — growing its permission set can break an ordinary night's save until the owner re-authorises. `gas-stubs.js` grew a fake Drive (named folders of named files, trashing) and a trigger registry so the backup logic is exercised for real rather than mocked, and `loadBackups()` runs the standalone file in its own VM context with the sheet id filled in the way the owner fills it.
 
@@ -336,3 +336,16 @@ Four of these are the ones worth naming, because each would be read as *fact* of
 **The photo saved after the model call** loses the paper on the one night it matters — the night the reading failed and there is nothing to check. And **the token check dropped** hands an unauthenticated caller both a Drive folder to fill and a metered API key to spend; the order in `doPost` (token first, before Drive, before Gemini, before anything costs anything) is asserted by counting the recorded requests as well as reading the refusal.
 
 Suites: `run-tests.js` 170 → 203, `contract.test.js` 180 → 202.
+
+### v2.9.0 — reading the paper, and the disaster the gate caught first
+
+`run-tests.js` 170 → 203, `contract.test.js` 180 → 204. The 60-agent gate found four confirmed reading/cross-check defects — and its critic found a fifth that no finder did, which was the one that mattered most.
+
+**The deploy would have broken every phone.** `.github/workflows/deploy.yml` runs `clasp push --force` from `apps-script/` with `rootDir "."`, so EVERY `.gs` in that folder lands in the BOUND project — and `Vision.gs` and `Code.gs` both define `doPost`. Every file in an Apps Script project shares one global scope, so one handler silently overwrites the other and every phone request hits the wrong one. (`Backups.gs` had been riding along since v2.7.5, harmless only by luck: no `doPost`, and its `TZ` matched.) The standalone projects now live in `standalone-scripts/`, and THE FENCE test grew into the deploy invariant: the pushed folder may hold exactly `Code.gs` + `appsscript.json`, exactly one pushed file may define `doPost`, and no pushed file may name a permission-bearing service. Copying `Vision.gs` back into `apps-script/` turns the suite red.
+
+The four reading findings, all fixed with their own tests:
+- **RI-2 (major)** — an unread end count leaves the box empty, every sum reads empty as 0, and a start count of 55 prices all 55 as sold. The only warning lived in the paper card, which is dismissible AND not persisted, so after "Hide this" or a reload the inflated night saved silently. The refusal now lives in `validateBenta`, checked last so an ordinary counting mistake is still named first, and a typed **0 is always accepted** — that is the whole distinction. Its mutant **survived the first pass** (the existing test only checked the card), which is exactly what the mutation round is for.
+- **RI-3 + XC-1 (major)** — the cross-check could say "every figure was read clearly, so the difference is more likely in the adding-up on the paper itself" while the same reading listed unread figures, or was missing a whole product row (which appears in no list, since an omitted row cannot name itself). `paperGaps` now names all three kinds of gap — the model's own `unread`, blank custom/total figures, and rows that never came back — and they are reported BEFORE any low-confidence line.
+- **XC-2 (major)** — the excluded-money branch declared "Good." whenever `mine + excluded === paper`, which a reading that fell short by exactly the nori amount also satisfies. It now states the assumption and names the other reading of the same arithmetic, because that is all the arithmetic supports.
+
+Six reverts on scratch copies, all red: the blank end count accepted, gaps ignored, a missing row invisible, the excluded branch declaring "Good.", plus the deploy invariant breached two ways.

@@ -577,7 +577,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.8.0';
+const APP_VERSION = '2.9.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -4544,6 +4544,19 @@ function validateBenta(){
       const bad = excludedRowError(r.sku, r);
       if (bad) errs[key] = bad;
     }
+    // AN EMPTY END COUNT IS NOT A ZERO, and it is the one blank that INVENTS
+    // money: every sum reads it as 0, so a start count of 55 with nothing in
+    // the end box prices all 55 as sold — a night inflated by thousands while
+    // the screen looks perfectly ordinary. The photo reader makes it reachable
+    // (an unread figure is deliberately left blank), but typing reaches it too,
+    // and the gate proved the paper card's warning is both dismissible and not
+    // persisted — so the refusal has to live HERE, where Save day cannot get
+    // past it. Checked LAST, so an ordinary counting mistake is still named
+    // first; 0 is a real answer and always accepted (v2.9.0).
+    if (!errs[key] && isBlankVal(r.eod) && !isBlankVal(r.sod) && num(r.sod) > 0){
+      errs[key] = skuLabel(r.sku) + ': the end count is empty, so all ' + fmt(num(r.sod)) +
+        ' would count as sold. Type what was left — 0 if the tray emptied.';
+    }
   }
 
   const custom = num(benta.custom), customGcash = num(benta.customGcash);
@@ -7034,6 +7047,29 @@ function paperSureWord(v){
  *  most figures the reading could not see, then the ones it was least sure of. A
  *  blank outranks a low confidence because a blank IS the figure missing from
  *  the form, which is the likeliest cause of a gap. */
+/** Everything this reading did NOT read, in the owner's words (v2.9.0). The
+ *  gate found the cross-check claiming "every figure was read clearly" while
+ *  the same reading listed unread figures — and blaming Mama's arithmetic for
+ *  the app's own blind spot. Three sources, because a gap can hide in any of
+ *  them: the model's own `unread` list, a figure it left blank OUTSIDE the
+ *  count rows (the special order, the paper's total), and a product ROW that
+ *  never came back at all — which appears in no list, since an omitted row
+ *  cannot name itself. */
+function paperGaps(rd){
+  const r = asObj(rd);
+  const out = asArr(r.unread).map(u => txt(u)).filter(Boolean);
+  if (r.custom_amount === '') out.push('the special-order amount');
+  if (r.custom_gcash === '') out.push('the GCash part of the special order');
+  // Rows the page should have had. Judged against the skus this form offers,
+  // which is the only list the phone can honestly compare against.
+  const got = Object.create(null);
+  for (const c of asArr(r.counts)) got[txt(asObj(c).sku)] = true;
+  for (const row of asArr(asObj(benta).rows)){
+    if (!got[row.sku]) out.push(skuLabel(row.sku) + ' (no line for it came back at all)');
+  }
+  return out;
+}
+
 function paperSuspects(rd){
   const rows = asArr(asObj(rd).counts).map(c => {
     let blanks = 0;
@@ -7076,15 +7112,33 @@ function paperCross(){
   // crying mismatch would be a false alarm on an ordinary night.
   const excl = r2(num(c.excluded));
   if (excl !== 0 && r2(mine + excl) === said){
+    // Consistent — but NOT proof, and the gate was right to say so: a reading
+    // that happened to fall short by exactly the excluded amount lands here
+    // too, and calling that "Good" would bless a misread night. So the
+    // assumption is stated and left with him, which is all the arithmetic
+    // actually supports (v2.9.0).
     return { state:'agree', said:'The paper says ' + peso(said) + '. The day’s total here is ' + peso(mine) +
-      ', and the ' + peso(excl) + ' that is kept out of the cutoff makes up the rest — so the paper’s total counts that in. Good.' };
+      ', and the ' + peso(excl) + ' kept out of the cutoff makes up the rest — so these agree IF the paper’s ' +
+      'total counts the nori in. If it does not, then something is ' + peso(excl) + ' out. You will know which.' };
   }
+  // WHERE TO LOOK. The unread things come first, because a figure the reading
+  // never had is a better explanation of a gap than a figure it was merely
+  // unsure of — and the old wording skipped them entirely and blamed the
+  // paper's arithmetic instead (v2.9.0).
+  const gaps = paperGaps(rd);
   const look = paperSuspects(rd);
-  const where = look.length === 0
-    ? ' Every figure was read clearly, so the difference is more likely in the adding-up on the paper itself.'
-    : (look.length === 1
-      ? ' Look at ' + look[0] + ' first — the reading was least sure of it.'
-      : ' Look at ' + look[0] + ' first, then ' + look[1] + ' — the reading was least sure of those.');
+  let where;
+  if (gaps.length){
+    where = ' This reading did not get ' + listPhrase(gaps.slice(0, 3)) +
+      ' — that is the first place to look.';
+  } else if (look.length === 0){
+    where = ' Every figure on the page came back read, and clearly, so the difference is more likely in the' +
+      ' adding-up on the paper itself — check that before you change anything here.';
+  } else if (look.length === 1){
+    where = ' Look at ' + look[0] + ' first — the reading was least sure of it.';
+  } else {
+    where = ' Look at ' + look[0] + ' first, then ' + look[1] + ' — the reading was least sure of those.';
+  }
   return { state:'differ', said:'The paper says ' + peso(said) + ' but these figures add up to ' + peso(mine) +
     ' — ' + peso(r2(Math.abs(said - mine))) + (mine < said ? ' short' : ' too much') + '.' + where +
     ' Nothing is saved yet: change what is wrong, or save it as it stands.' };

@@ -30,12 +30,12 @@ function test(name, fn) {
 }
 
 // Fresh context per scenario so sheet state never leaks between tests.
-/** The STANDALONE backup project (apps-script/Backups.gs) — its own Apps
+/** The STANDALONE backup project (standalone-scripts/Backups.gs) — its own Apps
  *  Script project in real life, so its own VM context here, with the sheet id
  *  filled in the way the owner fills it. Deliberately separate from Code.gs:
  *  keeping Drive and trigger permissions out of the bound script is the whole
  *  reason the file exists (v2.7.5). */
-const BACKUPS_GS = path.join(ROOT, 'apps-script', 'Backups.gs');
+const BACKUPS_GS = path.join(ROOT, 'standalone-scripts', 'Backups.gs');
 // Shaped like a real Drive id (44 chars of [A-Za-z0-9_-]), because the code
 // now REFUSES anything that is not — a fixture that could not exist in Drive
 // would test the wrong thing.
@@ -785,8 +785,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.8.0', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.8.0');
+  assert.strictEqual(g.data.version, '2.9.0', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.9.0');
 });
 
 // ---------------------------------------------------------------------------
@@ -5242,7 +5242,7 @@ test('costing: a day not entered is said, but never crying wolf about TONIGHT', 
 // ---------------------------------------------------------------------------
 // 26. v2.9.0: "Read it from the paper" — the vision project reads the photo.
 //
-// A THIRD standalone project (apps-script/Vision.gs) with its own context here,
+// A THIRD standalone project (standalone-scripts/Vision.gs) with its own context here,
 // because that is what it is in real life: its own permissions, its own token,
 // its own key. Every Gemini reply in this section is CANNED — the suite must
 // never make a live call, and a matrix of canned replies is the only way to
@@ -5251,7 +5251,7 @@ test('costing: a day not entered is said, but never crying wolf about TONIGHT', 
 // ---------------------------------------------------------------------------
 console.log('\n--- 26. v2.9.0: read it from the paper (Vision.gs) ---');
 
-const VISION_GS = path.join(ROOT, 'apps-script', 'Vision.gs');
+const VISION_GS = path.join(ROOT, 'standalone-scripts', 'Vision.gs');
 // Shaped like a real Google API key and a real random token, and NEVER equal to
 // each other: half the point of the third project is that the sheet's secret
 // and the key that costs money never sit in the same file.
@@ -5680,14 +5680,14 @@ test('an unknown action is refused by name, and doGet answers without a token', 
   assert.strictEqual(r.error, 'Unknown action: "saveDay".',
     'this app cannot save a day, and says so rather than pretending');
   const g = JSON.parse(ctx.doGet({}).getContent());
-  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.8.0' } });
+  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.9.0' } });
 });
 
 test('ping proves the setup WITHOUT spending a unit of quota — even with no key yet', () => {
   const ctx = loadVision({ keepKeyPlaceholder: true });
   const r = vpost(ctx, { token: VISION_TOK, action: 'ping', payload: {} });
   assert.strictEqual(r.ok, true, r.error);
-  assert.strictEqual(r.data.version, '2.8.0', "VERSION stays put until the release ships");
+  assert.strictEqual(r.data.version, '2.9.0', 'the vision project ships with the release it belongs to');
   assert.strictEqual(r.data.model, 'gemini-2.5-flash');
   assert.strictEqual(r.data.key_configured, false, 'a yes/no — never the key itself');
   keepsSecrets(JSON.stringify(r));
@@ -5819,10 +5819,34 @@ test('THE FENCE: the phones\' project still cannot reach the internet, and Visio
   assert.ok(!/generativelanguage|GEMINI/i.test(bound),
     'the bound script knows nothing about Gemini — not even its address');
 
-  // Exactly ONE file in the repo may make an internet request.
-  const gsDir = path.join(ROOT, 'apps-script');
-  const usesFetch = fs.readdirSync(gsDir).filter(f => /\.gs$/.test(f))
-    .filter(f => /\bUrlFetchApp\b/.test(fs.readFileSync(path.join(gsDir, f), 'utf8')));
+  // THE DEPLOY INVARIANT — and this is the one that nearly shipped a disaster.
+  // .github/workflows/deploy.yml runs `clasp push --force` from apps-script/
+  // with rootDir ".", so EVERY .gs file in that folder lands in the BOUND
+  // project. Vision.gs and Code.gs both define doPost, and every file in an
+  // Apps Script project shares ONE global scope — so pushing them together
+  // silently overwrites one handler with the other and every phone request
+  // hits the wrong one. The gate caught it before the push; this test is what
+  // keeps it caught. The standalone projects therefore live OUTSIDE the pushed
+  // folder, and the pushed folder is allowed exactly two files.
+  const pushedDir = path.join(ROOT, 'apps-script');
+  const pushed = fs.readdirSync(pushedDir).filter(f => !/^\./.test(f)).sort();
+  assert.deepStrictEqual(pushed, ['Code.gs', 'appsscript.json'],
+    'the folder clasp pushes may hold ONLY the bound script and its manifest — ' +
+    'anything else joins the project that serves the phones');
+  const pushedGs = pushed.filter(f => /\.gs$/.test(f));
+  const handlers = pushedGs.filter(f => /^function doPost\b/m.test(fs.readFileSync(path.join(pushedDir, f), 'utf8')));
+  assert.deepStrictEqual(handlers, ['Code.gs'], 'exactly one doPost may be pushed');
+  for (const f of pushedGs) {
+    const src = fs.readFileSync(path.join(pushedDir, f), 'utf8');
+    assert.ok(!/\b(UrlFetchApp|DriveApp|ScriptApp|MailApp|GmailApp)\b/.test(src),
+      f + ' is pushed to the phones\' project, so it may use no permission-bearing service');
+  }
+
+  // The standalone projects, outside that folder, are where those services live.
+  const soloDir = path.join(ROOT, 'standalone-scripts');
+  const solo = fs.readdirSync(soloDir).filter(f => /\.gs$/.test(f)).sort();
+  assert.deepStrictEqual(solo, ['Backups.gs', 'Vision.gs'], 'the two standalone projects');
+  const usesFetch = solo.filter(f => /\bUrlFetchApp\b/.test(fs.readFileSync(path.join(soloDir, f), 'utf8')));
   assert.deepStrictEqual(usesFetch, ['Vision.gs'],
     'Vision.gs is the ONLY project allowed to make an internet request');
 

@@ -43,7 +43,7 @@
  * ========================================================================== */
 'use strict';
 
-var VERSION = '2.8.0';
+var VERSION = '2.9.0';
 var TZ = 'Asia/Manila';
 
 /** The Gemini API key, from aistudio.google.com. This project's only paid
