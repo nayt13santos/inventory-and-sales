@@ -577,7 +577,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.9.1';
+const APP_VERSION = '2.9.2';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -5130,7 +5130,16 @@ function renderCutoff(){
 
   // Days with nothing in them, and a period with no purchases at all: the two
   // silences that make a note wrong without anything looking wrong (v2.7.6).
-  const blanks = missingDaysInPeriod(per);
+  // TONIGHT IS NOT A GAP. It is separated out because saying "1 day has nothing
+  // entered" about tonight, every single evening, is how the card stops being
+  // read on the evening a night really IS missing — and because the server's
+  // own costing already draws this line at yesterday (v2.9.2). Tonight keeps
+  // both buttons: on the last night of a cutoff, "Was closed" is exactly the
+  // tap he needs.
+  const allBlanks = missingDaysInPeriod(per);
+  const today = todayStr();
+  const blanks = allBlanks.filter(d => d < today);
+  const tonight = allBlanks.indexOf(today) !== -1 ? today : '';
   if (blanks.length){
     const one = blanks.length === 1;
     h += '<div class="card" style="border-color:var(--accent);">' +
@@ -5147,8 +5156,21 @@ function renderCutoff(){
     if (blanks.length > 12) h += '<p class="hint" style="margin-top:8px;">…and ' + (blanks.length - 12) + ' more.</p>';
     h += '</div>';
   }
-  if (!num(f.supplies) && !num(f.octopus) && !num(f.other) && !num(f.mama) && !num(f.electric)){
-    h += '<div class="card"><p class="hint">No purchases are logged in this cutoff yet. If money has gone out — supplies, octopus, the electric bill — it is missing from every figure below.</p></div>';
+  if (tonight){
+    // A reminder, in a different register from the warning above: nothing is
+    // wrong yet, the night simply has not been entered.
+    h += '<div class="card"><p class="hint">Tonight is not entered yet, so it is not in the figures below.</p>' +
+      '<div class="gx-item"><div class="gx-main"><div class="gx-name">' + esc(fmtShort(tonight)) + '</div></div>' +
+        '<button type="button" class="btn small" data-act="cut-open-day" data-date="' + esc(tonight) + '">Enter it</button>' +
+        '<button type="button" class="btn small" data-act="cut-closed-day" data-date="' + esc(tonight) + '">Was closed</button>' +
+      '</div></div>';
+  }
+  // The two categories that are PURCHASES. Mama's share and the electric bill
+  // have their own one-tap chips a few cards down, and gating this on them let
+  // one tap on a chip THIS SCREEN OFFERS switch off a warning about supplies and
+  // octopus while both were still ₱0 (v2.9.2).
+  if (!num(f.supplies) && !num(f.octopus)){
+    h += '<div class="card"><p class="hint">No supplies and no octopus are logged in this cutoff yet. If that money has gone out, it is missing from every figure below.</p></div>';
   }
 
   h += '<div class="card"><div class="period-nav">' +
@@ -6464,13 +6486,22 @@ function costFiguresHTML(res, per){
     // What was PAID for things already priced per unit above, shown so the
     // subtraction is visible (v2.8.0). Without this line the money figure here
     // quietly disagrees with the Expenses screen and looks like a mistake.
+    // What was PAID for things priced per unit above — and ONLY the part whose
+    // promise was actually kept may claim to be "counted above" (v2.9.2). Money
+    // set aside for stock that was never logged as opened is counted NOWHERE,
+    // and the caveat card says so; asserting otherwise here would be the same
+    // untruth in smaller print.
     (num(v.counted_per_unit) > 0
       ? '<div class="r-sep" role="presentation"></div>' +
-        '<div class="co-row"><span>Also paid, counted above instead</span><span class="v">' +
-          peso(v.counted_per_unit) + '</span></div>' +
-        '<p class="hint" style="margin-top:8px;">That is what you paid for flour and boxes in these nights. It is ' +
-          '<b>not</b> added here, because the flour is already counted as it was opened and the boxes as they were ' +
-          'used — counting the money too would price every ball dearer than it is.</p>'
+        '<div class="co-row"><span>Also paid' +
+          (num(v.counted_as_stock) > 0 && !num(v.stock) ? ', counted nowhere' : ', counted above instead') +
+          '</span><span class="v">' + peso(v.counted_per_unit) + '</span></div>' +
+        '<p class="hint" style="margin-top:8px;">' + (num(v.counted_as_stock) > 0 && !num(v.stock)
+          ? 'That is what you paid for stock and boxes in these nights. The boxes are counted above as they were ' +
+            'used — but nothing was logged as OPENED, so the stock money is in no figure here. See the note at the top.'
+          : 'That is what you paid for flour and boxes in these nights. It is <b>not</b> added here, because the ' +
+            'flour is already counted as it was opened and the boxes as they were used — counting the money too ' +
+            'would price every ball dearer than it is.') + '</p>'
       : '') +
     (isNone(v.per_ball) && why ? '<p class="hint" style="margin-top:8px;">' + why + '</p>' : '') +
   '</div>';

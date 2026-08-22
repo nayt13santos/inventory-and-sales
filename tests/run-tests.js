@@ -785,8 +785,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.9.1', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.9.1');
+  assert.strictEqual(g.data.version, '2.9.2', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.9.2');
 });
 
 // ---------------------------------------------------------------------------
@@ -5189,6 +5189,73 @@ test('costing CAVEATS: a floor switches the price advice OFF, a thin period leav
   assert.deepStrictEqual(r.data.targets, [], 'an unpriced ingredient withholds it too');
 });
 
+test('costing: money set aside on an UNKEPT promise is a floor, and the advice stops (v2.9.2)', () => {
+  // The product review's MT-1, probe-proven against v2.8.0: money paid on a
+  // costed bucket is withheld from the cost because the ledger says it is
+  // priced as stock is OPENED — but the owner buys when things run out and does
+  // not always log an opening, so that money could be counted NOWHERE while the
+  // screen advised cutting prices. The old floor gate could not see it: one
+  // octopus purchase makes moneyCost positive and stands the warning down.
+  const ss = new FakeSpreadsheet();
+  const ctx = makeContext(ss, new Date('2026-09-05T04:00:00Z'));
+  vm.createContext(ctx);
+  vm.runInContext(source, ctx, { filename: 'Code.gs' });
+  const token = ctx.setupSheet();
+  const p = (b) => JSON.parse(ctx.doPost({ postData: { contents: JSON.stringify(b) } }).getContent());
+  const night = (d, id, stock) => assert.strictEqual(p({ token, action: 'saveDay', payload: {
+    date: d, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box10', sod: 30, eod: 0, cheeseQty: 0, gcashQty: 0, gcashCheeseQty: 0 }],
+    stock: stock || [], entryId: id } }).ok, true);
+  const spend = (item, amount, id, cat) => assert.strictEqual(p({ token, action: 'saveExpense',
+    payload: { date: '2026-08-20', category: cat || 'Supplies', item: item, amount: amount,
+      backlogRef: '', notes: '', entryId: id } }).ok, true);
+  const ask = () => p({ token, action: 'costing',
+    payload: { start: '2026-08-16', end: '2026-08-31', targetPerDay: 1000 } }).data;
+
+  night('2026-08-20', 'pr-1');
+  night('2026-08-21', 'pr-2');
+  spend('Flour', 2780, 'pr-flour');                     // a costed bucket: withheld
+  spend('Octopus', 1500, 'pr-octo', 'Octopus');         // makes moneyCost > 0
+
+  let d = ask();
+  assert.strictEqual(d.variable.stock, 0, 'nothing was logged as opened');
+  assert.strictEqual(d.variable.money, 1500, 'the octopus is money out');
+  assert.strictEqual(d.variable.counted_as_stock, 2780, 'the flour money is set aside...');
+  assert.strictEqual(d.variable.counted_as_boxes, 0);
+  assert.match(d.caveats.join('\n'), /2,780 of what you paid for stock in this period is in NO figure here/,
+    '...and the screen says it is counted NOWHERE, in pesos');
+  assert.deepStrictEqual(d.targets, [], 'and the price advice stops — the cost is a floor');
+
+  // Log the openings and the promise is kept: the caveat goes, the advice returns.
+  night('2026-08-21', 'pr-2', [{ product: 'Takoyaki Flour', qty: 3 }]);
+  d = ask();
+  assert.strictEqual(d.variable.stock, 360, '3 packs at the seeded 120');
+  assert.ok(!/in NO figure here/.test(d.caveats.join('\n')), 'the promise was kept');
+  assert.strictEqual(d.targets.length, 1, 'so the advice is back');
+
+  // A CONTAINER bucket keeps its own promise — boxes sold are charged at
+  // box_cost the moment they sell, so its money must NOT raise the floor.
+  const ss2 = new FakeSpreadsheet();
+  const ctx2 = makeContext(ss2, new Date('2026-09-05T04:00:00Z'));
+  vm.createContext(ctx2);
+  vm.runInContext(source, ctx2, { filename: 'Code.gs' });
+  const tok2 = ctx2.setupSheet();
+  const q = (b) => JSON.parse(ctx2.doPost({ postData: { contents: JSON.stringify(b) } }).getContent());
+  q({ token: tok2, action: 'saveDay', payload: { date: '2026-08-20', closed: false, staff: 'Mama',
+    customAmount: 0, customGcash: 0, notes: '', counts: [{ sku: 'box10', sod: 30, eod: 0,
+    cheeseQty: 0, gcashQty: 0, gcashCheeseQty: 0 }], stock: [], entryId: 'bx-1' } });
+  q({ token: tok2, action: 'saveExpense', payload: { date: '2026-08-20', category: 'Supplies',
+    item: 'Box', amount: 230, backlogRef: '', notes: '', entryId: 'bx-e' } });
+  q({ token: tok2, action: 'saveExpense', payload: { date: '2026-08-20', category: 'Octopus',
+    item: 'Octopus', amount: 900, backlogRef: '', notes: '', entryId: 'bx-o' } });
+  const b = q({ token: tok2, action: 'costing', payload: { start: '2026-08-16', end: '2026-08-31' } }).data;
+  assert.strictEqual(b.variable.counted_as_boxes, 230, 'the Box bucket is a container promise');
+  assert.strictEqual(b.variable.counted_as_stock, 0);
+  assert.ok(b.variable.boxes > 0, 'and boxesCost keeps it, the moment a box sells');
+  assert.ok(!/in NO figure here/.test(b.caveats.join('\n')),
+    'so no floor: that promise keeps itself');
+});
+
 test('costing: a day not entered is said, but never crying wolf about TONIGHT', () => {
   // A thin period biases the cost per night HIGH (the per-cutoff shares land on
   // fewer nights), which is the cautious direction — so it is stated and the
@@ -5680,14 +5747,14 @@ test('an unknown action is refused by name, and doGet answers without a token', 
   assert.strictEqual(r.error, 'Unknown action: "saveDay".',
     'this app cannot save a day, and says so rather than pretending');
   const g = JSON.parse(ctx.doGet({}).getContent());
-  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.9.1' } });
+  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.9.2' } });
 });
 
 test('ping proves the setup WITHOUT spending a unit of quota — even with no key yet', () => {
   const ctx = loadVision({ keepKeyPlaceholder: true });
   const r = vpost(ctx, { token: VISION_TOK, action: 'ping', payload: {} });
   assert.strictEqual(r.ok, true, r.error);
-  assert.strictEqual(r.data.version, '2.9.1', 'the vision project ships with the release it belongs to');
+  assert.strictEqual(r.data.version, '2.9.2', 'the vision project ships with the release it belongs to');
   assert.strictEqual(r.data.model, 'gemini-2.5-flash');
   assert.strictEqual(r.data.key_configured, false, 'a yes/no — never the key itself');
   keepsSecrets(JSON.stringify(r));

@@ -279,7 +279,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.9.1';
+var VERSION = '2.9.2';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -2221,6 +2221,22 @@ function usableCost(v) {
   return isFinite(n) && n >= 0;
 }
 
+/** Whether a costed bucket name is about CONTAINERS — the promise `boxesCost`
+ *  keeps by itself. Matched against the sku labels the owner actually sells
+ *  ("Box 4" contains "box"), so a bucket he names "Box" or "Boxes" is
+ *  recognised without a second setting to keep in step (v2.9.2). */
+function boxBucket_(item, prices) {
+  var k = asStr(item).toLowerCase();
+  if (!k) return false;
+  if (k === 'box' || k === 'boxes') return true;
+  var list = (prices && prices.list) || [];
+  for (var i = 0; i < list.length; i++) {
+    var label = asStr(list[i].label).toLowerCase();
+    if (label && (label === k || label.indexOf(k) === 0)) return true;
+  }
+  return false;
+}
+
 function apiCosting(ss, settings, payload) {
   var start = reqDate(payload.start, 'start');
   var end = reqDate(payload.end, 'end');
@@ -2345,16 +2361,27 @@ function apiCosting(ss, settings, payload) {
     var k = lower(asStr(b).trim());
     if (k) costedBuckets[k] = true;
   });
-  var moneyCost = 0, countedPerUnit = 0;
+  // The set-aside is split by WHICH PROMISE it rests on (v2.9.2). Money held
+  // back for containers is honoured by `boxesCost` the moment a box sells, so
+  // that promise keeps itself. Money held back for STOCK is only honoured when
+  // something is logged as opened — and the owner buys when things run out and
+  // does not always log an opening, so that promise can quietly go unkept and
+  // take his flour money out of the cost with it.
+  var moneyCost = 0, asideStock = 0, asideBoxes = 0;
   expenses.forEach(function (x) {
     if (x.category !== 'Supplies' && x.category !== 'Octopus') return;
     var item = lower(x.item);
-    if (costedBuckets[item] || itemByName[item] || asStr(x.stock_product) !== '') {
-      countedPerUnit += x.amount;     // reported, never added to the cost
+    var isStockRestock = !!itemByName[item] || asStr(x.stock_product) !== '';
+    if (isStockRestock || costedBuckets[item]) {
+      // A bucket that names a tracked product (or a legacy delivery row) is a
+      // stock promise; any other costed bucket is a container promise.
+      if (isStockRestock || !boxBucket_(item, prices)) asideStock += x.amount;
+      else asideBoxes += x.amount;
       return;
     }
     moneyCost += x.amount;
   });
+  var countedPerUnit = asideStock + asideBoxes;
 
   stockCost = round2(stockCost);
   moneyCost = round2(moneyCost);
@@ -2512,6 +2539,20 @@ function apiCosting(ss, settings, payload) {
   // and stays on screen WITH its warning rather than being suppressed.
   var caveats = [];
   var costIsFloor = false;
+  // A PROMISE THAT WAS NOT KEPT (v2.9.2). This money was withheld from the cost
+  // because the ledger says it is counted as stock is opened — but nothing was
+  // logged as opened in this period, so it is counted NOWHERE. It is the
+  // dangerous direction (cost too low makes a price look safe to cut) and the
+  // old floor gate could not see it: one octopus purchase makes moneyCost
+  // positive and stands the whole floor warning down while the flour money sits
+  // withheld against a stockCost of zero. Said as the app's own limitation —
+  // he buys when things run out and logging an opening is not a duty he took on.
+  if (asideStock > 0 && stockCost === 0) {
+    costIsFloor = true;
+    caveats.push(fmtAmt(round2(asideStock)) + ' of what you paid for stock in this period is in NO figure here. ' +
+      'It is left out because this screen prices stock as it is OPENED, and nothing was logged as opened in ' +
+      'these nights — so the cost per ball below is a floor, not the real cost.');
+  }
   if (!(moneyCost > 0)) {
     costIsFloor = true;
     caveats.push('No purchases are logged in this period, so the cost per ball counts only what came out of stock. ' +
@@ -2551,7 +2592,11 @@ function apiCosting(ss, settings, payload) {
       // What was paid for things this ledger prices per unit instead — shown
       // so the subtraction is visible rather than a figure that quietly
       // disagrees with his Expenses screen.
-      counted_per_unit: round2(countedPerUnit)
+      counted_per_unit: round2(countedPerUnit),
+      // Split by the promise each part rests on, so the screen can say which
+      // one was actually kept (v2.9.2).
+      counted_as_stock: round2(asideStock),
+      counted_as_boxes: round2(asideBoxes)
     },
     fixed: {
       salary: salary, shares: shares,

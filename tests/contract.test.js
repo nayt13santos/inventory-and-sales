@@ -959,6 +959,20 @@ test('the Cutoff screen names the days with nothing in them (v2.7.6)', () => {
   day(app.addDays(T, -2), true);                  // dark on purpose: that IS an answer
   assert.deepStrictEqual(app.missingDaysInPeriod(per), [app.addDays(T, -1), T],
     'only the days with nothing at all, and never past today');
+  // PIN ADDED (v2.9.2): the RULE stays the same — today is still a day with
+  // nothing in it — but the card no longer calls tonight a missing night. The
+  // warning counts up to yesterday; tonight gets its own quieter line, with
+  // both buttons, because on the last night of a cutoff "Was closed" is the tap
+  // that matters. Saying "1 day has nothing entered" about tonight every single
+  // evening is how the card stops being read on the evening one really is.
+  const card = HTML;
+  assert.match(card, /const blanks = allBlanks\.filter\(d => d < today\);/,
+    'the warning covers up to yesterday');
+  assert.match(card, /Tonight is not entered yet/, 'and tonight is said separately');
+  assert.ok(card.indexOf('days have nothing entered') < card.indexOf('Tonight is not entered yet'),
+    'the real gaps come first');
+  assert.match(card, /const tonight = allBlanks\.indexOf\(today\) !== -1/,
+    'tonight is still FOUND — it is only said differently');
 
   // A period this phone cannot fully see says NOTHING rather than inventing
   // gaps out of history it does not hold.
@@ -976,10 +990,16 @@ test('the Cutoff screen names the days with nothing in them (v2.7.6)', () => {
 
   // Source pins for the DOM-bound half: the card, both actions, the
   // no-purchases line — and the rule that none of it blocks the note.
-  assert.match(HTML, /const blanks = missingDaysInPeriod\(per\);/);
+  assert.match(HTML, /const allBlanks = missingDaysInPeriod\(per\);/);
   assert.match(HTML, /data-act="cut-open-day"/);
   assert.match(HTML, /data-act="cut-closed-day"/);
-  assert.match(HTML, /No purchases are logged in this cutoff yet\./);
+  // PIN MOVED (v2.9.2, deliberate): the warning names ONLY the two purchase
+  // categories now. Gating it on Mama and the electric bill too meant one tap
+  // on the "+ Mama ₱500" chip THIS SCREEN OFFERS silenced a warning about
+  // supplies and octopus while both were still zero.
+  assert.match(HTML, /No supplies and no octopus are logged in this cutoff yet\./);
+  assert.match(HTML, /if \(!num\(f\.supplies\) && !num\(f\.octopus\)\)\{/,
+    'and it is gated on those two alone');
   const gen = slab('async function generateNote(){', 'function copyNote(){');
   assert.ok(!/missingDaysInPeriod/.test(gen),
     'an unlogged day may be deliberate — it is said, never used to refuse the note');
