@@ -279,7 +279,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.9.3';
+var VERSION = '2.9.4';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -2392,7 +2392,14 @@ function apiCosting(ss, settings, payload) {
   // mama_per_cutoff / electric_per_cutoff are per PERIOD by definition, so they
   // are taken whole and then spread; a missing Settings row reads 0 rather than
   // inventing a share the owner never entered.
-  var shares = round2(asNum(settings.mama_per_cutoff) + asNum(settings.electric_per_cutoff));
+  // ONE LUMP PER CUTOFF PERIOD THE WINDOW TOUCHES (v2.9.4). Taking it once
+  // regardless of the window's length understated a multi-period window's
+  // fixed cost — and understating cost is the dangerous direction, the one
+  // that makes a price look safe to cut. The phone only ever asks for a single
+  // period, so this was never wrong on screen; the API accepts any range.
+  var periods = periodsTouched_(start, end);
+  var perCutoff = round2(asNum(settings.mama_per_cutoff) + asNum(settings.electric_per_cutoff));
+  var shares = round2(perCutoff * Math.max(1, periods.count));
   var fixedTotal = round2(salary + shares);
 
   // The per-ball figures. `perBall` carries the containers; `ingredientPerBall`
@@ -2579,6 +2586,31 @@ function apiCosting(ss, settings, payload) {
       (daysOpen === 1 ? ' night' : ' nights') + ' that are — and the per-cutoff shares are spread across those alone. ' +
       'That makes the cost per night read HIGH, so the prices below are the cautious end.');
   }
+  // THE CUTOFF IS NOT OVER YET (v2.9.4). This is the DEFAULT view: the phone
+  // opens the costing on the period he is living in. The per-cutoff lumps are
+  // charged whole — that money is owed for the period however far into it we
+  // are — so spread across the nights so far they make the cost per night read
+  // HIGH, and there was no line on screen saying so. Same direction as the
+  // thin-period caveat above (upward, cautious), so the advice stays with its
+  // warning rather than being withheld.
+  var lastP = periods.last;
+  if (lastP && perCutoff > 0 && lastP.end > yday) {
+    var fullNights = 0;
+    for (var fw = lastP.start; fw <= lastP.end; fw = addDaysStr(fw, 1)) fullNights++;
+    var soFar = 0;
+    var stopAt = yday < lastP.end ? yday : lastP.end;
+    for (var sw = lastP.start; sw <= stopAt; sw = addDaysStr(sw, 1)) soFar++;
+    // The peso figure is named through the THINGS it pays for, not with a bare
+    // number: in a sentence that already counts nights, "1,000" on its own
+    // could be read as one more count. (House style is fmtAmt without a sign.)
+    caveats.push('This cutoff is not finished — ' + soFar + ' of its ' + fullNights +
+      (fullNights === 1 ? ' night' : ' nights') + ' have gone by. ' +
+      "Mama's share and the electric come to " + fmtAmt(perCutoff) +
+      ' for the WHOLE cutoff however far into it you are, so charged against ' +
+      soFar + (soFar === 1 ? ' night' : ' nights') + ' they make the cost per night read HIGH. ' +
+      'It settles as the cutoff fills — the last finished cutoff is the one to price from.');
+  }
+
   if (costIsFloor) targets = [];
 
   return {
@@ -2599,7 +2631,11 @@ function apiCosting(ss, settings, payload) {
       counted_as_boxes: round2(asideBoxes)
     },
     fixed: {
-      salary: salary, shares: shares,
+      salary: salary, shares: shares, periods: periods.count,
+      // Purely a fact about dates: whether the last cutoff the window touches
+      // has run out. Whether it is WORTH warning about also depends on there
+      // being a share to spread, which is the caveat's business, not this key's.
+      period_finished: !(periods.last && periods.last.end > yday),
       per_day: daysOpen > 0 ? round2(fixedTotal / daysOpen) : null
     },
     per_sku: perSku,
@@ -2648,6 +2684,41 @@ function buildNoteText(branch, start, end, f) {
 }
 
 /** "July 1 - 15" (same month) or "July 30 - August 2" (spanning months). */
+/** The 1-15 / 16-end cutoff periods a window TOUCHES, in order (v2.9.4).
+ *  `mama_per_cutoff` and `electric_per_cutoff` are lumps per PERIOD, so a
+ *  window that spans three of them owes three, and one that stops halfway
+ *  through the third still owes that third's lump — the money is due for the
+ *  period, not by the night. Callers use `count` for the arithmetic and `last`
+ *  to say whether the final period has actually finished. */
+function periodsTouched_(start, end) {
+  var out = [];
+  var cur = periodStartOf_(start);
+  var guard = 0;
+  while (cur.start <= end && guard++ < 400) {
+    out.push(cur);
+    cur = periodStartOf_(addDaysStr(cur.end, 1));
+  }
+  return { count: out.length, list: out, last: out.length ? out[out.length - 1] : null };
+}
+
+/** The cutoff period a date falls in: {start, end}. */
+function periodStartOf_(ds) {
+  var p = parseYmd(ds);
+  if (p.d <= 15) {
+    return { start: ymdOf_(p.y, p.m, 1), end: ymdOf_(p.y, p.m, 15) };
+  }
+  return { start: ymdOf_(p.y, p.m, 16), end: ymdOf_(p.y, p.m, daysInMonth_(p.y, p.m)) };
+}
+
+function ymdOf_(y, m, d) {
+  return String(y) + '-' + (m < 10 ? '0' + m : String(m)) + '-' + (d < 10 ? '0' + d : String(d));
+}
+
+function daysInMonth_(y, m) {
+  return [31, (y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0)) ? 29 : 28,
+    31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1];
+}
+
 function periodLabel(start, end) {
   var s = parseYmd(start);
   var e = parseYmd(end);

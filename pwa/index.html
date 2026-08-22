@@ -590,7 +590,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.9.3';
+const APP_VERSION = '2.9.4';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -6521,6 +6521,13 @@ function costFiguresHTML(res, per){
     h += '<div class="card attn-card"><p class="attn-head">' +
       (cav.length === 1 ? 'Read this first' : 'Read these first') + '</p>';
     for (const c of cav) h += '<p style="margin-top:8px;">' + esc(txt(c)) + '</p>';
+    // The unfinished-cutoff caveat ends by saying which cutoff to price from
+    // (v2.9.4), so that cutoff is one tap away rather than two guesses at the
+    // arrows. Only offered when the server says the window is still running.
+    if (asObj(d.fixed).period_finished === false){
+      h += '<button type="button" class="btn" data-act="cost-last-done" style="margin-top:10px;">' +
+        'Show the last finished cutoff</button>';
+    }
     h += '<p class="hint" style="margin-top:10px;">' + (asArr(d.targets).length
       ? 'The figures below still hold — read them knowing this, and the price advice leans to the cautious side.'
       : 'The figures below are still worked out, because they are useful — but they are a <b>floor</b>, ' +
@@ -7715,6 +7722,18 @@ document.addEventListener('click', (ev) => {
   }
   else if (act === 'cost-next'){
     costPer = shiftPeriod(costPer || currentPeriod(todayStr()), 1);
+    costRes = null; costErr = ''; costStale = false;
+    loadCosting();
+  }
+  // The last cutoff that has actually RUN OUT (v2.9.4) — walked back from the
+  // one on screen rather than assumed to be the previous one, so it is right
+  // whichever period he happens to be looking at.
+  else if (act === 'cost-last-done'){
+    let p = costPer || currentPeriod(todayStr());
+    const today = todayStr();
+    let guard = 0;
+    while (p.end >= today && guard++ < 40) p = shiftPeriod(p, -1);
+    costPer = p;
     costRes = null; costErr = ''; costStale = false;
     loadCosting();
   }

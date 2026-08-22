@@ -373,3 +373,15 @@ Two defects, both from measuring rather than looking, plus one hole in this harn
 - **A hang used to read as a PASS.** Mutation-proofing found this, not the code: with the deadline removed, an `await` on a promise that never settles does not hang node — it **empties the event loop, and node exits 0**, skipping the summary and every test still queued behind it. The mutant `signal_only_no_race` "survived" for exactly that reason. Every async test now runs against a 10s watchdog (cleared on the winning path, deliberately **not** unref'd, so a real hang reaches it and gets named), and an `exit` guard fails the run if the summary was never printed and says which test started last. With the watchdog in place all three timeout mutants are caught, and the hang reports itself as `TIMED OUT after 10s`.
 
 Suites: **204** (`run-tests.js`) + **211** (`contract.test.js`).
+
+### v2.9.4 — the costing window
+
+- **One lump per cutoff.** `fixed.shares` was `mama_per_cutoff + electric_per_cutoff` taken once, however many periods the window spanned — probe-proven: a 16 Jul – 22 Aug window owed three and was charged one. Not reachable from the phone (it asks for a single period), but understating fixed cost is the direction that makes a price look safe to cut. Tested across a month boundary, February, a **leap** February, and a full year (24 cutoffs), plus the zero case, so the period walk cannot wander or loop. Six reverts red, including an off-by-one in the walk (which broke four tests) and a February that forgot leap years.
+
+- **A cutoff still running says so.** The reachable half, and the default view. Seven nights into a sixteen-night cutoff, the whole period's lumps land on seven nights and the cost per night reads high — previously with no line on screen at all, because the existing blank-days caveat only covers nights *before yesterday* that have nothing in them, and there were none. The new caveat counts the nights, names the direction, and is checked to stay **quiet** on a finished cutoff and quiet when no shares are entered (nothing to spread). Two guarantees are pinned by their own mutants: the caveat must **not** switch the price advice off (upward bias is safe, and this is the default view), and the peso figure is named through what it pays for — in a sentence that already counts nights, a bare `1,000` reads as one more count.
+
+- **The jump is a walk.** The caveat says which cutoff to price from, so the phone offers it. Pinned three ways: the button appears only on an explicit `period_finished === false` (an older server that never sends the key must not sprout a dead button), the walk keeps stepping back while `end >= today` — tested from a cutoff *three periods in the future*, where "the previous one" is still unfinished — and it discards the answer belonging to the old window. Four client mutants red.
+
+One existing pin was **narrowed, deliberately**: the test asserting a live cutoff produced no caveats at all was about blank nights, and now says so instead of demanding silence about everything.
+
+Suites: **206** (`run-tests.js`) + **214** (`contract.test.js`).

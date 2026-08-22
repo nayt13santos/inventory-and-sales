@@ -785,8 +785,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.9.3', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.9.3');
+  assert.strictEqual(g.data.version, '2.9.4', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.9.4');
 });
 
 // ---------------------------------------------------------------------------
@@ -5189,6 +5189,127 @@ test('costing CAVEATS: a floor switches the price advice OFF, a thin period leav
   assert.deepStrictEqual(r.data.targets, [], 'an unpriced ingredient withholds it too');
 });
 
+test('costing: the per-cutoff shares are owed ONCE PER CUTOFF the window touches (v2.9.4)', () => {
+  // Probe-proven against v2.9.2: `shares` was mama_per_cutoff + electric_per
+  // _cutoff taken ONCE, however long the window. A 1 Jul - 22 Aug window owes
+  // three cutoffs' shares and was charged one. The phone only ever asks for a
+  // single period, so nothing on screen was wrong — but understating fixed cost
+  // is the DANGEROUS direction (it makes a price look safe to cut), and the API
+  // takes any range it is given.
+  const ss = new FakeSpreadsheet();
+  const ctx = makeContext(ss, new Date('2026-08-23T04:00:00Z'));
+  vm.createContext(ctx);
+  vm.runInContext(source, ctx, { filename: 'Code.gs' });
+  const token = ctx.setupSheet();
+  const p = (b) => JSON.parse(ctx.doPost({ postData: { contents: JSON.stringify(b) } }).getContent());
+  assert.strictEqual(p({ token, action: 'saveSettings', payload: { settings: {
+    mama_per_cutoff: 500, electric_per_cutoff: 500, daily_salary: 350 } } }).ok, true);
+  const night = (d, id) => assert.strictEqual(p({ token, action: 'saveDay', payload: {
+    date: d, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box10', sod: 20, eod: 0, cheeseQty: 0, gcashQty: 0, gcashCheeseQty: 0 }],
+    stock: [], entryId: id } }).ok, true);
+  ['2026-07-20', '2026-08-05', '2026-08-17'].forEach((d, i) => night(d, 'w' + i));
+
+  const cost = (a, b) => p({ token, action: 'costing', payload: { start: a, end: b } }).data;
+
+  // One finished cutoff: one lump.
+  const one = cost('2026-08-01', '2026-08-15');
+  assert.strictEqual(one.fixed.periods, 1);
+  assert.strictEqual(one.fixed.shares, 1000, 'one cutoff owes one cutoff of shares');
+
+  // 16-31 Jul, 1-15 Aug, 16-31 Aug — three cutoffs touched, three lumps.
+  const three = cost('2026-07-16', '2026-08-22');
+  assert.strictEqual(three.fixed.periods, 3, 'the window touches three cutoffs');
+  assert.strictEqual(three.fixed.shares, 3000,
+    'three cutoffs owe three cutoffs of shares — this returned 1000 before v2.9.4');
+
+  // The lump is per PERIOD, so a window that stops halfway through the third
+  // still owes that third: the money is due for the cutoff, not by the night.
+  // (Said plainly on screen by the caveat, tested below.)
+  assert.strictEqual(cost('2026-07-16', '2026-07-31').fixed.periods, 1);
+  assert.strictEqual(cost('2026-07-16', '2026-08-01').fixed.periods, 2,
+    'one night into August is still a second cutoff');
+
+  // A month boundary, February, and a leap February — the period walk must not
+  // wander or loop.
+  assert.strictEqual(cost('2026-02-16', '2026-02-28').fixed.periods, 1);
+  assert.strictEqual(cost('2024-02-16', '2024-02-29').fixed.periods, 1, 'leap February is one cutoff');
+  assert.strictEqual(cost('2026-01-01', '2026-12-31').fixed.periods, 24, 'a year is 24 cutoffs');
+
+  // Nothing entered for the shares reads 0, and does not invent a lump.
+  assert.strictEqual(p({ token, action: 'saveSettings', payload: { settings: {
+    mama_per_cutoff: 0, electric_per_cutoff: 0 } } }).ok, true);
+  assert.strictEqual(cost('2026-07-16', '2026-08-22').fixed.shares, 0,
+    'no shares entered stays no shares, however many cutoffs are covered');
+});
+
+test('costing: a cutoff still RUNNING says so, because its lumps land on fewer nights (v2.9.4)', () => {
+  // The reachable half, and the DEFAULT view: the phone opens the costing on
+  // the cutoff he is living in. The per-cutoff lumps are charged whole, so
+  // seven nights into a sixteen-night cutoff they land on 7 nights instead of
+  // 16 and the cost per night reads high — with nothing on screen saying so.
+  const ss = new FakeSpreadsheet();
+  const ctx = makeContext(ss, new Date('2026-08-23T04:00:00Z'));   // 7 nights in
+  vm.createContext(ctx);
+  vm.runInContext(source, ctx, { filename: 'Code.gs' });
+  const token = ctx.setupSheet();
+  const p = (b) => JSON.parse(ctx.doPost({ postData: { contents: JSON.stringify(b) } }).getContent());
+  assert.strictEqual(p({ token, action: 'saveSettings', payload: { settings: {
+    mama_per_cutoff: 500, electric_per_cutoff: 500, daily_salary: 350 } } }).ok, true);
+  for (let d = 16; d <= 22; d++){
+    assert.strictEqual(p({ token, action: 'saveDay', payload: {
+      date: '2026-08-' + d, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+      counts: [{ sku: 'box10', sod: 20, eod: 0, cheeseQty: 0, gcashQty: 0, gcashCheeseQty: 0 }],
+      stock: [{ product: 'Takoyaki Flour', qty: 1 }], entryId: 'live' + d } }).ok, true);
+  }
+  assert.strictEqual(p({ token, action: 'saveExpense', payload: { date: '2026-08-17',
+    category: 'Supplies', item: 'Veggies', amount: 300, backlogRef: '', notes: '',
+    entryId: 'live-exp' } }).ok, true);
+  const live = p({ token, action: 'costing',
+    payload: { start: '2026-08-16', end: '2026-08-31', targetPerDay: 900 } }).data;
+
+  assert.strictEqual(live.fixed.period_finished, false, 'the cutoff has not run out');
+  const said = live.caveats.filter(c => /not finished/.test(c));
+  assert.strictEqual(said.length, 1, 'and it is said, once');
+  assert.match(said[0], /7 of its 16 nights/, 'in nights, counted, not in vague words');
+  assert.match(said[0], /read HIGH/, 'and the DIRECTION is named — high, not merely "approximate"');
+  assert.match(said[0], /Mama's share and the electric come to 1,000/,
+    'the money is named through what it pays for, so it cannot read as another count of nights');
+  assert.match(said[0], /last finished cutoff is the one to price from/, 'with what to do about it');
+
+  // Upward bias is cautious, so the advice STAYS — the same rule the thin
+  // -period caveat follows. Withholding it here would hide a usable answer,
+  // and this is the DEFAULT view, so withholding would mean the screen mostly
+  // says nothing.
+  assert.ok(live.targets.length > 0,
+    'an unfinished cutoff must NOT switch the price advice off — it biases it high, which is safe');
+  assert.strictEqual(live.fixed.shares, 1000);
+  assert.strictEqual(live.fixed.salary, 2450, '7 nights x the 350 snapshotted wage');
+  assert.strictEqual(live.fixed.per_day, 492.86, '(2450 salary + 1000 shares) / 7 nights');
+  // The point of the caveat, in figures: had the cutoff run its 16 nights at
+  // this rate, the shares alone would land at 62.50 a night, not 142.86.
+  assert.strictEqual(Math.round(1000 / 7 * 100) / 100, 142.86);
+  assert.strictEqual(1000 / 16, 62.5);
+
+  // A FINISHED cutoff must not carry the line at all — a warning said every
+  // time is a warning read no times.
+  const done = p({ token, action: 'costing',
+    payload: { start: '2026-08-01', end: '2026-08-15' } }).data;
+  assert.strictEqual(done.fixed.period_finished, true);
+  assert.ok(!/not finished/.test(done.caveats.join('\n')),
+    'a cutoff that has run out says nothing about running');
+
+  // And with no shares entered there is no lump to spread, so nothing to warn
+  // about even though the cutoff is still running.
+  assert.strictEqual(p({ token, action: 'saveSettings', payload: { settings: {
+    mama_per_cutoff: 0, electric_per_cutoff: 0 } } }).ok, true);
+  const noShares = p({ token, action: 'costing',
+    payload: { start: '2026-08-16', end: '2026-08-31' } }).data;
+  assert.strictEqual(noShares.fixed.period_finished, false, 'the date fact is unchanged');
+  assert.ok(!/not finished/.test(noShares.caveats.join('\n')),
+    'but there is no lump to land on fewer nights, so it stays quiet');
+});
+
 test('costing: money set aside on an UNKEPT promise is a floor, and the advice stops (v2.9.2)', () => {
   // The product review's MT-1, probe-proven against v2.8.0: money paid on a
   // costed bucket is withheld from the cost because the ledger says it is
@@ -5280,8 +5401,14 @@ test('costing: a day not entered is said, but never crying wolf about TONIGHT', 
     entryId: 'wolf-exp' } }).ok, true);
   let r = p({ token, action: 'costing', payload: { start: '2026-08-16', end: '2026-08-31' } });
   assert.strictEqual(r.ok, true, r.error);
-  assert.deepStrictEqual(r.data.caveats, [],
+  // PIN NARROWED (v2.9.4): this test is about BLANK NIGHTS, and there are none
+  // to complain about. A live cutoff now also carries the unfinished-cutoff
+  // caveat, which is a different statement and correct here — so the assertion
+  // says what it means rather than demanding silence about everything.
+  assert.ok(!/nothing entered/.test(r.data.caveats.join('\n')),
     "tonight is not a gap — nothing to warn about, so it says nothing");
+  assert.strictEqual(r.data.caveats.filter(c => !/not finished/.test(c)).length, 0,
+    'and the only thing it does say is that the cutoff is still running');
 
   // Miss the 19th and it says so, in nights not dates — and keeps the advice.
   const ss2 = new FakeSpreadsheet();
@@ -5747,14 +5874,14 @@ test('an unknown action is refused by name, and doGet answers without a token', 
   assert.strictEqual(r.error, 'Unknown action: "saveDay".',
     'this app cannot save a day, and says so rather than pretending');
   const g = JSON.parse(ctx.doGet({}).getContent());
-  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.9.3' } });
+  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.9.4' } });
 });
 
 test('ping proves the setup WITHOUT spending a unit of quota — even with no key yet', () => {
   const ctx = loadVision({ keepKeyPlaceholder: true });
   const r = vpost(ctx, { token: VISION_TOK, action: 'ping', payload: {} });
   assert.strictEqual(r.ok, true, r.error);
-  assert.strictEqual(r.data.version, '2.9.3', 'the vision project ships with the release it belongs to');
+  assert.strictEqual(r.data.version, '2.9.4', 'the vision project ships with the release it belongs to');
   assert.strictEqual(r.data.model, 'gemini-2.5-flash');
   assert.strictEqual(r.data.key_configured, false, 'a yes/no — never the key itself');
   keepsSecrets(JSON.stringify(r));

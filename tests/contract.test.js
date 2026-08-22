@@ -221,7 +221,7 @@ return {
   // The stock ledger the phone computes for itself (never stored) and the two
   // figures the cutoff needs from Settings.
   stockStatusOf, stockStatusList, qtyWithUnit, daySalary, splitFor, dailySalary,
-  currentPeriod, periodKey, num, fmt, fmtShort, activePrices,
+  currentPeriod, shiftPeriod, periodKey, num, fmt, fmtShort, activePrices,
   // v2.3.1: the Split field's one reading, the note guard, what may be said
   // about a refused day, the two collapsible cards, and the price rule.
   splitFieldAmount, liveCutoff, pendingSplit, splitDefault,
@@ -5011,6 +5011,81 @@ test('the Maintenance payload OMITS a blank cost field, on both cards', () => {
   assert.strictEqual(after.err, '');
   assert.strictEqual(after.stale, true, 'and the screen SAYS the figures were thrown away');
   assert.match(inv.costingHTML(), /A cost was changed, so the old figures were thrown away\./);
+});
+
+test('a cutoff still running offers the finished one, and a finished cutoff does not (v2.9.4)', () => {
+  const app = costingClient(F.boot, F.costing, '');
+  const live = Object.assign({}, F.costing, {
+    fixed: Object.assign({}, F.costing.fixed, { period_finished: false }),
+    caveats: ['This cutoff is not finished — 7 of its 16 nights have gone by.']
+  });
+  const h = app.costFiguresHTML({ key: 'k', target: '', data: live },
+    { start: PERIOD.start, end: PERIOD.end });
+  // The caveat ends by naming what to do; the doing is one tap, not two guesses
+  // at the arrows.
+  assert.match(h, /Show the last finished cutoff/);
+  assert.match(h, /data-act="cost-last-done"/);
+
+  // A finished cutoff has nothing to jump to, so the button stays away — an
+  // offer that is always there is an offer that means nothing.
+  const done = Object.assign({}, F.costing, {
+    fixed: Object.assign({}, F.costing.fixed, { period_finished: true }),
+    caveats: ['Something else entirely is wrong with this period.']
+  });
+  assert.ok(!/cost-last-done/.test(app.costFiguresHTML({ key: 'k', target: '', data: done },
+    { start: PERIOD.start, end: PERIOD.end })),
+    'a cutoff that has run out must not offer to show itself');
+
+  // And an OLD phone, or a server that never sends the key, must not sprout a
+  // button that does nothing: the offer is made only on an explicit false.
+  const older = Object.assign({}, F.costing, {
+    fixed: { salary: 200, shares: 1000, per_day: 1200 },
+    caveats: ['A caveat from a server that predates this key.']
+  });
+  assert.ok(!/cost-last-done/.test(app.costFiguresHTML({ key: 'k', target: '', data: older },
+    { start: PERIOD.start, end: PERIOD.end })),
+    'a missing key is not a false one');
+});
+
+test('the walk back from ANY cutoff lands on one that has actually run out (v2.9.4)', () => {
+  const app = loadClient();
+  const today = app.currentPeriod('2026-08-23') && '2026-08-23';
+  // The handler walks back while `end >= today`, from whatever is on screen —
+  // not "the previous one", which is wrong whenever he has arrowed FORWARD
+  // past today. Both directions are checked here.
+  const walk = (from) => {
+    let p = from, guard = 0;
+    while (p.end >= today && guard++ < 40) p = app.shiftPeriod(p, -1);
+    return p;
+  };
+  const live = app.currentPeriod(today);
+  assert.strictEqual(live.start, '2026-08-16', 'precondition: Aug 23 sits in 16-31');
+  assert.ok(walk(live).end < today, 'from the live cutoff, one step back is enough');
+  assert.strictEqual(walk(live).end, '2026-08-15');
+
+  // Three cutoffs into the future — the naive "previous one" would still be
+  // unfinished, and would have shown him figures with the same warning again.
+  let ahead = live;
+  for (let i = 0; i < 3; i++) ahead = app.shiftPeriod(ahead, 1);
+  assert.ok(ahead.end > today, 'precondition: that period has not happened');
+  assert.ok(app.shiftPeriod(ahead, -1).end > today,
+    'and one step back from it is STILL unfinished — which is why it is a walk');
+  assert.strictEqual(walk(ahead).end, '2026-08-15', 'the walk gets there anyway');
+
+  // Already looking at a finished cutoff: the walk must not move at all.
+  const old = { start: '2026-07-01', end: '2026-07-15' };
+  assert.deepStrictEqual(walk(old), old, 'a finished cutoff is already the answer');
+});
+
+test('SOURCE PIN: the jump is a WALK, not an assumption about the previous cutoff (v2.9.4)', () => {
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+  const at = src.indexOf("act === 'cost-last-done'");
+  assert.ok(at > 0, 'the handler must exist');
+  const body = src.slice(at, at + 600);
+  assert.match(body, /while \(p\.end >= today/,
+    'it must WALK back until the cutoff has run out — one step is wrong from a future period');
+  assert.match(body, /guard\+\+ < 40/, 'and the walk must be bounded');
+  assert.match(body, /costRes = null/, 'and it must throw away the answer that belonged to the old window');
 });
 
 test('the screen SHOWS the money it set aside, so the subtraction is not a mystery (v2.8.0)', () => {
