@@ -190,6 +190,27 @@ Honesty rules, all load-bearing:
 
 UI: **More → "What it costs"**, Nayt's screen (Mama never needs it) — the per-ball stack, per-box margins, break-even, and the target table. `unit_cost` and `box_cost` are editable under Maintenance beside the figures they belong to.
 
+### v2.9.0 — "Read it from the paper": the photo of Mama's log fills the form
+
+Owner, 2026-08-22: *"Able to take and analyze the photo of the paper being used as sales log … then the app analyzes the picture and input the corresponding numbers to their respective places, and the user will just validate what has been entered."*
+
+His paper is more structured than it looks — a real row reads `B4 | 31-28 | 1c = 60 | 2 = 100`, i.e. SOD 31, EOD 28, one cheese at ₱60, two regular at ₱50; `Gc` marks GCash; `B10 | 55-34 … 14 = 1470` is 14 × ₱105; and the crossed-out `2735 → 2605` is the night's own total. Every one of those already has a field in this app. Handwriting at that level needs a vision MODEL, not OCR with rules, so:
+
+**A THIRD, SEPARATE project** (`apps-script/Vision.gs`, deployed as its own web app, owner's choice 2026-08-22) holds the Gemini API key and does the reading. The tracker's bound script is not touched and **gains no permission** — the same fence as the backups, for the same reason: the project that serves the phones must not grow the ability to make internet requests. The vision app has its own token (never the sheet's), its own deployment, and its own Drive folder.
+
+- Action **`readSheet`** payload `{token, imageBase64, mimeType, date, skus:[{sku,label,size,price,cheesePrice,inCutoff}]}`. The phone sends its OWN sku vocabulary, so the vision app never reads the sheet and "B4" maps to `box4` by the owner's own labels.
+- It **saves the photo first** (Drive folder `Octogo Sales Photos`, named by date) so a reading can always be traced back; if that save fails the reading still returns, saying the photo was not kept.
+- It calls Gemini with a structured-output schema and returns a **reading**: `{date, counts:[{sku, sod, eod, cheese, gcash, gcash_cheese, confidence}], custom_amount, custom_gcash, total_on_paper, notes, unread:[…], photo_url, photo_id, model}`.
+- **Anything it could not read is BLANK, never 0**, and named in `unread`. A zero it did read is a zero; a field it could not see is empty and says so.
+
+**THE CROSS-CHECK, and the reason this can be trusted:** the paper carries its own total in Mama's hand. The phone computes the day from the parsed counts and compares it against `total_on_paper`. Agreement is real evidence the reading is right; a mismatch names the gap in pesos and asks him to look before saving. Two independent sources agreeing is the same principle as every other figure in this app.
+
+**Nothing auto-saves, ever.** The reading pre-fills the Sales form for that date, marked as unconfirmed and showing what was read (with a link to the photo); the night is committed by the ordinary **Save day**, so every existing validation, refusal and snapshot rule applies unchanged. The phone resizes the photo before sending (long edge ~1600px, JPEG) and the vision app refuses an image over ~4 MB in one plain sentence.
+
+The tracker's own script gains exactly one thing: DailyLog appends **`photo_url`** and `saveDay` accepts an optional `photoUrl` (absent means blank), so a night can point at the paper it came from. No new scope, no new behaviour in any figure.
+
+Failure modes all speak plainly: no key configured, quota exhausted, an unreadable photo, a model reply that is not a reading — each says what happened and that typing the night by hand is always still there.
+
 Everything above obeys the standing rules: snapshots travel with the money; the server recomputes and is authoritative; requests camelCase, responses snake_case, both directions pinned in contract.test.js; migration is append-only; every new behaviour gets a biting test and a scratch-copy mutation revert.
 
 Tab **StockItems** (product | unit | active | sort | **opening_qty** | **opening_date** | **reorder_at**) — `opening_qty`/`opening_date` are the one-time starting baseline; `reorder_at` is the low-stock threshold (0 or blank = no warning). A **blank** `reorder_at` ships blank (`''`), not 0: it is the one figure in this row read raw, because 0 is a legitimate threshold and a coerced blank comes straight back on the next `saveStockItems` and fills the owner's untouched cells with literal 0s.

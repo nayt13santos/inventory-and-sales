@@ -215,12 +215,34 @@ function makeFakeDrive() {
       _files: files,
       getName: () => name,
       getFiles: () => iter(files.filter(f => !f._trashed)),
+      /** Uploading a blob (v2.9.0 — the vision project keeps every photo it
+       *  reads). Set drive._failCreateFile to a reason and this throws exactly
+       *  the way a Drive quota or a permissions problem does, which is the
+       *  failure the reading has to survive. */
+      createFile(blob) {
+        if (drive._failCreateFile) throw new Error(drive._failCreateFile);
+        const id = 'photo-id-' + (++drive._seq);
+        const f = {
+          _trashed: false, _blob: blob, _id: id,
+          getName: () => blob.getName(),
+          getId: () => id,
+          getUrl: () => 'https://drive.example/file/d/' + id + '/view',
+          setTrashed(v) { this._trashed = !!v; }
+        };
+        files.push(f);
+        return f;
+      }
     };
   };
-  return {
+  const drive = {
     _folders: folders,
+    _seq: 0,
+    _failCreateFile: null,
     getFoldersByName(name) { return iter(folders.has(name) ? [folders.get(name)] : []); },
-    createFolder(name) { const f = makeFolder(name); folders.set(name, f); return f; },
+    createFolder(name) {
+      if (drive._failCreateFile) throw new Error(drive._failCreateFile);
+      const f = makeFolder(name); folders.set(name, f); return f;
+    },
     getFileById(id) {
       return {
         _id: id,
@@ -235,7 +257,50 @@ function makeFakeDrive() {
       };
     }
   };
+  return drive;
 }
+
+/* ---- UrlFetchApp (v2.9.0 — the vision project, the ONLY project allowed to
+   make an internet request). The reply is what the test SETS, so the whole
+   canned-reply matrix (a good reading, prose, a 429, an empty candidates
+   array) is exercised without a single live call. Every request is recorded
+   whole, so a test can assert the URL, the method, muteHttpExceptions, the
+   prompt and schema shape — and that the API KEY IS NOT IN THE BODY. ---- */
+function makeFakeUrlFetch() {
+  const requests = [];
+  const state = { code: 200, body: '{}', throwWith: null };
+  return {
+    _requests: requests,
+    /** Set the canned reply. `body` may be a string or an object. */
+    _reply(code, body) {
+      state.code = code;
+      state.body = (typeof body === 'string') ? body : JSON.stringify(body);
+    },
+    /** Make fetch itself throw — no network, DNS, a timeout. */
+    _throw(message) { state.throwWith = message; },
+    _last() { return requests[requests.length - 1]; },
+    /** The body as the request actually carries it, for "the key is not here". */
+    _lastBodyText() { const r = requests[requests.length - 1]; return r ? String(r.payload) : ''; },
+    _lastBodyJson() { return JSON.parse(this._lastBodyText()); },
+    fetch(url, params) {
+      params = params || {};
+      requests.push({
+        url: url,
+        method: params.method,
+        contentType: params.contentType,
+        headers: params.headers || {},
+        payload: params.payload,
+        muteHttpExceptions: params.muteHttpExceptions
+      });
+      if (state.throwWith) throw new Error(state.throwWith);
+      return {
+        getResponseCode: () => state.code,
+        getContentText: () => state.body
+      };
+    }
+  };
+}
+
 function makeFakeScriptApp() {
   const triggers = [];
   return {
@@ -284,9 +349,24 @@ function makeContext(activeSpreadsheet, now) {
     SpreadsheetApp: { getActive: () => activeSpreadsheet, openById: () => activeSpreadsheet },
     DriveApp: makeFakeDrive(),
     ScriptApp: makeFakeScriptApp(),
+    // Present in every context so the FENCE test is meaningful: if Code.gs ever
+    // grew a UrlFetchApp call it would WORK here, and only the source-level
+    // fence assertion would catch it. A stub that threw would let the fence
+    // look self-enforcing when it is not.
+    UrlFetchApp: makeFakeUrlFetch(),
     Utilities: {
       formatDate,
-      getUuid: () => crypto.randomUUID()
+      getUuid: () => crypto.randomUUID(),
+      // Blobs (v2.9.0): the photo on its way into Drive. base64Decode hands
+      // back real bytes so a test can prove the file holds the image it sent.
+      base64Decode: (s) => Array.from(Buffer.from(String(s), 'base64')),
+      base64Encode: (b) => Buffer.from(b).toString('base64'),
+      newBlob: (bytes, mime, name) => ({
+        _bytes: bytes,
+        getBytes: () => bytes,
+        getContentType: () => mime,
+        getName: () => name
+      })
     },
     ContentService: {
       MimeType: { JSON: 'JSON' },
@@ -304,4 +384,5 @@ function makeContext(activeSpreadsheet, now) {
   };
 }
 
-module.exports = { FakeSheet, FakeSpreadsheet, makeContext, formatDate, FIXED_NOW };
+module.exports = { FakeSheet, FakeSpreadsheet, makeContext, formatDate, FIXED_NOW,
+  makeFakeDrive, makeFakeUrlFetch };

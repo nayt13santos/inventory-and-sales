@@ -452,6 +452,34 @@ select.input{ appearance:auto; }
 .bl-meter i{ display:block; height:100%; background:var(--ok); border-radius:99px; }
 .bl-sub{ font-size:13px; color:var(--muted); margin-top:4px; }
 
+/* "Read it from the paper" (v2.9.0).
+   The file input IS the camera. It is parked off-screen rather than marked
+   [hidden] for two reasons that both cost a photograph when got wrong: a
+   display:none file input is not reliably clickable from script on every phone,
+   and it lives OUTSIDE the Sales panel so a re-render while the picture is
+   being read cannot take it away mid-flight. */
+.offscreen{ position:fixed; left:-9999px; top:0; width:1px; height:1px; opacity:0; }
+/* The reading. Bordered in the ACCENT and never in green: nothing on this card
+   is saved, and the colour must not suggest otherwise. */
+.paper-card{ border:1.5px solid var(--accent); }
+.paper-head{ font-family:var(--display); font-weight:800; font-size:17px; color:var(--deep); }
+.paper-sub{ font-size:14px; color:var(--muted); margin-top:2px; }
+.paper-row{ padding:8px 0; border-top:1px solid var(--line); }
+.paper-row.first{ border-top:1px dashed var(--line); }
+.paper-sku{ font-family:var(--display); font-weight:700; font-size:16px; }
+.paper-figs{ font-size:15px; font-variant-numeric:tabular-nums; }
+/* An unread figure. Muted and a dash — never a 0, which would read as an answer. */
+.paper-figs .unread{ color:var(--muted); font-weight:600; }
+.paper-conf{ font-size:13px; color:var(--muted); }
+/* THE CROSS-CHECK: the paper's own total against what these figures add up to.
+   It is the reason a reading can be trusted, so it gets its own weight. */
+.paper-cross{ margin-top:12px; padding-top:10px; border-top:2px solid var(--ink); font-weight:600; }
+.paper-cross.agree{ color:var(--ok); }
+.paper-cross.differ{ color:var(--alert); }
+.paper-note{ font-size:14px; color:var(--muted); margin-top:10px; }
+.paper-list{ margin:6px 0 0 20px; font-size:14px; }
+.paper-list li{ margin-top:2px; }
+
 /* Tab bar */
 .tabbar{
   position:fixed; left:0; right:0; bottom:0; z-index:30;
@@ -531,6 +559,14 @@ select.input{ appearance:auto; }
 </nav>
 
 <div id="toast" role="status" aria-live="polite"></div>
+
+<!-- The camera for "Read it from the paper" (v2.9.0). Deliberately OUTSIDE
+     <main>: the Sales panel is re-rendered while the photograph is being
+     shrunk and read, and an input inside it would be destroyed mid-read.
+     capture="environment" asks for the back camera, which is the one pointing
+     at the paper. -->
+<input type="file" id="paperShot" class="offscreen" accept="image/*" capture="environment"
+       tabindex="-1" aria-hidden="true">
 
 <noscript><p style="padding:20px;text-align:center;">Turn on JavaScript to use this app.</p></noscript>
 
@@ -643,7 +679,14 @@ function freshState(){
   };
 }
 
-function freshConfig(){ return { apiUrl:'', token:'', sheetUrl:'' }; }
+// `visionUrl` / `visionToken` (v2.9.0) belong to a DIFFERENT deployment: the
+// standalone Octogo Vision project that reads a photograph of the paper. They
+// are separate fields, never derived from the sheet's pair, because the two
+// doors hold two different secrets — the sheet's token writes money, and a
+// photo-reader has no business holding it. BLANK means the feature is simply
+// not on this phone: no button renders anywhere, so nothing can be tapped that
+// cannot work.
+function freshConfig(){ return { apiUrl:'', token:'', sheetUrl:'', visionUrl:'', visionToken:'' }; }
 
 /* ------------------------------------------------------------
    Loading saved data safely.
@@ -786,6 +829,14 @@ function normDay(r, key){
     // Lid boxes used (v2.7.0): a plain count with NO price, NO money, NO stock
     // tracking. Blank/absent reads 0 for the same reason.
     lid_boxes: num(pick(r, 'lid_boxes', 'lidBoxes')),
+    // The photograph this night was read from (v2.9.0). PROVENANCE, never a
+    // figure: it prices nothing, reaches no total, no cutoff and no note. Kept
+    // as text, and blank is the normal state — a night typed in by hand has no
+    // photo, and so has every row written before the column existed. Read
+    // snake_case first with the camelCase fallback, like every other key here,
+    // because an undefined would silently drop the link from the one night the
+    // owner most wants to check against its paper.
+    photo_url: txt(pick(r, 'photo_url', 'photoUrl')),
     notes: txt(r.notes),
     entry_id: txt(pick(r, 'entry_id', 'entryId')),
     updated_at: txt(pick(r, 'updated_at', 'updatedAt'))
@@ -1029,6 +1080,11 @@ function sanitizeConfig(raw){
   c.apiUrl  = txt(raw.apiUrl).trim();
   c.token   = txt(raw.token).trim();
   c.sheetUrl = txt(raw.sheetUrl).trim();
+  // The photo reader's own pair (v2.9.0), persisted exactly like the rest. A
+  // config written by an older build has neither, which reads blank — i.e. the
+  // feature is absent, which is the truth on a phone that has not been given it.
+  c.visionUrl = txt(raw.visionUrl).trim();
+  c.visionToken = txt(raw.visionToken).trim();
   return c;
 }
 
@@ -1131,6 +1187,13 @@ function sanitizeDrafts(rawv){
       gcashConverted: raw1(d.gcashConverted), lidBoxes: raw1(d.lidBoxes),
       convDir: d.convDir === 'in' ? 'in' : 'out',
       salary: raw1(d.salary), notes: txt(d.notes),
+      // The v2.9.0 pair. `photoUrl` is the paper this draft was read from, so a
+      // night that came off a photograph still points at it after the app is
+      // backgrounded; `fromPaper` is why the form must keep saying "check these
+      // before saving". The REVIEW CARD is deliberately not stored — it is a
+      // screenful of untrusted text, and the numbers it describes are already
+      // on the form with the marker beside them.
+      photoUrl: txt(d.photoUrl), fromPaper: !!d.fromPaper,
       rows: asArr(d.rows).filter(isObj).filter(r => txt(r.sku)).map(r => ({
         sku: txt(r.sku), sod: raw1(r.sod), eod: raw1(r.eod),
         cheese: raw1(r.cheese), gcash: raw1(r.gcash), gcashCheese: raw1(r.gcashCheese),
@@ -2073,6 +2136,12 @@ function applyLocalDay(p){
     // sheet stores them: the conversion is already inside `gcash` above, and the
     // lid boxes touch no money at all.
     gcash_converted:c.gcashConverted, lid_boxes:c.lidBoxes,
+    // The photograph this night was read from (v2.9.0), stored exactly as the
+    // sheet stores it: whatever the payload carried, and blank when it carried
+    // nothing. Mirrored here rather than computed, because the server rebuilds
+    // the row from the payload too — a save that omits the link clears the cell,
+    // and the phone must show the same thing the sheet will hold.
+    photo_url: txt(p.photoUrl),
     notes:p.notes || '', entry_id:p.entryId, updated_at:stamp
   };
   state.counts[p.date] = c.lines.map(l => ({
@@ -2594,6 +2663,13 @@ function applyServerDay(p, data){
   if (conv != null && conv !== '') day.gcash_converted = num(conv);
   const lids = pick(data, 'lid_boxes', 'lidBoxes');
   if (lids != null && lids !== '') day.lid_boxes = num(lids);
+  // The photo link the sheet actually stored (v2.9.0), so the phone shows what
+  // the sheet holds rather than assuming its own payload landed. Guarded like
+  // the rest: a deployment too old to send it leaves the phone's value alone.
+  // A modern server sending '' can only mean the payload was blank too, which
+  // this phone already knows — so treating blank as "not sent" is safe here.
+  const ph = pick(data, 'photo_url', 'photoUrl');
+  if (ph != null) day.photo_url = txt(ph);
   if (Array.isArray(data.lines)){
     const rows = asArr(asObj(state.counts)[p.date]);
     for (const l of data.lines){
@@ -3005,7 +3081,16 @@ function loadBentaForm(date){
     gcashOpen: !!prev.gcashOpen,
     saved: hasDay,
     dirty: false,       // set on any user edit; cleared on load/save
-    fromDraft: false    // true when unsaved typing was restored for this date
+    fromDraft: false,   // true when unsaved typing was restored for this date
+    // The photograph this night was read from (v2.9.0). Loaded back from the
+    // stored day so an ORDINARY re-save keeps the link: the server rebuilds the
+    // row from the payload, so a save that omits it would clear the cell and a
+    // corrected night would quietly stop pointing at its paper.
+    photoUrl: txt(day.photo_url),
+    // True while the figures on the form came off a photograph and have not
+    // been committed yet. It only ever makes the screen SAY something — no
+    // figure, no validation and no payload reads it.
+    fromPaper: false
   };
   if (wageIsCustom()) benta.wageOpen = true;
   if (gcashHeld()) benta.gcashOpen = true;
@@ -3060,6 +3145,11 @@ function applyBentaDraft(dr){
   // A pre-v2.7.3 draft has no direction: keep the form's (cash → GCash).
   if (dr.convDir === 'in' || dr.convDir === 'out') benta.convDir = dr.convDir;
   if (dr.lidBoxes !== '' && dr.lidBoxes != null) benta.lidBoxes = dr.lidBoxes;
+  // The v2.9.0 pair, guarded the same way: a draft from an older build says
+  // nothing about either, so the loaded day's own link stands. A draft that DOES
+  // carry a link wins, because it is the newer, unsent version of this night.
+  if (txt(dr.photoUrl)) benta.photoUrl = txt(dr.photoUrl);
+  if (dr.fromPaper) benta.fromPaper = true;
   benta.notes = txt(dr.notes);
   for (const d of asArr(dr.rows)){
     const row = benta.rows.find(r => r.sku === d.sku);
@@ -3092,6 +3182,9 @@ function stashBentaDraft(){
     custom: raw1(benta.custom), customGcash: raw1(benta.customGcash),
     gcashConverted: raw1(benta.gcashConverted), convDir: txt(benta.convDir), lidBoxes: raw1(benta.lidBoxes),
     salary: raw1(benta.salary), notes: txt(benta.notes),
+    // Kept with the numbers they belong to (v2.9.0): the paper this night came
+    // off, and the fact that nobody has checked it yet.
+    photoUrl: txt(benta.photoUrl), fromPaper: !!benta.fromPaper,
     rows: asArr(benta.rows).map(r => ({
       sku: txt(r.sku), sod: raw1(r.sod), eod: raw1(r.eod),
       cheese: raw1(r.cheese), gcash: raw1(r.gcash), gcashCheese: raw1(r.gcashCheese),
@@ -3201,6 +3294,13 @@ function bentaPayload(){
     salary: closed ? 0
       : (benta.salary === '' || benta.salary == null ? '' : Math.max(0, num(benta.salary))),
     notes: benta.notes,
+    // The photograph this night was read from (v2.9.0). REQUEST keys are
+    // camelCase, so `photoUrl`. Sent exactly as the form holds it — blank on
+    // every night typed in by hand — because the server rebuilds the row from
+    // this payload: omitting it would clear a link the sheet already has.
+    // NOT clamped on a closed day, unlike every money field beside it: this is
+    // a link to a piece of paper, not a figure, so there is nothing to zero.
+    photoUrl: txt(benta.photoUrl),
     // REQUEST keys are camelCase. `gcash` is deliberately NOT sent: the server
     // computes it from these buckets and ignores a typed figure.
     // The buckets are sentBuckets(r) — the ONE reading shared with validateBenta,
@@ -3337,18 +3437,51 @@ function rowUI(r){
     GC: gc
   };
 }
+/* ---- BLANK IS NOT ZERO (v2.9.0). ----
+   A reading of the paper leaves a figure it could not see EMPTY, and it must
+   stay empty on the form: a 0 looks like an answer, and an answer nobody gave
+   is the one thing a reading must never put on this screen. Every figure the
+   app computes already reads a blank as 0 (num('') is 0), so these three are
+   display-only — they decide what the box SHOWS, never what anything sums.
+   A row can already hold a blank without any photograph in sight: clearing a
+   stepper leaves one in a stashed draft, and showing that back as 0 was never
+   right either. */
+function isBlankVal(v){ return v === '' || v == null; }
+/** One count field as it should APPEAR: blank when the row holds nothing. */
+function stepVal(v){ return isBlankVal(v) ? '' : num(v); }
+/** The three v2.7.0 presentation figures as they should APPEAR. Each is a SUM of
+ *  buckets (rowUI), so it may only read blank when EVERY bucket behind it is
+ *  blank — "2 plus something unread" is not a figure anybody should be shown,
+ *  and the unread part is named in the reading's own list instead. */
+function uiVal(r, key){
+  const row = asObj(r);
+  const ui = rowUI(row);
+  if (key === 'GC') return isBlankVal(row.gcashCheese) ? '' : ui.GC;
+  if (key === 'C') return (isBlankVal(row.cheese) && isBlankVal(row.gcashCheese)) ? '' : ui.C;
+  return (isBlankVal(row.gcash) && isBlankVal(row.gcashCheese)) ? '' : ui.G;
+}
+/** How many sold, as it should APPEAR: blank unless BOTH counts are there. One
+ *  count without the other is not a difference — "31 in, end of day unread"
+ *  showing "Sold: 31" would be an invented night's sales. */
+function soldVal(r){
+  const row = asObj(r);
+  if (isBlankVal(row.sod) || isBlankVal(row.eod)) return '';
+  return Math.max(0, num(row.sod) - num(row.eod));
+}
 /** Reflect one row's bucket state into every UI stepper it feeds — the three
  *  figures interlock, so a change to one can move another. The field being
  *  typed in is left alone (rewriting it would fight the keyboard). */
 function syncRowInputs(sku, r){
-  const ui = rowUI(r);
   const put = (f, v) => {
     const el = $('in-' + sku + '-' + f);
     if (el && el !== document.activeElement) el.value = v;
   };
-  put('cheeseAll', ui.C);
-  put('gcashAll', ui.G);
-  put('gcashOfCheese', ui.GC);
+  // uiVal, not rowUI: a press on ONE question must not fill the other two boxes
+  // with 0s nobody gave. A bucket the reading could not see stays empty until
+  // somebody answers it (v2.9.0).
+  put('cheeseAll', uiVal(r, 'C'));
+  put('gcashAll', uiVal(r, 'G'));
+  put('gcashOfCheese', uiVal(r, 'GC'));
 }
 /** One press of a v2.7.0 stepper. Raising a figure adds the matching bucket
  *  (cash cheese, or regular GCash); lowering one takes from the same bucket
@@ -3622,6 +3755,25 @@ function renderBenta(){
     h += '<p class="saved-hint">✓ This day is already saved. You are editing it.</p>';
   }
 
+  // WHERE THESE FIGURES CAME FROM (v2.9.0). A prefilled night is marked plainly
+  // and in the accent, never in green: a reading is not a saved day and must
+  // never look like one. It says so even after a reload, when the review card
+  // itself is gone — the draft keeps the marker with the numbers.
+  if (benta.fromPaper){
+    h += '<p class="saved-hint" style="color:var(--accent);">These figures came from the paper — check them against it before you tap Save day. Nothing has been saved.</p>';
+  }
+  // The paper a SAVED night was read from, so the figures can always be taken
+  // back to the page they came from. The link is validated before it is ever an
+  // href (paperLink); the review card below carries its own while it is showing.
+  const dayShot = paperLink(asObj(state.days)[benta.date] && state.days[benta.date].photo_url);
+  if (dayShot && !paperShowingFor(benta.date)){
+    h += '<p class="hint" style="margin:-6px 4px 14px;">This night was read from a photo of the paper. ' +
+      '<a href="' + esc(dayShot) + '" target="_blank" rel="noopener noreferrer">Open the photo</a></p>';
+  }
+  // "Read it from the paper" — the camera, the progress, and the reading itself.
+  // Absent entirely when the photo reader is not set up on this phone.
+  try{ h += paperCardHTML(); }catch(err){ console.error(err); }
+
   // Closed-day toggle. The whole row is the label, so tapping the words works
   // too — this switch blanks a whole day.
   h += '<div class="card"><label class="switch-row" for="closedToggle">' +
@@ -3667,7 +3819,9 @@ function renderBenta(){
       let row = asArr(benta.rows).find(r => r.sku === pr.sku);
       if (!row){ row = { sku:pr.sku, sod:0, eod:0, cheese:0, gcash:0, gcashCheese:0, custom:0 }; benta.rows.push(row); }
       const eff = priceOnDay(daySnap, pr);
-      const sold = Math.max(0, num(row.sod) - num(row.eod));
+      // What the badge SHOWS — blank while either count is missing (soldVal), so
+      // a half-read row never advertises a night's sales nobody counted.
+      const sold = soldVal(row);
       const isBox = pr.group === 'box';
       // A sku kept OUT of the cutoff is counted exactly like the others, so its
       // card looks ordinary — start count, end count, sold — with one badge and one
@@ -3697,7 +3851,7 @@ function renderBenta(){
       if (isBox && inCut){
         cheeseFact = '<div class="buckets">' +
           payRow('How many were cheese?',
-            stepperHTML(pr.sku, 'cheeseAll', rowUI(row).C, 'How many were cheese, ' + pr.label, true), false) +
+            stepperHTML(pr.sku, 'cheeseAll', uiVal(row, 'C'), 'How many were cheese, ' + pr.label, true), false) +
           '<p class="hint" style="margin-top:4px;">What was made — cheese or regular. Not payment.</p>' +
         '</div>';
       }
@@ -3733,8 +3887,9 @@ function renderBenta(){
         (pr.missing ? '<p class="hint" style="margin:-4px 0 10px;">' + esc(pr.label) +
           ' is not in the Prices tab any more, so it has no price. Saving this day will remove its counts.</p>' : '') +
         '<div class="count-grid">' +
-          '<div class="count-cell"><label for="in-' + sk + '-sod">Start of day</label>' + stepperHTML(pr.sku, 'sod', num(row.sod), 'Start of day, ' + pr.label) + '</div>' +
-          '<div class="count-cell"><label for="in-' + sk + '-eod">End of day</label>' + stepperHTML(pr.sku, 'eod', num(row.eod), 'End of day, ' + pr.label) + '</div>' +
+          // stepVal, not num: a count the reading could not see stays EMPTY.
+          '<div class="count-cell"><label for="in-' + sk + '-sod">Start of day</label>' + stepperHTML(pr.sku, 'sod', stepVal(row.sod), 'Start of day, ' + pr.label) + '</div>' +
+          '<div class="count-cell"><label for="in-' + sk + '-eod">End of day</label>' + stepperHTML(pr.sku, 'eod', stepVal(row.eod), 'End of day, ' + pr.label) + '</div>' +
         '</div>' +
         '<div class="sold-row">' +
           '<div class="sold-badge" id="soldbadge-' + sk + '">Sold: <b id="sold-' + sk + '">' + sold + '</b></div>' +
@@ -3910,14 +4065,15 @@ function gcashCardHTML(skus, daySnap, payRow){
     const row = asArr(benta.rows).find(r => r.sku === pr.sku);
     if (!row) continue;
     anyRow = true;
-    const ui = rowUI(row);
+    // uiVal, not rowUI: a bucket the reading could not see shows EMPTY here too,
+    // or the split would look answered when it is not (v2.9.0).
     body += '<div class="pay-group"><div class="pay-head gc">' + esc(pr.label) + '</div>' +
       payRow('Sold with GCash',
-        stepperHTML(pr.sku, 'gcashAll', ui.G, 'Sold with GCash, ' + pr.label, true), true) +
+        stepperHTML(pr.sku, 'gcashAll', uiVal(row, 'G'), 'Sold with GCash, ' + pr.label, true), true) +
       // Only a box sku has a cheese version to point at.
       (pr.group === 'box'
         ? payRow('Of those, cheese',
-            stepperHTML(pr.sku, 'gcashOfCheese', ui.GC, 'Of the GCash boxes, cheese, ' + pr.label, true), true)
+            stepperHTML(pr.sku, 'gcashOfCheese', uiVal(row, 'GC'), 'Of the GCash boxes, cheese, ' + pr.label, true), true)
         : '') +
     '</div>';
   }
@@ -4486,6 +4642,10 @@ function validateBentaLive(){
   setErr('err-lidBoxes', errs.lidBoxes);
   setErr('err-salary', errs.salary);
   for (const s of asArr(benta.stock)) setErr('err-stock-' + s.product, errs['stock:' + s.product]);
+  // THE CROSS-CHECK follows the figures (v2.9.0). It compares what the form now
+  // adds up to against the total in Mama's own hand, so it has to be recomputed
+  // on every edit — a gap he has just closed must stop saying it is open.
+  updatePaperCross(errs);
   return errs;
 }
 
@@ -4530,6 +4690,12 @@ function saveBenta(){
   // The typed work is in the queue now, so the draft for this date has done its
   // job. (If the server refuses it, the needs-attention list takes over.)
   clearBentaDraft(p.date);
+  // The reading described the figures BEFORE this save, and its card says in so
+  // many words that nothing is saved yet — which stops being true here. The
+  // photo LINK stays (it is on the day now, and the day says so); the review
+  // card and the unconfirmed marker go (v2.9.0).
+  paperClear(p.date);
+  benta.fromPaper = false;
   // ...and the form holds nothing unsaved any more. Anything typed FROM HERE ON
   // — the tear-off runs ~450ms and the form stays fully editable under it —
   // flips this back to true, and the callback below then leaves the form alone.
@@ -4629,7 +4795,9 @@ function bentaStep(sku, field, dir){
 function afterCountChange(sku){
   const r = benta.rows.find(x => x.sku === sku);
   const soldEl = $('sold-' + sku);
-  if (soldEl && r) soldEl.textContent = Math.max(0, num(r.sod) - num(r.eod));
+  // soldVal, the same reading renderBenta drew the badge with, so the two can
+  // never disagree about a row that is only half read (v2.9.0).
+  if (soldEl && r) soldEl.textContent = soldVal(r);
   updateReceipt();
   validateBentaLive();   // also refreshes the derived "Regular (cash)" figure
 }
@@ -5463,6 +5631,27 @@ function renderIbapa(){
       '<input class="input" id="cfgSheet" autocomplete="off" autocapitalize="off" spellcheck="false" inputmode="url" placeholder="https://docs.google.com/spreadsheets/…" value="' + esc(config.sheetUrl) + '"></div>' +
     '<button type="button" class="btn block" data-act="test-conn" id="testBtn">Test connection</button>' +
     '<p id="testResult" class="hint" style="margin-top:8px;" aria-live="polite"></p>' +
+  '</div>';
+
+  // The photo reader (v2.9.0) — its OWN section, deliberately not squeezed in
+  // beside the sheet's URL and token. It is a DIFFERENT deployment holding a
+  // DIFFERENT secret, and the one mistake worth designing against here is
+  // pasting the sheet's token into it: that token writes money, and a
+  // photo-reader has no business holding it. Both halves blank (which is how
+  // every phone starts) means the feature is simply absent — nothing about it
+  // appears on the Sales screen at all.
+  const visionHalf = !visionReady() && !!(txt(config.visionUrl) || txt(config.visionToken));
+  h += '<div class="section-title">Read it from the paper</div><div class="card">' +
+    '<p class="hint" style="margin-bottom:12px;">A second Apps Script deployment — “Octogo Vision” — reads a photo of the night’s page and fills the Sales form in for you to check. It has its own web app URL and its own token. Leave these blank and the feature does not appear.</p>' +
+    '<div class="field"><label for="cfgVisionUrl">Photo reader Web App URL</label>' +
+      '<input class="input" id="cfgVisionUrl" autocomplete="off" autocapitalize="off" spellcheck="false" inputmode="url" placeholder="https://script.google.com/macros/s/…/exec" value="' + esc(config.visionUrl) + '"></div>' +
+    '<div class="field"><label for="cfgVisionToken">Photo reader token — its own, never the sheet’s</label>' +
+      '<input class="input" id="cfgVisionToken" autocomplete="off" autocapitalize="off" spellcheck="false" value="' + esc(config.visionToken) + '">' +
+      '<p class="hint" style="margin-top:6px;">This is the VISION_TOKEN from the Octogo Vision project, not the token above.</p></div>' +
+    (visionHalf ? '<p class="hint" style="margin-bottom:10px;">Both the URL and the token are needed before the button appears on the Sales screen.</p>' : '') +
+    '<button type="button" class="btn block" data-act="vision-test" id="visionTestBtn">Test the photo reader</button>' +
+    '<p class="hint" style="margin-top:8px;">Testing costs nothing — it asks the reader whether it is set up and never sends a photo.</p>' +
+    '<p id="visionTestResult" class="hint" style="margin-top:8px;" aria-live="polite"></p>' +
   '</div>';
 
   // Backlogs
@@ -6496,6 +6685,664 @@ async function testConnection(){
 }
 
 /* ============================================================
+   READ IT FROM THE PAPER (v2.9.0) — the photograph of Mama's page
+
+   Mama writes every night on paper before anything is typed into this app. A
+   real row reads `B4 | 31-28 | 1c = 60 | 2 = 100`, "Gc" marks GCash, a figure
+   with a line through it is cancelled, and the page carries its own total in her
+   hand. This screen photographs that page and sends it to the SEPARATE Octogo
+   Vision web app — its own deployment, its own token, its own Gemini key. The
+   tracker's own script gains nothing from any of this and never sees the photo.
+
+   What this code does, and every line below obeys it:
+     - it PRE-FILLS the Sales form and stops. NOTHING auto-saves. The night is
+       committed by the ordinary "Save day", so every validation, refusal and
+       snapshot rule that guarded a typed night guards a read one unchanged.
+     - a figure the reading could not see stays EMPTY, never 0. A 0 looks like an
+       answer, and an answer nobody gave is the one thing this must never show.
+     - THE CROSS-CHECK is why any of it can be trusted: the page's own total,
+       against what the prefilled form adds up to. Two independent sources
+       agreeing is the same principle as every other figure in this app. A gap is
+       named in pesos, points at the lines to look at, and does NOT block the
+       save — he decides.
+     - everything that comes back is UNTRUSTED TEXT. A model reply is escaped
+       exactly once on its way into markup and is never rendered AS markup; the
+       photo link is proved to be an ordinary http(s) address before it is ever
+       an href or handed to the sheet.
+   ============================================================ */
+
+/** Whether this phone has the photo reader at all. BOTH halves are needed: a URL
+ *  with no token is a button that can only ever be refused, and a dead button is
+ *  worse than an absent one. Blank means the feature simply is not here. */
+function visionReady(){ return !!(txt(config.visionUrl) && txt(config.visionToken)); }
+
+/** The SECOND door, called exactly like the first and sharing none of its setup:
+ *  its own URL, its own token, nothing about the sheet. Same transport as api()
+ *  for the same reason — a POST with no custom headers defaults to text/plain,
+ *  so Apps Script never sees a CORS preflight it cannot answer. */
+async function visionApi(action, payload){
+  if (!visionReady()) throw plainError('The photo reader is not set up on this phone yet — set it up under More.');
+  const res = await fetch(config.visionUrl, {
+    method:'POST',
+    redirect:'follow',
+    body: JSON.stringify({ token: config.visionToken, action, payload: payload || {} })
+  });
+  const text = await res.text();
+  let data;
+  try{ data = JSON.parse(text); }
+  catch(e){ throw badResponseError('The photo reader did not send app data. Check its Web App URL under More.'); }
+  if (!res.ok) throw badResponseError('The photo reader answered with error ' + res.status + '. Check its URL and its deployment.');
+  if (!data || data.ok !== true) throw new ApiError((data && data.error) || 'The photo reader reported an error.');
+  return data.data;
+}
+
+/* The reading on screen: { date, reading }. One at a time, and it belongs to ONE
+   date — moving the form to another night puts it away rather than letting it
+   describe figures it never read. */
+let paper = null;
+let paperBusy = '';   // what is happening right now, in her words. '' = nothing.
+let paperErr = '';    // why the last attempt read nothing. One plain sentence.
+
+function paperShowingFor(date){ return !!(isObj(paper) && paper.date === txt(date)); }
+/** Put the reading away. With a date, only if it is that night's. */
+function paperClear(date){
+  if (date !== undefined && !paperShowingFor(date)) return;
+  paper = null;
+  paperErr = '';
+}
+function paperHide(){
+  paper = null;
+  paperErr = '';
+  renderPanel('benta');
+}
+
+/* ---- The photograph, made small enough to be read. ----
+   A phone camera produces 3–8 MB and the reader accepts about 4, so shrinking
+   is not an optimisation: an original would simply be refused. The ladder cuts
+   QUALITY before SIZE, because a smaller page is harder to read than a slightly
+   blurrier one, and the first pass that fits is the one that is sent. */
+const PAPER_MAX_BYTES = 4 * 1024 * 1024;
+const PAPER_STEPS = [[1600, 0.8], [1600, 0.6], [1280, 0.55], [1024, 0.5]];
+const PAPER_UNREADABLE = 'That picture could not be opened on this phone, so nothing was read — take it again, or type the night in by hand.';
+
+/** Bytes behind a base64 string WITHOUT decoding it — the same arithmetic
+ *  Vision.gs does on the other side, so this phone never sends a photograph
+ *  that is going to be refused for its size. */
+function b64Bytes(s){
+  const n = String(s == null ? '' : s).length;
+  if (!n) return 0;
+  let pad = 0;
+  if (s.charAt(n - 1) === '=') pad++;
+  if (n > 1 && s.charAt(n - 2) === '=') pad++;
+  return Math.floor(n / 4) * 3 - pad;
+}
+
+/** The picture decoded, with the phone's EXIF rotation baked into the PIXELS. A
+ *  sideways page reads far worse, and createImageBitmap is the one call that
+ *  applies the orientation reliably; the <img> fallback is for an engine that
+ *  rejects the options bag. */
+async function decodePhoto(file){
+  if (typeof createImageBitmap === 'function'){
+    try{ return await createImageBitmap(file, { imageOrientation:'from-image' }); }
+    catch(e){ /* no options support — fall through to the <img> path */ }
+  }
+  return await new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(plainError(PAPER_UNREADABLE)); };
+    img.src = url;
+  });
+}
+
+/** One pass: draw the picture down to `edge` on its long side, encode as JPEG,
+ *  and return the base64 BODY only — the data: prefix is stripped here because
+ *  that is what the reader wants and a URL is the wrong place for a photograph. */
+function paperEncode(src, edge, quality){
+  const w0 = num(src.width || src.naturalWidth);
+  const h0 = num(src.height || src.naturalHeight);
+  if (!(w0 > 0 && h0 > 0)) throw plainError(PAPER_UNREADABLE);
+  const scale = Math.min(1, edge / Math.max(w0, h0));
+  const cv = document.createElement('canvas');
+  cv.width = Math.max(1, Math.round(w0 * scale));
+  cv.height = Math.max(1, Math.round(h0 * scale));
+  const cx = cv.getContext('2d');
+  if (!cx) throw plainError(PAPER_UNREADABLE);
+  // A JPEG has no transparency and an undrawn pixel encodes BLACK. White is
+  // what a sheet of paper looks like.
+  cx.fillStyle = '#FFFFFF';
+  cx.fillRect(0, 0, cv.width, cv.height);
+  cx.drawImage(src, 0, 0, cv.width, cv.height);
+  const url = cv.toDataURL('image/jpeg', quality);
+  const at = String(url).indexOf(',');
+  const b64 = at === -1 ? '' : String(url).slice(at + 1);
+  if (!b64) throw plainError(PAPER_UNREADABLE);
+  return { base64: b64, bytes: b64Bytes(b64) };
+}
+
+async function shrinkPhoto(file){
+  if (!file || !num(file.size)) throw plainError(PAPER_UNREADABLE);
+  const src = await decodePhoto(file);
+  let last = null;
+  try{
+    for (const step of PAPER_STEPS){
+      last = paperEncode(src, step[0], step[1]);
+      if (last.bytes <= PAPER_MAX_BYTES) break;
+    }
+  }finally{
+    // An ImageBitmap holds the decoded picture in memory until it is closed, and
+    // a phone that has just taken a 12-megapixel photograph has none to spare.
+    if (src && typeof src.close === 'function') src.close();
+  }
+  if (!last || last.bytes > PAPER_MAX_BYTES){
+    throw plainError('That photo is too big to send even after shrinking it, so nothing was read — take it again from a little further back, or type the night in by hand.');
+  }
+  // Always image/jpeg: whatever the camera wrote (an iPhone writes HEIC), it
+  // leaves this phone re-encoded, so the reader never has to guess.
+  return { base64: last.base64, mimeType: 'image/jpeg' };
+}
+
+/** The product list the phone sends WITH the photograph — its OWN vocabulary, so
+ *  the reader never touches the sheet and "B4" becomes box4 by the owner's own
+ *  labels. Priced and classified at THIS DAY's stored figures, the same ones the
+ *  card, the receipt, the validator and the payload read, so the model checks a
+ *  row's arithmetic against the prices the night will actually be saved at.
+ *  REQUEST keys are camelCase: cheesePrice, inCutoff. */
+function paperSkus(date){
+  const snap = storedPricesFor(date);
+  return bentaSkuList().map(pr => {
+    const eff = priceOnDay(snap, pr);
+    return {
+      sku: txt(pr.sku),
+      label: txt(pr.label) || txt(pr.sku),
+      size: num(pr.size),
+      price: num(eff.price),
+      cheesePrice: num(eff.cheese_price),
+      inCutoff: cutoffOnDay(snap, pr)
+    };
+  });
+}
+
+/* ---- The reading, read defensively. ----
+   These mirror Vision.gs's own intOrBlank_ / moneyOrBlank_ / fracOrBlank_ on
+   purpose. The duplication IS the point: this is the one payload in the app that
+   is not written by the owner's own sheet, so the phone re-applies the rule
+   instead of trusting that the other side did. Anything that is not a usable
+   figure reads BLANK — never 0. */
+function paperInt(v){
+  if (v === null || v === undefined || v === '' || typeof v === 'boolean' || typeof v === 'object') return '';
+  const n = Number(String(v).replace(/[,\s]/g, ''));
+  if (!isFinite(n) || n < 0) return '';
+  if (Math.abs(n - Math.round(n)) > 1e-9) return '';
+  return Math.round(n);
+}
+function paperMoney(v){
+  if (v === null || v === undefined || v === '' || typeof v === 'boolean' || typeof v === 'object') return '';
+  const n = Number(String(v).replace(/[₱,\s]/g, ''));
+  if (!isFinite(n) || n < 0) return '';
+  return r2(n);
+}
+function paperFrac(v){
+  if (v === null || v === undefined || v === '' || typeof v === 'boolean' || typeof v === 'object') return '';
+  const n = Number(v);
+  if (!isFinite(n) || n < 0 || n > 1) return '';
+  return Math.round(n * 100) / 100;
+}
+/** The photo's link, or ''. It becomes an HREF and it is stored in the sheet, so
+ *  it is proved to be an ordinary web address before it is either — anything
+ *  else (a "javascript:" line, a sentence, a whole paragraph) is not a link and
+ *  is dropped. The same rule the server applies on the way in. */
+function paperLink(v){
+  const s = txt(v).trim();
+  if (!s || s.length > 2000) return '';
+  return /^https?:\/\/[^\s"'<>]+$/.test(s) ? s : '';
+}
+/** Untrusted text, kept short. Escaping stops it being markup; the cap stops one
+ *  reply filling the screen — and the phone's storage — with prose. */
+function paperText(v, max){
+  const s = txt(v).replace(/\s+/g, ' ').trim();
+  return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+/** The reply -> what this screen shows and fills in. snake_case on the wire, as
+ *  every response is, with the camelCase fallback every other reader here has.
+ *  A reply that is not a READING is refused rather than massaged into an empty
+ *  form that looks like it worked. */
+function normReading(raw, date){
+  const d = asObj(raw);
+  if (!Array.isArray(d.counts)){
+    throw plainError('The photo did not come back as a reading of the paper, so nothing was filled in — the night can still be typed in by hand.');
+  }
+  // The phone's own vocabulary is the ONLY one. A sku it cannot name is never
+  // guessed into a real one: that would put a night's boxes on the wrong
+  // product. The reader refuses them too, and names them in `unread`.
+  const known = Object.create(null);
+  for (const pr of bentaSkuList()) known[txt(pr.sku)] = txt(pr.label) || txt(pr.sku);
+  const counts = [];
+  const seen = Object.create(null);
+  for (const rowRaw of d.counts){
+    const r = asObj(rowRaw);
+    const sku = txt(r.sku);
+    if (!sku || !known[sku] || seen[sku]) continue;   // first row per sku wins
+    seen[sku] = true;
+    counts.push({
+      sku: sku, label: known[sku],
+      sod: paperInt(r.sod), eod: paperInt(r.eod),
+      cheese: paperInt(r.cheese), gcash: paperInt(r.gcash),
+      gcash_cheese: paperInt(pick(r, 'gcash_cheese', 'gcashCheese')),
+      confidence: paperFrac(r.confidence)
+    });
+  }
+  return {
+    // THE DATE IS THE PHONE'S, never the model's. The phone knows which night it
+    // photographed; a date read off a smudged corner does not, and a reading
+    // filed under the wrong night is worse than no reading at all.
+    date: txt(date),
+    counts: counts,
+    custom_amount: paperMoney(pick(d, 'custom_amount', 'customAmount')),
+    custom_gcash: paperMoney(pick(d, 'custom_gcash', 'customGcash')),
+    total_on_paper: paperMoney(pick(d, 'total_on_paper', 'totalOnPaper')),
+    notes: paperText(d.notes, 400),
+    unread: asArr(d.unread).map(u => paperText(u, 160)).filter(Boolean).slice(0, 24),
+    photo_url: paperLink(pick(d, 'photo_url', 'photoUrl')),
+    photo_saved: truthy(d.photo_saved),
+    photo_error: paperText(pick(d, 'photo_error', 'photoError'), 240),
+    model: paperText(d.model, 60)
+  };
+}
+
+/**
+ * The reading, ONTO the form — and this is the whole of what it does. It writes
+ * `benta` and nothing else: it does not save, does not queue, does not touch the
+ * sheet, and leaves every figure the page does not carry exactly as it was (the
+ * wage, who minded the stall, the lid boxes, the stock opened, the day's note).
+ * The model's own remarks are NOT written into the day's note either: that field
+ * is Mama's sentence and goes into the sheet, and an observation about a smudge
+ * is not hers. It is shown on the review card instead.
+ *
+ * THE ONE MAPPING IN THIS FEATURE, written down because money moves on it. The
+ * reader is told in so many words that a cheese box paid by GCash "counts in
+ * cheese AND in GCash cheese" — so `cheese` is ALL the cheese on that row
+ * however it was paid, `gcash` the plain boxes paid by GCash, `gcash_cheese` the
+ * cheese ones. The sheet's four buckets are mutually exclusive, so:
+ *     gcashCheese = gcash_cheese
+ *     cheese      = cheese - gcash_cheese     (the cheese that was paid in cash)
+ *     gcash       = gcash                     (plain, paid by GCash)
+ * and the form's own two questions then read back as "how many were cheese" =
+ * cheese + gcashCheese and "sold with GCash" = gcash + gcashCheese.
+ *
+ * What this mapping CANNOT get wrong is the figure the cross-check tests: a
+ * night's total depends only on how many boxes were cheese ALTOGETHER, so a
+ * misread of which cheese box was paid how moves money between Cash and GCash
+ * and never changes the Total. The review card prints all five figures in the
+ * form's own words, so a wrong split is caught by eye before Save day.
+ *
+ * A BLANK STAYS BLANK all the way through: the subtraction only happens when
+ * `cheese` was really read, and an unread `gcash_cheese` counts as 0 in that one
+ * subtraction — so "one cheese, could not tell how it was paid" lands as one
+ * cheese box and an EMPTY "of those, cheese", which is exactly what was seen.
+ */
+function applyReadingToForm(rd){
+  const r = asObj(rd);
+  for (const c of asArr(r.counts)){
+    const row = asArr(benta.rows).find(x => x.sku === c.sku);
+    if (!row) continue;
+    row.sod = c.sod;
+    row.eod = c.eod;
+    row.gcashCheese = c.gcash_cheese;
+    row.cheese = (c.cheese === '') ? '' : Math.max(0, c.cheese - num(c.gcash_cheese));
+    row.gcash = c.gcash;
+  }
+  // A special order is a PESO AMOUNT on the page, not a box count, so the boxes
+  // it used (customBoxes) are nowhere on the paper and are left untouched.
+  benta.custom = r.custom_amount;
+  benta.customGcash = r.custom_gcash;
+  const link = paperLink(r.photo_url);
+  if (link) benta.photoUrl = link;
+  benta.fromPaper = true;
+  benta.dirty = true;
+  // Nothing the reading filled in may sit hidden behind a collapsed head.
+  if (gcashHeld()) benta.gcashOpen = true;
+}
+
+/** One read row in the FORM's terms — the same five figures the cards below ask
+ *  for, so the review can be read straight down against them. Blank stays blank,
+ *  and a sum may only read blank when every figure behind it does. */
+function paperFormFigures(c){
+  const gc = c.gcash_cheese;
+  return {
+    sod: c.sod,
+    eod: c.eod,
+    sold: (c.sod === '' || c.eod === '') ? '' : Math.max(0, c.sod - c.eod),
+    cheeseAll: c.cheese,
+    gcashAll: (c.gcash === '' && gc === '') ? '' : num(c.gcash) + num(gc),
+    gcashOfCheese: gc
+  };
+}
+
+/** How sure the reading was of one row, in words. A figure is not a feeling and
+ *  "0.62" means nothing to anybody reading this at eleven at night. */
+function paperSureWord(v){
+  if (v === '') return 'it did not say how sure it was';
+  const n = num(v);
+  if (n >= 0.9) return 'sure of this row';
+  if (n >= 0.7) return 'fairly sure of this row';
+  return 'NOT sure of this row';
+}
+
+/** The skus worth looking at first when the totals disagree: the ones with the
+ *  most figures the reading could not see, then the ones it was least sure of. A
+ *  blank outranks a low confidence because a blank IS the figure missing from
+ *  the form, which is the likeliest cause of a gap. */
+function paperSuspects(rd){
+  const rows = asArr(asObj(rd).counts).map(c => {
+    let blanks = 0;
+    for (const f of ['sod', 'eod', 'cheese', 'gcash', 'gcash_cheese']) if (c[f] === '') blanks++;
+    return {
+      label: txt(c.label),
+      blanks: blanks,
+      conf: c.confidence === '' ? 0 : num(c.confidence),
+      unsure: c.confidence === '' || num(c.confidence) < 0.9
+    };
+  }).filter(x => x.blanks > 0 || x.unsure);
+  rows.sort((a, b) => (b.blanks - a.blanks) || (a.conf - b.conf));
+  return rows.slice(0, 2).map(x => x.label);
+}
+
+/**
+ * THE CROSS-CHECK, and the reason a machine reading a photograph belongs
+ * anywhere near this money. The page carries its own total in Mama's hand; the
+ * form now carries what the reading made of the same page. Two independent
+ * sources agreeing is real evidence the reading is right.
+ *
+ * It never blocks anything. A gap is named in pesos with the lines to look at
+ * first, and "Save day" works exactly as it always did — he decides.
+ */
+function paperCross(){
+  if (!isObj(paper) || !isObj(benta) || paper.date !== benta.date) return null;
+  const rd = asObj(paper.reading);
+  if (rd.total_on_paper === ''){
+    return { state:'unknown', said:'The total in your own hand was not read off the page, so there is nothing to check these figures against — go through them against the paper before saving.' };
+  }
+  const said = r2(num(rd.total_on_paper));
+  const c = computeDay(bentaPayload());
+  const mine = r2(num(c.total));
+  if (said === mine){
+    return { state:'agree', said:'The paper says ' + peso(said) + ' and so does this — good.' };
+  }
+  // Money kept OUT of the cutoff (nori) sits in the same tin and is very likely
+  // written into the page's own total, while it is deliberately outside the
+  // day's Total here. When THAT is the whole difference the two do agree, and
+  // crying mismatch would be a false alarm on an ordinary night.
+  const excl = r2(num(c.excluded));
+  if (excl !== 0 && r2(mine + excl) === said){
+    return { state:'agree', said:'The paper says ' + peso(said) + '. The day’s total here is ' + peso(mine) +
+      ', and the ' + peso(excl) + ' that is kept out of the cutoff makes up the rest — so the paper’s total counts that in. Good.' };
+  }
+  const look = paperSuspects(rd);
+  const where = look.length === 0
+    ? ' Every figure was read clearly, so the difference is more likely in the adding-up on the paper itself.'
+    : (look.length === 1
+      ? ' Look at ' + look[0] + ' first — the reading was least sure of it.'
+      : ' Look at ' + look[0] + ' first, then ' + look[1] + ' — the reading was least sure of those.');
+  return { state:'differ', said:'The paper says ' + peso(said) + ' but these figures add up to ' + peso(mine) +
+    ' — ' + peso(r2(Math.abs(said - mine))) + (mine < said ? ' short' : ' too much') + '.' + where +
+    ' Nothing is saved yet: change what is wrong, or save it as it stands.' };
+}
+
+/** The cross-check as markup. `errs` is validateBenta's own answer, so the card
+ *  can also say how many lines hold a figure the sheet will refuse — those
+ *  refusals are printed on the cards themselves, which are screens further down. */
+function paperCrossHTML(errs){
+  const cx = paperCross();
+  if (!cx) return '';
+  const cls = cx.state === 'agree' ? ' agree' : (cx.state === 'differ' ? ' differ' : '');
+  let h = '<p class="paper-cross' + cls + '">' + esc(cx.said) + '</p>';
+  // THE ONE BLANK THAT INVENTS MONEY, said out loud. Every figure the app sums
+  // reads a blank as 0, so a row with a start count and NO end count prices the
+  // whole shelf as sold — and the total above it looks perfectly ordinary while
+  // it does. Read off the FORM, not the reading, so it clears the moment the
+  // count is filled in. (The other way round — an end count with no start —
+  // is a negative Sold, which validateBenta already refuses by name.)
+  const half = asArr(asObj(benta).rows)
+    .filter(r => isBlankVal(r.eod) && !isBlankVal(r.sod) && num(r.sod) > 0)
+    .map(r => esc(skuLabel(r.sku)));
+  if (half.length){
+    h += '<p class="paper-cross differ">The end count is still empty on <b>' + listPhrase(half) +
+      '</b>, so the figures above count every one of those boxes as sold. Fill it in and this will settle.</p>';
+  }
+  const e = asObj(errs);
+  let bad = 0;
+  for (const c of asArr(asObj(paper).reading && paper.reading.counts)) if (e['sku:' + c.sku]) bad++;
+  if (bad){
+    h += '<p class="paper-note">' + bad + (bad === 1
+      ? ' line below holds a figure the sheet will not take'
+      : ' lines below hold figures the sheet will not take') +
+      ' — the red note on each of those cards says what is wrong.</p>';
+  }
+  return h;
+}
+/** Rebuilt on every edit, from validateBentaLive, so a gap he has just closed
+ *  stops saying it is open. */
+function updatePaperCross(errs){
+  const el = $('paperCross');
+  if (!el) return;
+  el.innerHTML = paperCrossHTML(errs);
+}
+
+/** The whole card: the camera, what is happening, and the reading itself.
+ *  Returns '' when the photo reader is not set up on this phone — the feature is
+ *  absent rather than present and broken. */
+function paperCardHTML(){
+  if (!visionReady() || !isObj(benta)) return '';
+  // A closed day has no page of figures to read.
+  if (benta.closed) return '';
+  const showing = paperShowingFor(benta.date);
+  let h = '<div class="card' + (showing ? ' paper-card' : '') + '">';
+  if (paperBusy){
+    // Progress, and nothing disabled: the rest of the screen stays usable, so
+    // she can carry on entering the night while the photo is being read.
+    h += '<p class="paper-head">Reading the paper…</p>' +
+      '<p class="hint" style="margin-top:6px;">' + esc(paperBusy) +
+      ' Carry on entering the night if you like — this will not touch anything until it is done.</p>';
+  } else {
+    h += '<button type="button" class="btn block" data-act="paper-shoot">' +
+      (showing ? 'Read the paper again' : '📷 Read it from the paper') + '</button>' +
+      '<p class="hint" style="margin-top:8px;">Photograph the page for ' + esc(fmtShort(benta.date)) +
+      ' and the figures are filled in for you to check. Nothing is saved until you tap Save day.</p>';
+  }
+  if (paperErr) h += '<p class="err">' + esc(paperErr) + '</p>';
+  if (showing){
+    try{ h += paperReviewHTML(asObj(paper.reading)); }
+    catch(err){
+      console.error(err);
+      h += '<p class="err">The reading could not be shown on this screen, so nothing was filled in — type the night in by hand.</p>';
+    }
+  }
+  h += '</div>';
+  return h;
+}
+
+/** EVERY field the reading looked at, per sku, with what it read and what it
+ *  left blank — plus the page's own total, the cross-check, what it could not
+ *  read at all, and the photograph. Every string from the reply and every label
+ *  from the sheet is escaped here, exactly once. */
+function paperReviewHTML(rd){
+  const fig = (v) => v === '' ? '<span class="unread">not read</span>' : '<b>' + esc(String(v)) + '</b>';
+  const money = (v) => v === '' ? '<span class="unread">not read</span>' : '<b>' + esc(peso(v)) + '</b>';
+  let h = '<div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--line);">' +
+    '<p class="paper-head">What the paper said</p>' +
+    '<p class="paper-sub">' + esc(fmtLong(rd.date)) + (rd.model ? ' · read by ' + esc(rd.model) : '') + '</p>';
+  // The photograph itself, so any figure here can be taken back to the page.
+  const link = paperLink(rd.photo_url);
+  if (link){
+    h += '<p class="paper-sub"><a href="' + esc(link) + '" target="_blank" rel="noopener noreferrer">Open the photo of the paper</a></p>';
+  } else if (rd.photo_error){
+    h += '<p class="paper-note">' + esc(rd.photo_error) + '</p>';
+  } else if (rd.photo_saved){
+    h += '<p class="paper-note">The photo was kept, but its link did not arrive as a web address, so it cannot be opened from here.</p>';
+  } else {
+    h += '<p class="paper-note">The photo itself was not kept, so this reading cannot be checked against the picture later.</p>';
+  }
+
+  const rows = asArr(rd.counts);
+  if (!rows.length){
+    h += '<p class="paper-note">No product row on the page could be matched to anything this phone sells.</p>';
+  }
+  let first = true;
+  for (const c of rows){
+    const f = paperFormFigures(c);
+    h += '<div class="paper-row' + (first ? ' first' : '') + '">' +
+      '<div class="paper-sku">' + esc(c.label) + '</div>' +
+      '<div class="paper-figs">' +
+        'Start of day ' + fig(f.sod) + ' · End of day ' + fig(f.eod) + ' · Sold ' + fig(f.sold) +
+      '</div>' +
+      '<div class="paper-figs">' +
+        'Cheese ' + fig(f.cheeseAll) + ' · Sold with GCash ' + fig(f.gcashAll) +
+        ' · Of those, cheese ' + fig(f.gcashOfCheese) +
+      '</div>' +
+      '<div class="paper-conf">' + esc(paperSureWord(c.confidence)) + '</div>' +
+    '</div>';
+    first = false;
+  }
+  h += '<div class="paper-row"><div class="paper-sku">Special order</div>' +
+    '<div class="paper-figs">Amount ' + money(rd.custom_amount) +
+      ' · Paid by GCash ' + money(rd.custom_gcash) + '</div></div>' +
+    '<div class="paper-row"><div class="paper-sku">The total on the page</div>' +
+    '<div class="paper-figs">' + money(rd.total_on_paper) + '</div></div>';
+
+  // THE CROSS-CHECK. Left empty here on purpose: validateBentaLive fills it the
+  // moment this card is on screen and again after every edit, so there is one
+  // place the comparison is written and it can never go stale.
+  h += '<div id="paperCross"></div>';
+
+  if (asArr(rd.unread).length){
+    h += '<p class="paper-note" style="color:var(--alert); font-weight:600;">What it could not read. Every one of these is EMPTY on the form, not 0:</p>' +
+      '<ul class="paper-list">';
+    for (const u of rd.unread) h += '<li>' + esc(u) + '</li>';
+    h += '</ul>';
+  } else {
+    h += '<p class="paper-note">It read every figure it was looking for.</p>';
+  }
+  if (rd.notes) h += '<p class="paper-note">It also noticed: ' + esc(rd.notes) + '</p>';
+
+  h += '<p class="paper-note">Nothing here has been saved. The figures are on the form below — check them against the paper in your hand, then tap Save day as usual.</p>' +
+    '<div class="attn-acts">' +
+      '<button type="button" class="btn" data-act="paper-shoot">Read it again</button>' +
+      '<button type="button" class="btn" data-act="paper-hide">Hide this</button>' +
+    '</div></div>';
+  return h;
+}
+
+/** The camera, asked for on a tap and never opened on its own. */
+function paperShoot(){
+  if (!isObj(benta) || paperBusy) return;
+  paperErr = '';
+  if (!visionReady()){
+    paperErr = 'The photo reader is not set up on this phone yet — set its own URL and its own token under More.';
+    renderPanel('benta');
+    return;
+  }
+  if (!navigator.onLine){
+    // Said BEFORE the camera opens: a photograph taken for nothing costs her a
+    // second trip to the paper.
+    paperErr = 'There is no internet just now, so a photo cannot be read — type the night in by hand, or try again when there is a signal.';
+    renderPanel('benta');
+    return;
+  }
+  // One question, and only when there is something to lose — the reading
+  // REPLACES what is on the form. Asked before the camera opens, so a picture is
+  // never taken and then thrown away.
+  if ((benta.dirty || benta.saved) &&
+      !confirm('Reading the paper will replace the figures now on the form for ' + fmtShort(benta.date) +
+        '. Nothing already in the Google Sheet is touched. Read the photo anyway?')) return;
+  const inp = $('paperShot');
+  if (!inp){
+    paperErr = 'The camera could not be opened on this phone, so nothing was read — type the night in by hand.';
+    renderPanel('benta');
+    return;
+  }
+  // Cleared FIRST, or choosing the same picture twice fires no change event at
+  // all and the button looks broken.
+  inp.value = '';
+  inp.click();
+}
+
+/** The whole flow, in the order it has to happen: shrink, send, normalise,
+ *  review, PRE-FILL. Nothing in it can save a day. */
+async function paperTake(file){
+  if (!isObj(benta) || paperBusy) return;
+  // The night this reading belongs to, pinned NOW. If the form moves to another
+  // date while the photo is in the air the answer is dropped — a reading filed
+  // under the wrong night is worse than no reading at all.
+  const date = benta.date;
+  paper = null;
+  paperErr = '';
+  paperBusy = 'Making the photo small enough to send…';
+  renderPanel('benta');
+  try{
+    const shot = await shrinkPhoto(file);
+    if (!paperStillWanted(date)) return;
+    paperBusy = 'Reading the figures off the paper…';
+    renderPanel('benta');
+    const data = await visionApi('readSheet', {
+      imageBase64: shot.base64,
+      mimeType: shot.mimeType,
+      date: date,
+      skus: paperSkus(date)
+    });
+    if (!paperStillWanted(date)) return;
+    const rd = normReading(data, date);
+    paper = { date: date, reading: rd };
+    applyReadingToForm(rd);
+  }catch(err){
+    console.error(err);
+    paper = null;
+    // The reader's own refusals are already plain English and already say that
+    // typing the night in by hand is still there; friendlyError passes those
+    // through untouched and turns a raw browser failure into a sentence.
+    paperErr = friendlyError(err, 'Try again, or type the night in by hand.');
+  }finally{
+    paperBusy = '';
+    // renderPanel, not renderBenta: if she is typing in a field the re-render
+    // waits until she is out of it, exactly as a background sync does.
+    if (activeTab === 'benta') renderPanel('benta');
+  }
+}
+function paperStillWanted(date){ return isObj(benta) && benta.date === txt(date); }
+
+/** Prove the wiring without spending a single unit of Gemini quota: `ping`
+ *  answers from the reader's own constants and never calls the model. */
+async function visionTest(){
+  const out = $('visionTestResult');
+  if (!visionReady()){
+    if (out) out.textContent = 'Enter the photo reader URL and its own token first.';
+    return;
+  }
+  const btn = $('visionTestBtn');
+  if (btn) btn.disabled = true;
+  if (out) out.textContent = 'Testing…';
+  try{
+    const d = asObj(await visionApi('ping', {}));
+    const o = $('visionTestResult');
+    if (o){
+      o.innerHTML = truthy(d.key_configured)
+        ? '<span class="ok-note">✓ The photo reader answered. Version ' + esc(txt(d.version)) +
+          ', reading with ' + esc(txt(d.model)) + '.</span>'
+        : '<span style="color:var(--alert); font-weight:600;">✗ The photo reader answered, but it has no Gemini key in it yet, so it cannot read a photo. Paste the key into the Octogo Vision project and save the file.</span>';
+    }
+  }catch(err){
+    console.error(err);
+    const o = $('visionTestResult');
+    if (o) o.innerHTML = '<span style="color:var(--alert); font-weight:600;">✗ ' +
+      esc(friendlyError(err, 'Check the URL and the token above, then try again.')) + '</span>';
+  }finally{
+    const b = $('visionTestBtn');
+    if (b) b.disabled = false;
+  }
+}
+
+/* ============================================================
    Event wiring — delegated clicks/inputs per panel + globals
    ============================================================ */
 document.addEventListener('click', (ev) => {
@@ -6541,6 +7388,10 @@ document.addEventListener('click', (ev) => {
   }
   else if (act === 'save-day') saveBenta();
   else if (act === 'goto-stock') showTab('ibapa');
+  // Read it from the paper (v2.9.0). Neither of these saves anything: one opens
+  // the camera, the other puts the reading away.
+  else if (act === 'paper-shoot') paperShoot();
+  else if (act === 'paper-hide') paperHide();
 
   // Expenses
   else if (act === 'gastos-open'){ gx.open = true; gx.date = todayStr(); renderGastos(); }
@@ -6602,6 +7453,9 @@ document.addEventListener('click', (ev) => {
     })();
   }
   else if (act === 'test-conn') testConnection();
+  // The photo reader's own test (v2.9.0). A `ping` spends no Gemini quota at all,
+  // which is exactly why it is the safe way to prove the wiring.
+  else if (act === 'vision-test') visionTest();
 
   // Stock on hand
   else if (act === 'count-open') openCount(el.dataset.product);
@@ -6743,6 +7597,12 @@ document.addEventListener('input', (ev) => {
   else if (id === 'cfgUrl'){ config.apiUrl = ev.target.value.trim(); persistConfig(); updateStatus(); }
   else if (id === 'cfgToken'){ config.token = ev.target.value.trim(); persistConfig(); }
   else if (id === 'cfgSheet'){ config.sheetUrl = ev.target.value.trim(); persistConfig(); }
+  // The photo reader's OWN pair (v2.9.0), persisted exactly like the sheet's.
+  // No re-render here, for the same reason the three fields above do not do one:
+  // rewriting the panel would destroy the field being typed in. The Sales button
+  // appears on the next render of that screen, which is where it is needed.
+  else if (id === 'cfgVisionUrl'){ config.visionUrl = ev.target.value.trim(); persistConfig(); }
+  else if (id === 'cfgVisionToken'){ config.visionToken = ev.target.value.trim(); persistConfig(); }
 });
 
 document.addEventListener('change', (ev) => {
@@ -6762,6 +7622,15 @@ document.addEventListener('change', (ev) => {
     return;
   }
   if (id === 'payBlRef'){ payBl.ref = ev.target.value; return; }
+  // The camera came back with a picture (v2.9.0). The File is taken FIRST and
+  // the input cleared at once: the object stays valid on its own, and clearing
+  // it is what lets the same photograph be chosen twice.
+  if (id === 'paperShot'){
+    const shot = (ev.target.files && ev.target.files[0]) || null;
+    ev.target.value = '';
+    if (shot) paperTake(shot);
+    return;
+  }
   if (id === 'bentaDate'){
     const v = ev.target.value;
     // The form NEVER moves onto a date the server would refuse: a future day, a
@@ -6775,6 +7644,10 @@ document.addEventListener('change', (ev) => {
       toast(bad);
       return;
     }
+    // A refusal about last night's photograph has nothing to say about a
+    // different night (v2.9.0). The READING itself is kept: it is filed under
+    // its own date and shows again the moment that date is opened.
+    paperErr = '';
     if (v !== benta.date){
       // Changing the date used to throw away everything typed, with no warning.
       // Keep it as a draft for the date it belongs to, say so, and put it back

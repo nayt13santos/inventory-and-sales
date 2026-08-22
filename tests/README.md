@@ -289,3 +289,50 @@ Five reverts on scratch copies, all red: the advice not withheld; the floor cave
 Two screen findings closed too: a late-failing request for a period already navigated away from deleted the good answer on screen (the catch is period-guarded like the success path), and a negative target left the whole section mute (it is now said, and the section keeps rendering). Five reverts on scratch copies, all red: buckets unrecognised, the legacy ride-along row not set aside, cheese not scaled, custom money scaled, and junk coerced to zero.
 
 Suites: `run-tests.js` 155 → 170, `contract.test.js` 163 → 180.
+
+### v2.9.0 — "Read it from the paper", mutation-proofed
+
+`run-tests.js` 170 → 203 (**section 26**, the standalone `Vision.gs`) and `contract.test.js` 180 → 202 (**section 21**, plus two CONTRACT loop pins for the `readSheet` response). The release photographs the page Mama already writes and pre-fills the Sales form from it, so the whole test story is about two things: **a machine reading handwriting must never be allowed to look more certain than it is**, and **nothing about it may save a night**.
+
+Every Gemini reply in both suites is **canned**. No test makes a live call; `gas-stubs.js` grew a `UrlFetchApp` that records each request whole (so "the API key is in the HEADER, not the body or the URL" is an assertion and not a hope) and a `DriveApp.createFile` with a settable failure, because "the photo could not be kept" is a path the reading has to survive. The stub is present in **every** context on purpose: if `Code.gs` ever grew a `UrlFetchApp` call it would *work* here, so the source-level fence is the only thing holding that line and it has to be the thing that fails.
+
+The cross-seam suite lifts the feature out of the shipped file whole — four new slabs (`S_BLANKS`, `S_SKULIST`, `S_LISTPHR`, `S_PAPER`) — and drives ONE photograph through **both projects**: a canned model reply → the real `Vision.gs` → the phone's own `normReading` → `applyReadingToForm` → the real `bentaPayload`/`computeDay` → the real `doPost`. The owner's own page is the fixture (`B4 | 31-28 | 1c = 60`, a Box 10 row, the crossed-out `2735 → 2605`) and its money is hand-computed in the source: **₱2,365 total, ₱1,470 GCash, ₱895 cash, ₱50 beside the day in the tin**. A wrong prefill is therefore a wrong *figure*, not a wrong shape.
+
+Two pins moved with the appended `photo_url` column, both marked `PIN MOVED (v2.9.0, deliberate)` and **widened, not loosened** — they still name every DailyLog column in order, so a reorder or a rename is as red as it ever was: the migration header pin, and the appended-cells pin, which asserts `photo_url` stays **blank** on a historical row (a night saved before the column existed was typed in by hand and has no photograph anywhere). The self-healing writer pin gained the same column, asserted blank for the same reason.
+
+Three behaviours have a test each because each one is the whole feature:
+
+- **Blank is not zero.** An omitted field is how the structured-output schema lets the model say "I could not read this", and it stays empty from the reply to the box on screen. `"31 in, end of day unread"` must not show `Sold: 31`, and the unread overlap must not show `0`. A zero it really *did* read is a zero, and is not listed as unread — both halves asserted on the same reading.
+- **The cross-check.** The page carries its own total in Mama's hand, so agreement is real evidence. Pinned in all four states: agreement, a mismatch that names the gap **in pesos** (`₱240 short`) and points at the row the reading was least sure of, the **excluded-money** case where the paper's total counts nori in and the two therefore *do* agree (crying mismatch there would be a false alarm on an ordinary night), and no-total-read, which claims nothing. A mismatch never blocks the save.
+- **Nothing auto-saves.** Driven for real: one whole reading through the sync harness, asserting exactly **one** request left the phone, that it went to the reader's own URL with the reader's own token (and `notStrictEqual` the sheet's), that the queue is empty, that local state is byte-identical, and that the sheet is byte-identical — then that the ordinary `Save day` still lands the night. Backed by a source pin over the whole module: no `enqueue`, `saveBenta`, `persistState`, `drainQueue`, `applyLocalDay`; exactly one `fetch(`, and it goes to `config.visionUrl`; and the module never reads `config.apiUrl` or `config.token` at all.
+
+Sixteen reverts, **one behaviour each, on a fresh scratch copy of the whole repo** (rsync, never the repo itself) with both suites run after each. **All sixteen turned at least one test red; none survived.**
+
+| revert (one behaviour each) | reds — first test that bites |
+| --- | --- |
+| phone: the cross-check removed | 2 — THE CROSS-CHECK agrees: the paper's own total and the form's, in one sentence |
+| phone: a mismatch reported as agreement | 1 — THE CROSS-CHECK names the gap IN PESOS and points at the rows it was least sure of |
+| server: an unread field defaulted to 0 instead of blank | 1 + 2 — a HALF-READ row is BLANK, never 0, and every blank is NAMED in unread |
+| phone: the reading auto-saves the day it just read | 2 — SOURCE PIN: the photo-reader module cannot save, queue or persist anything, then NOTHING AUTO-SAVES |
+| server: the photo saved AFTER the model call | 2 — the photo is saved BEFORE the model is asked (a failed call would lose the paper) |
+| server: the token check dropped | 2 — the WRONG TOKEN refuses without echoing the token or the key, and spends nothing |
+| server: the key echoed back in a refusal (`scrub_` gutted) | 1 — a rejected KEY never appears in the refusal that reports it |
+| phone: `photoUrl` absent from the saveDay payload | 2 — THE PREFILL, then the photo link travels the whole loop |
+| server: the image cap removed | 1 — an image OVER the cap is refused BEFORE a byte of quota or Drive is spent |
+| server: the DATE taken from the model instead of the phone | 1 — the model does not get to decide WHICH NIGHT this was |
+| phone: an unknown sku accepted instead of dropped | 1 — the reading survives the phone's own normalizer |
+| phone: the model's own remarks reach the DOM unescaped | 1 — everything the model says is escaped exactly once on its way to the screen |
+| phone: excluded money treated as a mismatch | 1 — money kept OUT of the cutoff is not a mismatch — the paper counts the tin |
+| phone: the card drawn on a phone with no reader configured | 1 — no photo reader configured = no button anywhere, and no request possible |
+| phone: the over-cap refusal removed, so the ladder's last try is sent regardless | 1 — the phone never sends a photo the reader would refuse for its size |
+| server: `photo_url` dropped from the `bootstrap.days[]` response | 1 + 5 — photo_url: the tracker stores the link and gains NOTHING else |
+
+Four of these are the ones worth naming, because each would be read as *fact* off a screen the owner checks his night's takings against.
+
+**An unread field defaulted to 0** is the worst thing this feature could do. A blank that becomes 0 looks like an answer nobody gave: an unread end-of-day count reads as "the whole shelf sold", and the total above it looks perfectly ordinary while it does. That is why the schema makes every field but `sku` optional — an *omitted* field is the model's way of saying "I could not read this" — why the phone re-applies the same rule on its own side rather than trusting the other one did, and why the screen has its own reader (`stepVal`/`uiVal`/`soldVal`) whose only job is to show an empty box as empty. The suite also pins the one blank that *invents* money out loud: a start count with no end count is called out by name on the cross-check card, and the sentence clears the moment the count is filled in.
+
+**The cross-check removed, or a mismatch quietly accepted**, takes away the only independent witness there is. Nothing else in this feature can tell the owner that a machine read his handwriting correctly — the paper's own total, in Mama's hand, is a second source, and two sources agreeing is the same principle every other figure in this app rests on. Note what the mapping *cannot* get wrong: a night's total depends only on how many boxes were cheese altogether, so a misread of *which* cheese box was paid by GCash moves money between Cash and GCash and never changes the Total. That is asserted directly (total identical, cash different), which is exactly why an agreeing total is still evidence and why the payment split is printed in the form's own words for the eye instead.
+
+**The photo saved after the model call** loses the paper on the one night it matters — the night the reading failed and there is nothing to check. And **the token check dropped** hands an unauthenticated caller both a Drive folder to fill and a metered API key to spend; the order in `doPost` (token first, before Drive, before Gemini, before anything costs anything) is asserted by counting the recorded requests as well as reading the refusal.
+
+Suites: `run-tests.js` 170 → 203, `contract.test.js` 180 → 202.

@@ -896,7 +896,7 @@ test('setupSheet APPENDS the new columns and moves nothing', () => {
   assert.deepStrictEqual(counts[1].slice(9), ['', '', '', '', '', '', ''], 'new cells start blank');
 
   const log = ss.getSheetByName('DailyLog').getDataRange().getValues();
-  assert.deepStrictEqual(log[0], OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes']));
+  assert.deepStrictEqual(log[0], OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes', 'photo_url']));
   assert.deepStrictEqual(log[1].slice(0, 10), OLD_LOG_ROW);
   // PIN MOVED (v2.5.0, deliberate): the migration BACKFILLS the salary cell of
   // every non-closed row with the current daily_salary — before it, those rows
@@ -904,7 +904,10 @@ test('setupSheet APPENDS the new columns and moves nothing', () => {
   // silently re-priced history. custom_gcash and excluded_total stay blank —
   // and so do gcash_converted / lid_boxes (v2.7.0): nothing was converted and
   // no lids were counted on a day saved before the columns existed.
-  assert.deepStrictEqual(log[1].slice(10), ['', 200, '', '', ''],
+  // PIN MOVED (v2.9.0, deliberate): photo_url is appended after lid_boxes and
+  // stays BLANK on a historical row — a night saved before the column existed
+  // was typed in from the paper by hand and has no photograph anywhere.
+  assert.deepStrictEqual(log[1].slice(10), ['', 200, '', '', '', ''],
     'salary backfilled at the current rate; the other new cells start blank, not 0');
 
   const exp = ss.getSheetByName('Expenses').getDataRange().getValues();
@@ -1087,13 +1090,14 @@ test('saveDay on a not-yet-migrated sheet self-heals instead of failing', () => 
   assert.deepStrictEqual(ss.getSheetByName('DailyCounts').getDataRange().getValues()[0],
     OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty']));
   assert.deepStrictEqual(ss.getSheetByName('DailyLog').getDataRange().getValues()[0],
-    OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes']));
+    OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes', 'photo_url']));
   const healed = ss.getSheetByName('DailyLog').getDataRange().getValues().slice(1)
     .find(x => x[0] === '2026-07-22');
   assert.strictEqual(healed[11], 200, 'the salary column was appended and written');
   assert.strictEqual(healed[12], 0, 'excluded_total was appended and written (nothing excluded)');
   assert.strictEqual(healed[13], 0, 'gcash_converted was appended and written (nothing converted)');
   assert.strictEqual(healed[14], 0, 'lid_boxes was appended and written (none counted)');
+  assert.strictEqual(healed[15], '', 'photo_url was appended and written BLANK — no photo was read');
   assert.strictEqual(ss.getSheetByName('StockUsage').getDataRange().getValues()[1][2], 2);
   // ...and nothing already in the sheet was disturbed.
   assert.deepStrictEqual(ss.getSheetByName('DailyCounts').getDataRange().getValues()[1].slice(0, 9), OLD_COUNT_ROWS[0]);
@@ -5232,6 +5236,654 @@ test('costing: a day not entered is said, but never crying wolf about TONIGHT', 
   assert.match(r.data.caveats.join('\n'), /read HIGH, so the prices below are the cautious end/);
   assert.strictEqual(r.data.targets.length, 1,
     'a thin period is cautious, not wrong — the advice stays, with its warning');
+});
+
+
+// ---------------------------------------------------------------------------
+// 26. v2.9.0: "Read it from the paper" — the vision project reads the photo.
+//
+// A THIRD standalone project (apps-script/Vision.gs) with its own context here,
+// because that is what it is in real life: its own permissions, its own token,
+// its own key. Every Gemini reply in this section is CANNED — the suite must
+// never make a live call, and a matrix of canned replies is the only way to
+// exercise the failures that matter (a quota wall, prose instead of a reading,
+// a half-read row) at all.
+// ---------------------------------------------------------------------------
+console.log('\n--- 26. v2.9.0: read it from the paper (Vision.gs) ---');
+
+const VISION_GS = path.join(ROOT, 'apps-script', 'Vision.gs');
+// Shaped like a real Google API key and a real random token, and NEVER equal to
+// each other: half the point of the third project is that the sheet's secret
+// and the key that costs money never sit in the same file.
+const FAKE_KEY = 'AIzaSyB9fakeKeyForTestsOnly_0000000000';
+const VISION_TOK = 'vision-4f9c1a7e2b8d05364a1f';
+// The night the owner actually photographed (SPEC, 2026-08-22), with the clock
+// pinned to that evening so "not in the future" is a fact and not a date the
+// suite outgrows.
+const PAPER_NIGHT = '2026-08-22';
+const PAPER_NOW = new Date('2026-08-22T21:30:00+08:00');
+const IMG = Buffer.from('a photograph of the paper').toString('base64');
+
+function loadVision(opts) {
+  opts = opts || {};
+  const ctx = makeContext(new FakeSpreadsheet(), opts.now || PAPER_NOW);
+  vm.createContext(ctx);
+  let src = fs.readFileSync(VISION_GS, 'utf8');
+  if (!opts.keepKeyPlaceholder) {
+    src = src.replace("var GEMINI_API_KEY = 'PASTE_THE_GEMINI_API_KEY_HERE';",
+      "var GEMINI_API_KEY = '" + FAKE_KEY + "';");
+  }
+  if (!opts.keepTokenPlaceholder) {
+    src = src.replace("var VISION_TOKEN = 'PASTE_A_LONG_RANDOM_TOKEN_HERE';",
+      "var VISION_TOKEN = '" + VISION_TOK + "';");
+  }
+  vm.runInContext(src, ctx, { filename: 'Vision.gs' });
+  return ctx;
+}
+
+const vpost = (ctx, body) =>
+  JSON.parse(ctx.doPost({ postData: { contents: JSON.stringify(body) } }).getContent());
+
+// The phone's OWN vocabulary, camelCase on the way in like every other request.
+// nori is the excluded sku, carried so the prompt can say so.
+const V_SKUS = [
+  { sku: 'box4',  label: 'Box 4',  size: 4,  price: 50,  cheesePrice: 60,  inCutoff: true },
+  { sku: 'box10', label: 'Box 10', size: 10, price: 105, cheesePrice: 120, inCutoff: true },
+  { sku: 'nori',  label: 'Nori',             price: 25,  cheesePrice: 0,   inCutoff: false }
+];
+
+const readPayload = (over) => Object.assign({
+  date: PAPER_NIGHT, mimeType: 'image/jpeg', imageBase64: IMG, skus: V_SKUS
+}, over || {});
+
+/** A Gemini 200 body wrapping whatever the model "said". */
+const geminiSaid = (obj) => ({
+  candidates: [{ content: { parts: [{ text: typeof obj === 'string' ? obj : JSON.stringify(obj) }] } }]
+});
+
+// The owner's real page, transcribed: B4 | 31-28 | 1c = 60 | 2 = 100, a Box 10
+// row, and the crossed-out 2735 superseded by 2605.
+const GOOD_READING = {
+  counts: [
+    { sku: 'box4',  sod: 31, eod: 28, cheese: 1,  gcash: 0,  gcash_cheese: 0, confidence: 0.95 },
+    { sku: 'box10', sod: 55, eod: 34, cheese: 0,  gcash: 14, gcash_cheese: 0, confidence: 0.9 }
+  ],
+  custom_amount: 0, custom_gcash: 0, total_on_paper: 2605, notes: '', unread: []
+};
+
+/** A refusal is ONE plain-English sentence. (The DATE refusals are deliberately
+ *  excluded: those repeat the tracker's own wording verbatim, two sentences and
+ *  all, so the owner meets the same words wherever a date is wrong.) */
+function oneSentence(msg) {
+  const stops = (String(msg).match(/\.(?:\s|$)/g) || []).length;
+  assert.strictEqual(stops, 1, 'a refusal must be ONE plain sentence, got: ' + msg);
+}
+
+/** No refusal, ever, may carry either secret back out. */
+function keepsSecrets(msg) {
+  assert.ok(String(msg).indexOf(FAKE_KEY) < 0, 'a message must never echo the API key: ' + msg);
+  assert.ok(String(msg).indexOf(VISION_TOK) < 0, 'a message must never echo the token: ' + msg);
+}
+
+test('readSheet: a good photo becomes a reading, and the PHOTO IS KEPT FIRST', () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(200, geminiSaid(GOOD_READING));
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r.ok, true, r.error);
+  const d = r.data;
+  // The DATE IS THE PHONE'S: it knows which night it photographed.
+  assert.strictEqual(d.date, PAPER_NIGHT);
+  assert.deepStrictEqual(d.counts[0],
+    { sku: 'box4', sod: 31, eod: 28, cheese: 1, gcash: 0, gcash_cheese: 0, confidence: 0.95 });
+  assert.deepStrictEqual(d.counts[1],
+    { sku: 'box10', sod: 55, eod: 34, cheese: 0, gcash: 14, gcash_cheese: 0, confidence: 0.9 });
+  // The night's own total, the figure the phone's cross-check rests on.
+  assert.strictEqual(d.total_on_paper, 2605);
+  assert.deepStrictEqual(d.unread, [], 'a clean page names nothing as unread');
+  assert.strictEqual(d.custom_amount, 0);
+  assert.strictEqual(d.model, 'gemini-2.5-flash', 'the reading says which model read it');
+
+  // The photograph, kept before anything else, named by the night on the paper.
+  assert.strictEqual(d.photo_saved, true);
+  assert.strictEqual(d.photo_error, '');
+  const folder = ctx.DriveApp._folders.get('Octogo Sales Photos');
+  assert.ok(folder, 'the Drive folder was created on first use');
+  assert.strictEqual(folder._files.length, 1);
+  assert.strictEqual(folder._files[0].getName(), 'Sales 2026-08-22 213000.jpg',
+    'named by the DATE ON THE PAPER plus a Manila clock stamp');
+  assert.strictEqual(d.photo_id, folder._files[0].getId());
+  assert.strictEqual(d.photo_url, folder._files[0].getUrl());
+  // The bytes really are the image that was sent, not a placeholder.
+  assert.strictEqual(Buffer.from(folder._files[0]._blob.getBytes()).toString('base64'), IMG);
+});
+
+test('the photo is saved BEFORE the model is asked — a failed call still leaves the paper on file', () => {
+  // Order matters and is otherwise invisible: prove it by making the CALL fail.
+  // If the save happened after the reading, the picture of a night that failed
+  // to read would be exactly the picture nobody could go back and look at.
+  const ctx = loadVision();
+  ctx.UrlFetchApp._throw('Address unavailable: generativelanguage.googleapis.com');
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /could not be sent for reading/);
+  assert.match(r.error, /type the night in by hand/);
+  oneSentence(r.error);
+  keepsSecrets(r.error);
+  const folder = ctx.DriveApp._folders.get('Octogo Sales Photos');
+  assert.strictEqual(folder._files.length, 1, 'the photo was already kept when the call died');
+});
+
+test('the request: the model in the URL, muteHttpExceptions on, and THE KEY NOT IN THE BODY', () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(200, geminiSaid(GOOD_READING));
+  assert.strictEqual(vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() }).ok, true);
+  assert.strictEqual(ctx.UrlFetchApp._requests.length, 1, 'ONE call per photo');
+  const req = ctx.UrlFetchApp._last();
+  assert.strictEqual(req.url,
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent');
+  assert.strictEqual(req.method, 'post');
+  assert.strictEqual(req.contentType, 'application/json');
+  // Without this a 429 arrives as an Apps Script exception full of engine debris
+  // and the owner never gets told "the quota is used up".
+  assert.strictEqual(req.muteHttpExceptions, true, 'muteHttpExceptions is not optional');
+
+  // WHERE THE KEY LIVES: a header, and nowhere else. A URL ends up in logs and
+  // in quoted error messages; a body is the first thing dumped when something
+  // breaks. Both are checked here because both have leaked keys in the wild.
+  assert.strictEqual(req.headers['x-goog-api-key'], FAKE_KEY);
+  const bodyText = ctx.UrlFetchApp._lastBodyText();
+  assert.ok(bodyText.indexOf(FAKE_KEY) < 0, 'the API key must NOT be in the request body');
+  assert.ok(req.url.indexOf(FAKE_KEY) < 0, 'nor in the URL');
+  assert.ok(bodyText.indexOf(VISION_TOK) < 0, "and the app's own token is never forwarded anywhere");
+
+  const body = ctx.UrlFetchApp._lastBodyJson();
+  const parts = body.contents[0].parts;
+  assert.strictEqual(parts.length, 2, 'a prompt and the image, inline');
+  assert.deepStrictEqual(parts[1].inline_data, { mime_type: 'image/jpeg', data: IMG });
+  // Structured output: the schema is what turns "describe this photo" into
+  // "fill this form", and `required: ['sku']` is what makes OMITTING a figure
+  // the model's way of saying "I could not read it".
+  const gen = body.generationConfig;
+  assert.strictEqual(gen.temperature, 0, 'transcription, not writing: the same photo reads the same twice');
+  assert.strictEqual(gen.responseMimeType, 'application/json');
+  const schema = gen.responseSchema;
+  assert.deepStrictEqual(schema.required, ['counts']);
+  assert.deepStrictEqual(schema.properties.counts.items.required, ['sku'],
+    'every FIGURE is optional on purpose — an omitted field is an unread field');
+  assert.deepStrictEqual(Object.keys(schema.properties.counts.items.properties).sort(),
+    ['cheese', 'confidence', 'eod', 'gcash', 'gcash_cheese', 'sku', 'sod']);
+  assert.ok(schema.properties.total_on_paper, 'the paper carries its own total, so the schema asks for it');
+});
+
+test("the prompt teaches the model the owner's OWN shorthand, and leaks neither secret", () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(200, geminiSaid(GOOD_READING));
+  vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  const prompt = ctx.UrlFetchApp._lastBodyJson().contents[0].parts[0].text;
+  // The notation, spelled out: without it a model reads the page as arithmetic.
+  assert.match(prompt, /B4 \| 31-28 \| 1c = 60 \| 2 = 100/, 'a real row from the paper');
+  assert.match(prompt, /"31-28" is SOD-EOD/);
+  assert.match(prompt, /"1c = 60" is ONE box WITH CHEESE/);
+  assert.match(prompt, /"2 = 100" is TWO plain boxes/);
+  assert.match(prompt, /"Gc"[\s\S]{0,80}PAID BY GCASH/, 'Gc marks GCash');
+  assert.match(prompt, /line THROUGH it is CANCELLED/, 'a crossed-out figure is superseded');
+  assert.match(prompt, /LAST STANDING total[\s\S]{0,120}total_on_paper/);
+  assert.match(prompt, /2735 -> 2605/, "the owner's own crossed-out total, as the example");
+  // The vocabulary is the PHONE'S — this project never reads the sheet, so "B4"
+  // becomes box4 by the owner's labels and by nothing else.
+  assert.match(prompt, /box4 = "Box 4" \(the paper writes it "B4"\)/);
+  assert.match(prompt, /box10 = "Box 10" \(the paper writes it "B10"\)/);
+  assert.match(prompt, /plain 50, with cheese 60/);
+  assert.match(prompt, /nori = "Nori"[\s\S]{0,60}kept out of the cutoff/);
+  // The rule the whole feature rests on.
+  assert.match(prompt, /LEAVE THAT FIELD OUT COMPLETELY and name it in "unread"/);
+  assert.match(prompt, /Never write 0 for a figure you could not read/);
+  assert.match(prompt, /PAPER, in the owner's own shorthand/);
+  assert.strictEqual(prompt.indexOf(PAPER_NIGHT) >= 0, true, 'the night is stated');
+  keepsSecrets(prompt);
+});
+
+test('a HALF-READ row is BLANK, never 0, and every blank is NAMED in unread', () => {
+  const ctx = loadVision();
+  // The model read the SOD and gave up on the rest of the row, and could not
+  // make out the total at the bottom of the page.
+  ctx.UrlFetchApp._reply(200, geminiSaid({
+    counts: [{ sku: 'box4', sod: 31, confidence: 0.4 }],
+    notes: 'the right half of the page is in shadow',
+    unread: ['the bottom right corner is folded over']
+  }));
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r.ok, true, r.error);
+  const line = r.data.counts[0];
+  assert.strictEqual(line.sod, 31, 'what it read, it read');
+  // THE RULE: a figure it could not see is '' and is never 0. A 0 here would
+  // look like an answer and would cost the night its sales.
+  ['eod', 'cheese', 'gcash', 'gcash_cheese'].forEach(f => {
+    assert.strictEqual(line[f], '', f + ' must be BLANK');
+    assert.notStrictEqual(line[f], 0, f + ' must never read as 0');
+  });
+  assert.strictEqual(r.data.total_on_paper, '', 'the total is blank, not 0');
+  assert.strictEqual(r.data.custom_amount, '');
+  const said = r.data.unread.join(' | ');
+  assert.match(said, /the bottom right corner is folded over/, "the model's own list comes first");
+  assert.match(said, /Box 4 left at the end of the day/, 'each blank is named in the owner\'s words');
+  assert.match(said, /Box 4 with cheese/);
+  assert.match(said, /Box 4 paid by GCash/);
+  assert.match(said, /the night's own total on the paper/);
+  assert.match(said, /the special-order amount/);
+  assert.strictEqual(r.data.notes, 'the right half of the page is in shadow');
+  // ...and the photo is still on file, so the folded corner can be looked at.
+  assert.strictEqual(r.data.photo_saved, true);
+});
+
+test('a ZERO it really read is a zero — and is NOT reported as unread', () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(200, geminiSaid({
+    counts: [{ sku: 'box4', sod: 31, eod: 31, cheese: 0, gcash: 0, gcash_cheese: 0, confidence: 1 }],
+    custom_amount: 0, custom_gcash: 0, total_on_paper: 0, notes: '', unread: []
+  }));
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.data.counts[0].cheese, 0, 'a 0 on the paper is a 0 in the reading');
+  assert.strictEqual(r.data.total_on_paper, 0);
+  assert.deepStrictEqual(r.data.unread, [],
+    'nothing was unreadable — blank-vs-zero is the whole distinction this feature turns on');
+});
+
+test('PROSE instead of a reading is refused in one sentence that points back at the paper', () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(200, geminiSaid(
+    'The image shows a handwritten ledger page with several columns of numbers.'));
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r.ok, false, 'a model that wrote an essay has not read the paper');
+  assert.match(r.error, /did not come back as a reading of the paper/);
+  assert.match(r.error, /typed in by hand/, 'and it says the way out is always there');
+  oneSentence(r.error);
+  keepsSecrets(r.error);
+  // Nothing was massaged into a half-reading: a form filled from prose would
+  // look like it worked and would be entirely fictional.
+  assert.strictEqual(r.data, undefined);
+});
+
+test('valid JSON that is not a READING is refused too (no counts array)', () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(200, geminiSaid({ description: 'a sales log', total: 2605 }));
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /did not come back as a reading of the paper/);
+  oneSentence(r.error);
+});
+
+test('an UNKNOWN sku is never invented into a real one — it is dropped and named', () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(200, geminiSaid({
+    counts: [
+      { sku: 'box4', sod: 31, eod: 28, cheese: 1, gcash: 0, gcash_cheese: 0, confidence: 0.9 },
+      { sku: 'box7', sod: 20, eod: 12, cheese: 0, gcash: 0, gcash_cheese: 0, confidence: 0.8 },
+      { sku: 'box4', sod: 99, eod: 0,  cheese: 0, gcash: 0, gcash_cheese: 0, confidence: 0.2 }
+    ],
+    custom_amount: 0, custom_gcash: 0, total_on_paper: 2605, notes: '', unread: []
+  }));
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.deepStrictEqual(r.data.counts.map(c => c.sku), ['box4'],
+    'only products the PHONE named survive — a guess would file a night on the wrong product');
+  assert.strictEqual(r.data.counts[0].sod, 31, 'the FIRST row for a sku wins, like every other reader');
+  const said = r.data.unread.join(' | ');
+  assert.match(said, /read as "box7", which is not a product on this phone/);
+  assert.match(said, /Box 4 appears more than once — only the first row was taken/);
+});
+
+test('the model does not get to decide WHICH NIGHT this was', () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(200, geminiSaid(Object.assign({}, GOOD_READING, { date: '2020-01-05' })));
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.data.date, PAPER_NIGHT,
+    'a reading filed under the wrong night is worse than no reading at all');
+});
+
+test('HTTP 429: the quota wall is named as itself, and as temporary', () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(429, { error: { code: 429, message: 'Resource has been exhausted' } });
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /no quota left right now/);
+  assert.match(r.error, /wait a while and try again, or type the night in by hand/);
+  oneSentence(r.error);
+  keepsSecrets(r.error);
+  // The photo was kept first, so tonight can still be checked against the paper.
+  assert.strictEqual(ctx.DriveApp._folders.get('Octogo Sales Photos')._files.length, 1);
+});
+
+test('HTTP 400: says what the service answered, without engine debris', () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(400, { error: { code: 400, message: 'Provided image is not valid' } });
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /could not use this photo \(it answered 400: Provided image is not valid\)/);
+  assert.match(r.error, /typed in by hand/);
+  oneSentence(r.error);
+  keepsSecrets(r.error);
+});
+
+test('HTTP 500: the service\'s own problem, said as such', () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(500, { error: { code: 500, message: 'Internal error' } });
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /had a problem of its own \(it answered 500/);
+  assert.match(r.error, /try again in a moment, or type the night in by hand/);
+  oneSentence(r.error);
+});
+
+test('a rejected KEY never appears in the refusal that reports it', () => {
+  const ctx = loadVision();
+  // The nastiest real case: Gemini's own message quotes the key back.
+  ctx.UrlFetchApp._reply(403, { error: { code: 403,
+    message: 'API key not valid: ' + FAKE_KEY + ' — please pass a valid API key' } });
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /would not accept this project's key/);
+  assert.match(r.error, /GEMINI_API_KEY/, 'and names the constant to look at');
+  keepsSecrets(r.error);
+  assert.match(r.error, /\(the key\)/, 'the quoted key is scrubbed, not the sentence dropped');
+});
+
+test('an EMPTY candidates array says nothing came back, rather than reading a blank night', () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(200, { candidates: [] });
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /sent nothing back for this photo/);
+  assert.match(r.error, /type the night in by hand/);
+  oneSentence(r.error);
+});
+
+test('a reply that is not even JSON is refused, not parsed hopefully', () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(200, '<html><title>502 Bad Gateway</title></html>');
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /answered with something that is not a reading/);
+  oneSentence(r.error);
+});
+
+test('an image OVER the cap is refused BEFORE a byte of quota or Drive is spent', () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(200, geminiSaid(GOOD_READING));
+  const huge = 'A'.repeat(6 * 1024 * 1024);            // ~4.5 MB of image
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet',
+    payload: readPayload({ imageBase64: huge }) });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /bigger than the 4\.0 MB this app accepts/);
+  assert.match(r.error, /take it again with the camera in the app, which shrinks it/);
+  oneSentence(r.error);
+  assert.strictEqual(ctx.UrlFetchApp._requests.length, 0, 'no call was made');
+  assert.strictEqual(ctx.DriveApp._folders.size, 0, 'and nothing was written to Drive');
+});
+
+test('a mimeType this app cannot read is refused, naming what it CAN read', () => {
+  const ctx = loadVision();
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet',
+    payload: readPayload({ mimeType: 'application/pdf' }) });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /image\/jpeg, image\/png, image\/webp or image\/heic/);
+  assert.match(r.error, /not "application\/pdf"/);
+  oneSentence(r.error);
+  assert.strictEqual(ctx.UrlFetchApp._requests.length, 0);
+  assert.strictEqual(ctx.DriveApp._folders.size, 0);
+});
+
+test('a missing photo, and data that is not an image at all, each refuse plainly', () => {
+  const ctx = loadVision();
+  let r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload({ imageBase64: '' }) });
+  assert.match(r.error, /No photo was sent, so there is nothing to read/);
+  oneSentence(r.error);
+  r = vpost(ctx, { token: VISION_TOK, action: 'readSheet',
+    payload: readPayload({ imageBase64: 'not base64 at all!!' }) });
+  assert.match(r.error, /did not arrive as readable image data/);
+  oneSentence(r.error);
+  assert.strictEqual(ctx.UrlFetchApp._requests.length, 0);
+  assert.strictEqual(ctx.DriveApp._folders.size, 0);
+});
+
+test('a whole data: URL is accepted — sending the obvious thing works', () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(200, geminiSaid(GOOD_READING));
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet',
+    payload: readPayload({ imageBase64: 'data:image/jpeg;base64,' + IMG }) });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(ctx.UrlFetchApp._lastBodyJson().contents[0].parts[1].inline_data.data, IMG,
+    'the prefix is stripped, the image is unchanged');
+});
+
+test('the WRONG TOKEN refuses without echoing the token or the key, and spends nothing', () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(200, geminiSaid(GOOD_READING));
+  const r = vpost(ctx, { token: 'a-guess', action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.error, 'Invalid token.',
+    'it says nothing about what the right answer looks like');
+  keepsSecrets(r.error);
+  assert.ok(r.error.indexOf('a-guess') < 0, 'and never quotes what was sent');
+  // The check is FIRST for exactly this reason: a caller who cannot say the
+  // password must not be able to spend the owner's quota or fill his Drive.
+  assert.strictEqual(ctx.UrlFetchApp._requests.length, 0, 'no quota spent');
+  assert.strictEqual(ctx.DriveApp._folders.size, 0, 'no Drive write');
+});
+
+test('an unknown action is refused by name, and doGet answers without a token', () => {
+  const ctx = loadVision();
+  const r = vpost(ctx, { token: VISION_TOK, action: 'saveDay', payload: {} });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.error, 'Unknown action: "saveDay".',
+    'this app cannot save a day, and says so rather than pretending');
+  const g = JSON.parse(ctx.doGet({}).getContent());
+  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.8.0' } });
+});
+
+test('ping proves the setup WITHOUT spending a unit of quota — even with no key yet', () => {
+  const ctx = loadVision({ keepKeyPlaceholder: true });
+  const r = vpost(ctx, { token: VISION_TOK, action: 'ping', payload: {} });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.data.version, '2.8.0', "VERSION stays put until the release ships");
+  assert.strictEqual(r.data.model, 'gemini-2.5-flash');
+  assert.strictEqual(r.data.key_configured, false, 'a yes/no — never the key itself');
+  keepsSecrets(JSON.stringify(r));
+  assert.strictEqual(ctx.UrlFetchApp._requests.length, 0, 'a ping never calls Gemini');
+
+  const ok = loadVision();
+  assert.strictEqual(vpost(ok, { token: VISION_TOK, action: 'ping', payload: {} }).data.key_configured, true);
+  assert.strictEqual(ok.UrlFetchApp._requests.length, 0);
+});
+
+test('an unset GEMINI_API_KEY refuses by NAMING the constant and the three real reasons', () => {
+  // Learned from the backups project, where the owner hit this for real: the
+  // guard fired AFTER he had typed the value in, because a deployment serves the
+  // SAVED code and every .gs file in a project shares one scope. "You didn't
+  // type it" is the one explanation that is usually false, so it is not said.
+  const ctx = loadVision({ keepKeyPlaceholder: true });
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /GEMINI_API_KEY is still "PASTE_THE_GEMINI_API_KEY_HERE" in the code that just RAN/);
+  assert.match(r.error, /the file was not saved/, 'names the unsaved-file cause');
+  assert.match(r.error, /a SECOND file with the same script/, 'names the duplicate-file cause');
+  assert.match(r.error, /var GEMINI_API_KEY =/, 'names the line to look at');
+  assert.match(r.error, /visionCheck\(\)/, 'and offers the self-check');
+  assert.match(r.error, /typed in by hand/);
+  assert.strictEqual(ctx.UrlFetchApp._requests.length, 0);
+  assert.strictEqual(ctx.DriveApp._folders.size, 0, 'nothing is written on a half-finished setup');
+});
+
+test('an unset VISION_TOKEN refuses the same way, and insists it is NOT the sheet\'s token', () => {
+  const ctx = loadVision({ keepTokenPlaceholder: true });
+  const r = vpost(ctx, { token: 'anything', action: 'ping', payload: {} });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /VISION_TOKEN is still "PASTE_A_LONG_RANDOM_TOKEN_HERE" in the code that just RAN/);
+  assert.match(r.error, /the file was not saved/);
+  assert.match(r.error, /a SECOND file with the same script/);
+  assert.match(r.error, /NEVER the sheet's token/,
+    'two doors, two keys — a photo-reader has no business holding the one that writes money');
+});
+
+test('visionCheck reports readiness without printing either secret', () => {
+  const ctx = loadVision();
+  const said = ctx.visionCheck();
+  assert.match(said, /GEMINI_API_KEY is set \(\d+ characters\)/, 'the LENGTH, never the value');
+  assert.match(said, /VISION_TOKEN is set \(\d+ characters\)/);
+  assert.match(said, /Octogo Sales Photos/);
+  keepsSecrets(said);
+  assert.strictEqual(ctx.UrlFetchApp._requests.length, 0, 'a look never spends quota');
+});
+
+test('a DRIVE FAILURE loses the filing cabinet, never the night', () => {
+  const ctx = loadVision();
+  ctx.DriveApp._failCreateFile = 'Limit exceeded: the Drive storage quota is full';
+  ctx.UrlFetchApp._reply(200, geminiSaid(GOOD_READING));
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r.ok, true, 'the READING still comes back — this is the whole point');
+  assert.strictEqual(r.data.counts[0].sod, 31);
+  assert.strictEqual(r.data.total_on_paper, 2605);
+  assert.strictEqual(r.data.photo_saved, false);
+  assert.strictEqual(r.data.photo_url, '');
+  assert.strictEqual(r.data.photo_id, '');
+  assert.match(r.data.photo_error, /could not be kept in Drive \(Limit exceeded: the Drive storage quota is full\)/);
+  assert.match(r.data.photo_error, /cannot be checked against the picture later/,
+    'it says what was LOST, so the owner knows this one reading has no paper behind it');
+  keepsSecrets(r.data.photo_error);
+});
+
+test('the date must be a real night that has happened — same words the tracker uses', () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(200, geminiSaid(GOOD_READING));
+  const bad = (date) => vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload({ date }) });
+  assert.match(bad('2026-08-23').error, /has not happened yet/, 'a photo of tomorrow is a mangled date');
+  assert.match(bad('2019-12-31').error, /before 2020, which cannot be right/);
+  assert.match(bad('2026-02-30').error, /is not a real calendar date/);
+  assert.match(bad('22\/08\/2026').error, /must be a yyyy-MM-dd string/);
+  assert.match(bad('').error, /must be a yyyy-MM-dd string/);
+  assert.strictEqual(ctx.UrlFetchApp._requests.length, 0, 'not one of those spent anything');
+  assert.strictEqual(ctx.DriveApp._folders.size, 0);
+});
+
+test('no product list means no reading — a row on the paper must map to something', () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(200, geminiSaid(GOOD_READING));
+  let r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload({ skus: [] }) });
+  assert.match(r.error, /sent no product list/);
+  oneSentence(r.error);
+  r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload({ skus: undefined }) });
+  assert.match(r.error, /sent no product list/);
+  r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload({ skus: [{ label: 'Box 4' }] }) });
+  assert.match(r.error, /has no usable products in it/, 'a row with no sku has no identity');
+  oneSentence(r.error);
+  assert.strictEqual(ctx.UrlFetchApp._requests.length, 0);
+});
+
+test('an older phone omitting the new sku keys still gets a reading (harmless defaults)', () => {
+  const ctx = loadVision();
+  ctx.UrlFetchApp._reply(200, geminiSaid(GOOD_READING));
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet',
+    payload: readPayload({ skus: [{ sku: 'box4', label: 'Box 4' }, { sku: 'box10', label: 'Box 10' }] }) });
+  assert.strictEqual(r.ok, true, r.error);
+  const prompt = ctx.UrlFetchApp._lastBodyJson().contents[0].parts[0].text;
+  assert.match(prompt, /box4 = "Box 4" \(the paper writes it "B4"\)/);
+  assert.ok(prompt.indexOf('plain 0') < 0, 'a missing price is simply not offered as a check');
+  assert.strictEqual(r.data.counts.length, 2);
+});
+
+test('a bad request body is a sentence, not engine debris', () => {
+  const ctx = loadVision();
+  const raw = (contents) => JSON.parse(ctx.doPost({ postData: { contents } }).getContent());
+  assert.match(raw('not json').error, /Request body is not valid JSON/);
+  assert.match(raw('null').error, /Expected \{token, action, payload\}/);
+  assert.match(raw('42').error, /Expected \{token, action, payload\}/);
+  assert.match(JSON.parse(ctx.doPost({}).getContent()).error, /Empty request body/);
+  assert.strictEqual(ctx.UrlFetchApp._requests.length, 0);
+});
+
+test('THE FENCE: the phones\' project still cannot reach the internet, and Vision is the only one that can', () => {
+  // v2.9.0's load-bearing separation, the same one v2.7.5 drew for Drive:
+  // permissions are granted per PROJECT and the bound script is what serves the
+  // phones. A UrlFetchApp call in Code.gs would grow the LIVE web app's
+  // permission set, and an ordinary night's save could start failing until the
+  // owner re-authorised it in the editor. The stub deliberately WORKS in every
+  // context, so this source-level assertion is the only thing holding the line.
+  const bound = fs.readFileSync(CODE_GS, 'utf8');
+  assert.ok(!/\bUrlFetchApp\b/.test(bound), 'Code.gs must not use UrlFetchApp');
+  assert.ok(!/\bDriveApp\b/.test(bound), 'Code.gs must not use DriveApp');
+  assert.ok(!/\bScriptApp\b/.test(bound), 'Code.gs must not use ScriptApp');
+  assert.ok(!/\b(MailApp|GmailApp)\b/.test(bound), 'nor any other permission-bearing service');
+  // ...and no key or endpoint hiding in there either.
+  assert.ok(!/generativelanguage|GEMINI/i.test(bound),
+    'the bound script knows nothing about Gemini — not even its address');
+
+  // Exactly ONE file in the repo may make an internet request.
+  const gsDir = path.join(ROOT, 'apps-script');
+  const usesFetch = fs.readdirSync(gsDir).filter(f => /\.gs$/.test(f))
+    .filter(f => /\bUrlFetchApp\b/.test(fs.readFileSync(path.join(gsDir, f), 'utf8')));
+  assert.deepStrictEqual(usesFetch, ['Vision.gs'],
+    'Vision.gs is the ONLY project allowed to make an internet request');
+
+  const vision = fs.readFileSync(VISION_GS, 'utf8');
+  // The other half of the fence, and the reason a leaked vision deployment
+  // cannot cost a peso: this project has no way to reach the sheet at all.
+  // Same shape the backups fence uses: a CALL, not the word (the header comment
+  // names the service precisely to explain why it is absent).
+  assert.ok(!/SpreadsheetApp\.\w/.test(vision),
+    'Vision.gs must never CALL SpreadsheetApp — it cannot write a single figure');
+  assert.ok(!/\bScriptApp\b/.test(vision), 'and needs no trigger: it runs when a phone calls it');
+  assert.ok(!/\b(MailApp|GmailApp)\b/.test(vision));
+  assert.ok(/muteHttpExceptions:\s*true/.test(vision), 'and every call it does make is muted');
+  // The two secrets are separate constants, and the placeholder text says so.
+  assert.ok(/var GEMINI_API_KEY = 'PASTE_THE_GEMINI_API_KEY_HERE';/.test(vision),
+    'the key ships as a placeholder the owner fills');
+  assert.ok(/var VISION_TOKEN = 'PASTE_A_LONG_RANDOM_TOKEN_HERE';/.test(vision),
+    'and so does its OWN token');
+  assert.ok(/var MAX_IMAGE_BYTES = 4 \* 1024 \* 1024;/.test(vision));
+  assert.ok(/var PHOTO_FOLDER = 'Octogo Sales Photos';/.test(vision));
+});
+
+test('photo_url: the tracker stores the link and gains NOTHING else', () => {
+  // The single change v2.9.0 makes to the BOUND script: one string column and
+  // one optional key. No new permission, no new behaviour in any figure.
+  const { ctx, ss, token } = freshSetup();
+  const URL = 'https://drive.google.com/file/d/photo-id-1/view';
+  const day = (over) => post(ctx, { token, action: 'saveDay', payload: Object.assign({
+    date: '2026-07-30', closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box10', sod: 10, eod: 4, cheeseQty: 1, gcashQty: 2, gcashCheeseQty: 0 }],
+    stock: [], entryId: 'photo-day' }, over || {}) });
+
+  const withPhoto = day({ photoUrl: URL });
+  assert.strictEqual(withPhoto.ok, true, withPhoto.error);
+  assert.strictEqual(withPhoto.data.photo_url, URL, 'the reply says what was stored');
+  const log = ss.getSheetByName('DailyLog').getDataRange().getValues();
+  const col = log[0].indexOf('photo_url');
+  assert.ok(col >= 0, 'the column was appended by the migration');
+  assert.strictEqual(log.slice(1).find(r => r[0] === '2026-07-30')[col], URL);
+  // The money is untouched by the link's presence — assert it, do not assume it.
+  const moneyWith = ['total', 'cash', 'gcash', 'salary', 'excluded_total'].map(k => withPhoto.data[k]);
+
+  // An OLDER PHONE omits the key entirely: the harmless default is blank.
+  const plain = day({ entryId: 'photo-day-2', date: '2026-07-29' });
+  assert.strictEqual(plain.ok, true, plain.error);
+  assert.strictEqual(plain.data.photo_url, '', 'always present, blank when there is none');
+  assert.deepStrictEqual(['total', 'cash', 'gcash', 'salary', 'excluded_total'].map(k => plain.data[k]),
+    moneyWith, 'the photo link moves NOT ONE figure');
+
+  // bootstrap ships it back, snake_case, so the night can point at its paper.
+  const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
+  assert.strictEqual(boot.data.days.find(d => d.date === '2026-07-30').photo_url, URL);
+  assert.strictEqual(boot.data.days.find(d => d.date === '2026-07-29').photo_url, '');
+
+  // A "link" that cannot be opened is worse than none: it looks like a night
+  // that can be checked against its paper when it cannot.
+  const junk = day({ entryId: 'photo-day-3', date: '2026-07-28', photoUrl: 'photo-id-1' });
+  assert.strictEqual(junk.ok, false);
+  assert.match(junk.error, /not a web address the sheet can store/);
+  assert.match(junk.error, /Save the night without the photo and it will be kept as usual/);
+  assert.strictEqual(log.slice(1).some(r => r[0] === '2026-07-28'), false, 'and the day was not saved');
 });
 
 // ---------------------------------------------------------------------------

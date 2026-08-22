@@ -285,7 +285,12 @@ const CONTRACT = {
   // inside the stored `gcash` and out of `cash`. lid_boxes is a plain count with
   // no money. A camelCase slip on either would read as 0 on the phone: the
   // receipt's converted-cash line would vanish while the split it explains stays.
-  'bootstrap.days[]':      [['custom_amount', 'customAmount'], ['custom_gcash', 'customGcash'], ['excluded_total', 'excludedTotal'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt'], ['gcash_converted', 'gcashConverted'], ['lid_boxes', 'lidBoxes']],
+  // photo_url (v2.9.0) is the link to the photograph the night was read from. It
+  // is provenance, never a figure — but a camelCase slip would arrive as
+  // undefined, and the Sales screen's "this came from the paper" link would
+  // silently disappear from every night that HAS one, which is the one case
+  // where the owner most wants to see it.
+  'bootstrap.days[]':      [['custom_amount', 'customAmount'], ['custom_gcash', 'customGcash'], ['excluded_total', 'excludedTotal'], ['entry_id', 'entryId'], ['updated_at', 'updatedAt'], ['gcash_converted', 'gcashConverted'], ['lid_boxes', 'lidBoxes'], ['photo_url', 'photoUrl']],
   // in_cutoff on a COUNT row is the v2.4.1 snapshot: what the flag said when that
   // day was saved. History is classified by it, so a camelCase slip would make
   // every row look unsnapshotted and hand the classification back to the live flag.
@@ -314,7 +319,7 @@ const CONTRACT = {
   // from excluded skus — the receipt prints it BELOW the totals, and the cash tin
   // only reconciles as Cash + excluded_total, so a misread key is a tin that
   // never balances.
-  'saveDay':               [['dropped_skus', 'droppedSkus'], ['excluded_total', 'excludedTotal'], ['gcash_converted', 'gcashConverted'], ['lid_boxes', 'lidBoxes']],
+  'saveDay':               [['dropped_skus', 'droppedSkus'], ['excluded_total', 'excludedTotal'], ['gcash_converted', 'gcashConverted'], ['lid_boxes', 'lidBoxes'], ['photo_url', 'photoUrl']],
   'saveDay.lines[]':       [['cheese_qty', 'cheeseQty'], ['regular_qty', 'regularQty'], ['gcash_qty', 'gcashQty'], ['gcash_cheese_qty', 'gcashCheeseQty'], ['gcash_amount', 'gcashAmount'], ['in_cutoff', 'inCutoff'], ['custom_qty', 'customQty']],
   'saveExpense':           [['entry_id', 'entryId']],
   'saveStockCount':        [['entry_id', 'entryId'], ['on_hand', 'onHand']],
@@ -334,7 +339,17 @@ const CONTRACT = {
   'costing.variable':      [['per_ball', 'perBall']],
   'costing.fixed':         [['per_day', 'perDay']],
   'costing.per_sku[]':     [['cost_per_box', 'costPerBox'], ['margin_per_box', 'marginPerBox'], ['margin_per_ball', 'marginPerBall']],
-  'costing.targets[]':     [['per_day', 'perDay']]
+  'costing.targets[]':     [['per_day', 'perDay']],
+  // v2.9.0 `readSheet` — the READING, and the one response in this app that
+  // comes from a DIFFERENT project (apps-script/Vision.gs, its own deployment,
+  // its own token, its own key). It obeys the same standing rule for the same
+  // reason: the phone reads snake_case, and a camelCase slip on any of these is
+  // silent. total_on_paper is the worst of them — it is the figure the whole
+  // cross-check rests on, so an undefined there would not show a wrong number,
+  // it would quietly turn the cross-check OFF and leave a machine reading of a
+  // photograph as the only witness to the night's money.
+  'readSheet':             [['custom_amount', 'customAmount'], ['custom_gcash', 'customGcash'], ['total_on_paper', 'totalOnPaper'], ['photo_url', 'photoUrl'], ['photo_id', 'photoId'], ['photo_saved', 'photoSaved'], ['photo_error', 'photoError']],
+  'readSheet.counts[]':    [['gcash_cheese', 'gcashCheese']]
 };
 
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
@@ -530,6 +545,90 @@ function syncedClient(bootData) {
 }
 
 const F = buildFixture();
+
+// ---------------------------------------------------------------------------
+// v2.9.0 "Read it from the paper" — the READING fixture, off the REAL third
+// project. It lives up here because the contract pins in section 7 read it, and
+// those run before the sync harness exists. The behavioural tests are in
+// section 21.
+//
+// The photo reader is a THIRD Apps Script project (apps-script/Vision.gs) with
+// its own deployment, its own token and its own Gemini key, so it is loaded the
+// way it runs: alone, in its own context, with a CANNED model reply. The suite
+// must never make a live call — and a canned reply is also the only way to
+// exercise a half-read page, a quota wall or prose-instead-of-a-reading at all.
+// ---------------------------------------------------------------------------
+const VISION_GS = path.join(ROOT, 'apps-script', 'Vision.gs');
+// Shaped like a real Google API key and a real random token, and never equal to
+// each other or to the sheet's: half the point of the third project is that the
+// secret that writes money and the key that costs money never share a file.
+const SEAM_KEY = 'AIzaSyB9fakeKeyForTestsOnly_0000000000';
+const SEAM_TOK = 'vision-seam-4f9c1a7e2b8d05364a1f';
+
+function loadVisionSeam() {
+  const ctx = makeContext(new FakeSpreadsheet());
+  vm.createContext(ctx);
+  const src = fs.readFileSync(VISION_GS, 'utf8')
+    .replace("var GEMINI_API_KEY = 'PASTE_THE_GEMINI_API_KEY_HERE';",
+      "var GEMINI_API_KEY = '" + SEAM_KEY + "';")
+    .replace("var VISION_TOKEN = 'PASTE_A_LONG_RANDOM_TOKEN_HERE';",
+      "var VISION_TOKEN = '" + SEAM_TOK + "';");
+  vm.runInContext(src, ctx, { filename: 'Vision.gs' });
+  return ctx;
+}
+const vpost = (ctx, body) =>
+  JSON.parse(ctx.doPost({ postData: { contents: JSON.stringify(body) } }).getContent());
+/** A Gemini 200 body wrapping whatever the model "said". */
+const geminiSaid = (obj) => ({
+  candidates: [{ content: { parts: [{ text: typeof obj === 'string' ? obj : JSON.stringify(obj) }] } }]
+});
+// Real base64 (the reader checks the alphabet before it spends anything) and small.
+const SEAM_IMG = Buffer.from('a photograph of the paper for ' + DAY).toString('base64');
+
+// The phone's OWN product vocabulary at THIS DAY's stored figures — what travels
+// with the photograph, so the vision app never reads the sheet and "B4" becomes
+// box4 by the owner's own labels. Written out here, and section 21 asserts it is
+// byte-identical to what the shipped paperSkus() really produces: if the two
+// ever drift, the fixture stops describing the phone and that test goes red.
+// REQUEST keys are camelCase — cheesePrice, inCutoff — the standing rule.
+const PAPER_SKUS = [
+  { sku: 'box4',  label: 'Box 4',  size: 4,  price: 50,  cheesePrice: 60,  inCutoff: true },
+  { sku: 'box6',  label: 'Box 6',  size: 6,  price: 65,  cheesePrice: 80,  inCutoff: true },
+  { sku: 'box10', label: 'Box 10', size: 10, price: 105, cheesePrice: 125, inCutoff: true },
+  { sku: 'nori',  label: 'Nori',   size: 0,  price: 25,  cheesePrice: 0,   inCutoff: false }
+];
+
+// The owner's own page, transcribed against those prices, and the money it has
+// to come to — worked out by hand here, so a wrong prefill is a wrong FIGURE and
+// not a wrong shape:
+//   Box 4   31-28 -> sold  3, one of them cheese : 1x60 +  2x50  =   160
+//   Box 6   12-12 -> sold  0                                     =     0
+//   Box 10  55-34 -> sold 21, 14 paid by GCash   :      21x105   = 2,205
+//   Nori    10-8  -> sold  2  (in_cutoff FALSE)  :       2x25    =    50  (BESIDE the day)
+//   ------------------------------------------------------------------------
+//   TOTAL 2,365    GCash 1,470 (14 x 105)    Cash 895    Excluded 50 (tin 945)
+const PAPER_READ = {
+  counts: [
+    { sku: 'box4',  sod: 31, eod: 28, cheese: 1, gcash: 0,  gcash_cheese: 0, confidence: 0.95 },
+    { sku: 'box6',  sod: 12, eod: 12, cheese: 0, gcash: 0,  gcash_cheese: 0, confidence: 0.95 },
+    { sku: 'box10', sod: 55, eod: 34, cheese: 0, gcash: 14, gcash_cheese: 0, confidence: 0.95 },
+    { sku: 'nori',  sod: 10, eod: 8,  cheese: 0, gcash: 0,  gcash_cheese: 0, confidence: 0.95 }
+  ],
+  custom_amount: 0, custom_gcash: 0, total_on_paper: 2365, notes: '', unread: []
+};
+const PAPER_TOTAL = 2365, PAPER_GCASH = 1470, PAPER_CASH = 895, PAPER_EXCL = 50;
+
+/** ONE photograph through the REAL Vision.gs: a canned model reply in, the
+ *  reading the phone will consume out. */
+function visionRead(said, over) {
+  const ctx = loadVisionSeam();
+  ctx.UrlFetchApp._reply(200, geminiSaid(said));
+  const r = vpost(ctx, { token: SEAM_TOK, action: 'readSheet', payload: Object.assign({
+    date: DAY, mimeType: 'image/jpeg', imageBase64: SEAM_IMG, skus: PAPER_SKUS }, over || {}) });
+  assert.strictEqual(r.ok, true, 'readSheet failed: ' + r.error);
+  return { ctx, reading: r.data };
+}
+const RD = visionRead(PAPER_READ);
 
 // ---------------------------------------------------------------------------
 console.log('\n--- 1. THE REPORTED BUG: cheese price survives the seam ---');
@@ -1093,7 +1192,10 @@ function contractSamples() {
     'costing.variable':     F.costing.variable,
     'costing.fixed':        F.costing.fixed,
     'costing.per_sku[]':    F.costing.per_sku,
-    'costing.targets[]':    F.costing.targets
+    'costing.targets[]':    F.costing.targets,
+    // The reading off the REAL Vision.gs (built in section 21, below).
+    'readSheet':           RD.reading,
+    'readSheet.counts[]':  RD.reading.counts
   };
 }
 
@@ -1794,7 +1896,7 @@ test('MIGRATION: setupSheet appends the new columns and moves no existing cell',
     'the new DailyCounts columns must be APPENDED, in schema order');
   const log = ss.getSheetByName('DailyLog').getDataRange().getValues();
   assert.deepStrictEqual(log[0],
-    OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes']));
+    OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes', 'photo_url']));
   assert.deepStrictEqual(counts[1].slice(9), ['', '', '', '', '', '', ''],
     'the appended cells start blank on a historical row: "that day was all cash", ' +
     'an in_cutoff with no snapshot (which reads TRUE — the money was inside the ' +
@@ -1805,9 +1907,11 @@ test('MIGRATION: setupSheet appends the new columns and moves no existing cell',
   // it at read time meant a later rate change silently re-priced history.
   // gcash_converted / lid_boxes (v2.7.0) stay blank: nothing was converted and
   // no lids were counted on a day saved before the columns existed.
-  assert.deepStrictEqual(log[1].slice(10), ['', 200, '', '', ''],
+  // PIN MOVED (v2.9.0, deliberate): photo_url is appended after lid_boxes and
+  // stays blank on every historical row — those nights were typed in by hand.
+  assert.deepStrictEqual(log[1].slice(10), ['', 200, '', '', '', ''],
     'salary backfilled at the current rate; the other appended cells stay blank');
-  assert.deepStrictEqual(log[2].slice(10), ['', 200, '', '', ''],
+  assert.deepStrictEqual(log[2].slice(10), ['', 200, '', '', '', ''],
     'every non-closed historical row gets the backfill');
   // The one appended column whose BLANK means TRUE. Asserted here, at the
   // migration itself, because this is the moment every live price row gets one.
@@ -3328,6 +3432,26 @@ const S_CUTHELP  = slab('function cutoffMissingDays(per){', 'function renderCuto
 const S_ARRSTATE = slab("let countingProduct = '';", 'function stockOnHandHTML(){');
 const S_ARRFNS   = slab('function arriveStep(i, dir){', 'let maintOpen = false;');
 
+// v2.9.0 "Read it from the paper". Four slabs, because the feature's code is
+// spread across four places in the shipped file and every one of them is real
+// behaviour a test here has to drive rather than re-describe:
+//   S_BLANKS  — BLANK IS NOT ZERO: the display-only readers (isBlankVal /
+//               stepVal / uiVal / soldVal) that decide what a count box SHOWS.
+//               Lifted with rowUI, which they are the presentation half of.
+//   S_SKULIST — bentaSkuList: the phone's OWN product vocabulary, which is what
+//               travels to the vision app instead of the sheet being read.
+//   S_LISTPHR — listPhrase, which the cross-check's "the end count is empty on
+//               X and Y" sentence is built with.
+//   S_PAPER   — the whole photo-reader module: visionApi, shrinkPhoto, the
+//               reading's normalizer, THE PREFILL, THE CROSS-CHECK, and every
+//               builder that turns model text into markup.
+const S_BLANKS   = slab('function rowUI(r){', 'function syncRowInputs(sku, r){');
+const S_SKULIST  = slab('function bentaSkuList(){', '// Plain-English breakdown of one sku row:');
+const S_LISTPHR  = slab('function listPhrase(names){', 'function applyDroppedSkus(p, skus){');
+const S_PAPER    = slab('function visionReady(){ return !!(txt(config.visionUrl)',
+  '/* ============================================================ ' +
+  'Event wiring — delegated clicks/inputs per panel + globals');
+
 /** A client whose sync engine is REAL: enqueue, drainQueue, doBootstrap, api —
  *  with the wire (fetch), storage success and every toast/render under the
  *  test's control via `hooks`. drainQueue and doBootstrap return promises, so
@@ -3337,7 +3461,14 @@ function loadSyncClient() {
 'use strict';
 const hooks = {
   fetch: () => { throw new Error('this test made no wire'); },
-  storeFail: false, toasts: [], panels: []
+  storeFail: false, toasts: [], panels: [],
+  // v2.9.0: the photo reader's surroundings. els is the tiny DOM the paper
+  // card writes into; bitmap is what the camera decoded; jpegChars is how many
+  // base64 characters a JPEG of that size comes to, so the shrink ladder is
+  // walked for real.
+  els: {}, confirms: [], confirmAnswer: true, encodes: [],
+  bitmap: () => ({ width: 3000, height: 4000, close(){} }),
+  jpegChars: (w, h, q) => Math.max(4, Math.round(w * h * (q || 0.8) * 0.02))
 };
 const store = { read(){ return null; }, set(k, v){ return !hooks.storeFail; } };
 const navigator = { onLine: true };
@@ -3360,6 +3491,11 @@ ${S_CUTHELP}
 ${S_PERSISTA}
 ${S_ARRSTATE}
 ${S_ARRFNS}
+${S_SKULABEL}
+${S_LISTPHR}
+${S_BLANKS}
+${S_SKULIST}
+${S_PAPER}
 let state = freshState();
 let queue = [];
 let config = freshConfig();
@@ -3377,17 +3513,39 @@ function persistDrafts(){}
 function updateStatus(){}
 function renderIbapa(){}
 function applyUpdateIfSafe(){}
-const $ = () => null;   // no DOM here: error surfaces are asserted via state, not markup
+const $ = (id) => (hooks.els[String(id)] || null);
 function renderPanel(t){ hooks.panels.push(String(t)); }
 function toast(m){ hooks.toasts.push(String(m)); }
 function fetch(url, opts){ return hooks.fetch(url, opts); }
+// v2.9.0. The camera and the canvas, as thin as they can be and still exercise
+// the REAL shrink ladder: createImageBitmap hands back the dimensions the test
+// chose, and toDataURL reports a base64 body whose LENGTH is what the test says
+// a JPEG of that size and quality would be. So shrinkPhoto's own arithmetic
+// (b64Bytes, the 4 MB cap, the ladder walking down until something fits) is the
+// code under test, not a mock of it.
+function createImageBitmap(file, opts){ return hooks.bitmap(file, opts); }
+const document = {
+  activeElement: null,
+  createElement(tag){
+    if (String(tag) !== 'canvas') return {};
+    return {
+      width: 0, height: 0,
+      getContext(){ return { fillStyle:'', fillRect(){}, drawImage(){} }; },
+      toDataURL(mime, q){
+        hooks.encodes.push({ w: this.width, h: this.height, mime: String(mime), q: q });
+        return 'data:image/jpeg;base64,' + 'A'.repeat(hooks.jpegChars(this.width, this.height, q));
+      }
+    };
+  }
+};
+function confirm(msg){ hooks.confirms.push(String(msg)); return hooks.confirmAnswer; }
 return {
   get state(){ return state; },
   get benta(){ return benta; },
   get queue(){ return queue; },
   get attention(){ return attention; },
   get storageFull(){ return storageFull; },
-  hooks, cfg: config,
+  hooks, cfg: config, nav: navigator,
   applyBootstrap, applyLocalDay, applyLocalExpense, applyLocalStockCount,
   applyLocalStockDelivery, applyLocalDeleteExpense, sanitizeQueue,
   applyServerDay, reapplyQueue,
@@ -3405,7 +3563,19 @@ return {
   // v2.7.4: the arrival form's save path, with its rows settable by tests.
   get arrival(){ return arrival; }, set arrival(v){ arrival = v; },
   arriveStep, saveArrival,
-  num, fmt, peso
+  // v2.9.0 "Read it from the paper". The whole module, plus live handles on the
+  // one piece of state it owns, so a test can put the screen in any of its
+  // states and drive the real flow end to end.
+  visionReady, visionApi, paperTake, paperShoot, shrinkPhoto, b64Bytes, paperSkus,
+  normReading, applyReadingToForm, paperCross, paperCrossHTML, paperCardHTML,
+  paperReviewHTML, paperFormFigures, paperSuspects, paperLink, paperInt, paperMoney,
+  paperClear, paperShowingFor, bentaSkuList,
+  isBlankVal, stepVal, uiVal, soldVal,
+  get paper(){ return paper; },
+  set paper(v){ paper = v; },
+  get paperErr(){ return paperErr; },
+  get paperBusy(){ return paperBusy; },
+  num, fmt, peso, esc, skuLabel
 };`;
   // eslint-disable-next-line no-new-func
   return new Function(src)();
@@ -5089,6 +5259,586 @@ test('THE FENCE across the seam: the costing changes no figure the cutoff shows'
   // screens can never tell different stories about one fortnight.
   assert.strictEqual(cost.data.revenue, cutAfter.data.figures.total);
 });
+
+// ---------------------------------------------------------------------------
+console.log('\n--- 21. v2.9.0 "Read it from the paper": the reading, the prefill, the cross-check ---');
+
+/** A phone that has booted against the real server and has the photo reader
+ *  set up, with the Sales form open on DAY. Every paper test starts here. */
+function paperApp(date) {
+  const app = loadSyncClient();
+  app.cfg.apiUrl = 'https://api.example/exec';
+  app.cfg.token = F.token;
+  app.cfg.visionUrl = 'https://vision.example/exec';
+  app.cfg.visionToken = SEAM_TOK;
+  app.applyBootstrap(F.boot);
+  app.loadBentaForm(date || DAY);
+  return app;
+}
+
+/** ONE photograph, all the way through BOTH projects: a canned model reply ->
+ *  the real Vision.gs -> the phone's own normReading, with the form open on that
+ *  night. Every cross-check and blank test below starts here, so what is under
+ *  test is the real seam and not two hand-written objects that happen to agree. */
+function readVia(said, date) {
+  const d = date || DAY;
+  const app = paperApp(d);
+  const reading = visionRead(said, { date: d, skus: app.paperSkus(d) }).reading;
+  return { app, data: reading, reading: app.normReading(reading, d) };
+}
+/** The reading on screen AND on the form — the state the cross-check reads. */
+function showing(t) {
+  t.app.paper = { date: t.reading.date, reading: t.reading };
+  t.app.applyReadingToForm(t.reading);
+  return t;
+}
+/** The owner's page with one thing changed. */
+function paperWith(over) {
+  return Object.assign(JSON.parse(JSON.stringify(PAPER_READ)), over || {});
+}
+
+test('the phone sends its OWN vocabulary, camelCase, and never the sheet', () => {
+  // REQUESTS are camelCase — the standing rule, the other direction. The vision
+  // app has no SpreadsheetApp call anywhere in it, so this list is the only way
+  // it can know that "B4" is box4 at ₱50 with cheese at ₱60.
+  const skus = paperApp(DAY).paperSkus(DAY);
+  // The fixture every contract pin above was built from IS what the phone sends.
+  assert.deepStrictEqual(skus, PAPER_SKUS,
+    'the sku list must carry camelCase cheesePrice/inCutoff at this day\'s stored figures');
+  const nori = skus.find(s => s.sku === 'nori');
+  assert.strictEqual(nori.inCutoff, false, 'the excluded sku travels, and travels marked');
+  for (const s of skus) {
+    assert.ok(!has(s, 'cheese_price'), 'a REQUEST key must not be snake_case: cheese_price');
+    assert.ok(!has(s, 'in_cutoff'), 'a REQUEST key must not be snake_case: in_cutoff');
+  }
+  // And this list is the ONLY vocabulary there is. The vision project cannot
+  // read the sheet at all (pinned at the fence, in run-tests.js), so a photo
+  // sent without it has nothing to match a row against and is refused rather
+  // than guessed at.
+  const bare = vpost(loadVisionSeam(), { token: SEAM_TOK, action: 'readSheet', payload: {
+    date: DAY, mimeType: 'image/jpeg', imageBase64: SEAM_IMG } });
+  assert.strictEqual(bare.ok, false);
+  assert.match(bare.error, /no product list/);
+  assert.match(bare.error, /typed in by hand/, 'and the way through is always still there');
+});
+
+test('the READING is snake_case throughout, and every figure is where the phone reads it', () => {
+  const d = RD.reading;
+  assertPairs('readSheet', d, CONTRACT['readSheet']);
+  assertPairs('readSheet.counts[]', d.counts, CONTRACT['readSheet.counts[]']);
+  assertNoCamelKeys('readSheet', d);
+  // The DATE IS THE PHONE'S. It knows which night it photographed.
+  assert.strictEqual(d.date, DAY);
+  assert.strictEqual(d.total_on_paper, PAPER_TOTAL, 'the figure the whole cross-check rests on');
+  assert.strictEqual(d.counts.length, 4);
+  assert.deepStrictEqual(d.counts[0],
+    { sku: 'box4', sod: 31, eod: 28, cheese: 1, gcash: 0, gcash_cheese: 0, confidence: 0.95 });
+  // The photo was kept BEFORE the model was asked, so the reading can be taken
+  // back to the paper it came from.
+  assert.strictEqual(d.photo_saved, true);
+  assert.ok(/^https?:\/\//.test(d.photo_url), 'a real link, or the phone drops it: ' + d.photo_url);
+  assert.strictEqual(d.photo_error, '');
+  assert.strictEqual(d.model, 'gemini-2.5-flash');
+});
+
+test('the reading survives the phone\'s own normalizer, and a camelCase reader would not', () => {
+  const app = paperApp(DAY);
+  const rd = app.normReading(RD.reading, DAY);
+  assert.strictEqual(rd.total_on_paper, PAPER_TOTAL);
+  assert.strictEqual(rd.counts.length, 4);
+  assert.strictEqual(rd.counts[0].gcash_cheese, 0, 'gcash_cheese, not gcashCheese');
+  assert.strictEqual(rd.counts.find(c => c.sku === 'box4').label, 'Box 4',
+    'the LABEL comes from the phone, never from the reply');
+  assert.strictEqual(rd.photo_url, RD.reading.photo_url);
+  // A reply that is not a reading is refused, not massaged into an empty form
+  // that looks like it worked.
+  assert.throws(() => app.normReading({ notes: 'I see a piece of paper.' }, DAY),
+    /not come back as a reading/);
+  // A sku this phone does not sell is never guessed into one that it does.
+  const bogus = app.normReading({ counts: [{ sku: 'box99', sod: 5, eod: 1 }] }, DAY);
+  assert.strictEqual(bogus.counts.length, 0, 'an unknown sku is dropped, never renamed');
+});
+
+// --- photo_url: provenance, all the way round the loop ----------------------
+
+test('photo_url round-trips the normalizers, both spellings', () => {
+  const app = loadSyncClient();
+  const LINK = 'https://drive.google.com/file/d/abc123/view';
+  const modern = app.applyBootstrap({ days: [{ date: DAY, total: 1, cash: 1, gcash: 0, photo_url: LINK }] });
+  assert.strictEqual(app.state.days[DAY].photo_url, LINK, 'snake_case is canonical');
+  const legacy = loadSyncClient();
+  legacy.applyBootstrap({ days: [{ date: DAY, total: 1, cash: 1, gcash: 0, photoUrl: LINK }] });
+  assert.strictEqual(legacy.state.days[DAY].photo_url, LINK,
+    'a legacy camelCase server must not silently drop the link');
+  // And a link that is not a link never becomes an href or a sheet cell.
+  assert.strictEqual(app.paperLink('javascript:alert(1)'), '');
+  assert.strictEqual(app.paperLink('the photo is in the folder'), '');
+  assert.strictEqual(app.paperLink(LINK), LINK);
+});
+
+atest('the photo link travels the whole loop: payload -> sheet -> bootstrap -> form -> payload', async () => {
+  const srv = loadServer();
+  const app = loadSyncClient();
+  app.cfg.apiUrl = 'https://api.example/exec';
+  app.cfg.token = srv.token;
+  app.hooks.fetch = liveWire(srv);
+  app.applyBootstrap(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+  const LINK = 'https://drive.google.com/file/d/paper-' + DAY + '/view';
+  app.loadBentaForm(DAY);
+  const p = app.bentaPayload();
+  p.photoUrl = LINK;
+  p.entryId = 'photo-loop-1';
+  app.applyLocalDay(p);
+  app.enqueue('saveDay', p);
+  await app.drainQueue();
+  assert.strictEqual(app.queue.length, 0, 'the save landed');
+  assert.deepStrictEqual(app.attention, [], 'and was not refused: ' + JSON.stringify(app.attention));
+  // The SHEET holds it, by header name.
+  const log = srv.ss.getSheetByName('DailyLog').getDataRange().getValues();
+  const row = log.slice(1).find(r => r[0] === DAY);
+  assert.strictEqual(row[log[0].indexOf('photo_url')], LINK, 'the sheet stores the link');
+  // A fresh phone booting against that sheet gets it back...
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} });
+  assertPairs('bootstrap.days[]', boot.data.days, CONTRACT['bootstrap.days[]']);
+  const fresh = loadSyncClient();
+  fresh.applyBootstrap(boot.data);
+  fresh.loadBentaForm(DAY);
+  // ...and an ORDINARY re-save keeps it, because the server rebuilds the row
+  // from the payload: a save that omitted it would clear the cell and a
+  // corrected night would quietly stop pointing at its paper.
+  assert.strictEqual(fresh.bentaPayload().photoUrl, LINK,
+    'a re-save must carry the link the sheet already holds');
+});
+
+// --- THE PREFILL -----------------------------------------------------------
+
+test('THE PREFILL: the reading fills the form and the money is the money the sheet stores', () => {
+  const app = paperApp(DAY);
+  const rd = app.normReading(RD.reading, DAY);
+  app.applyReadingToForm(rd);
+  const b = app.benta;
+  const box4 = b.rows.find(r => r.sku === 'box4');
+  assert.strictEqual(box4.sod, 31, 'the saved day\'s own 10 must be REPLACED by what the paper says');
+  assert.strictEqual(box4.eod, 28);
+  assert.strictEqual(box4.cheese, 1);
+  assert.strictEqual(b.fromPaper, true, 'the form says out loud where these came from');
+  assert.strictEqual(b.dirty, true, 'and it is unsaved work, so a date change asks before losing it');
+  assert.strictEqual(b.photoUrl, rd.photo_url, 'the night can point at its paper once it is saved');
+  // The wage, the staff, the note and the stock the page never carried are LEFT
+  // ALONE — a reading fills the page, it does not blank the rest of the night.
+  assert.strictEqual(b.salary, 200);
+  assert.strictEqual(b.staff, 'Mama');
+  assert.strictEqual(b.notes, 'party tray', 'the day\'s own note is Mama\'s sentence, not the model\'s');
+
+  // The figures, through the REAL payload and the REAL computeDay.
+  const p = app.bentaPayload();
+  assert.deepStrictEqual(
+    p.counts.find(c => c.sku === 'box4'),
+    { sku: 'box4', sod: 31, eod: 28, cheeseQty: 1, gcashQty: 0, gcashCheeseQty: 0,
+      price: 50, cheesePrice: 60, inCutoff: true });
+  const c = app.computeDay(p);
+  assert.strictEqual(c.total, PAPER_TOTAL);
+  assert.strictEqual(c.gcash, PAPER_GCASH);
+  assert.strictEqual(c.cash, PAPER_CASH);
+  assert.strictEqual(c.excluded, PAPER_EXCL, 'nori\'s money sits BESIDE the day, in the tin');
+
+  // ...and the SERVER, recomputing from the same payload, agrees to the peso.
+  const srv = loadServer();
+  p.entryId = 'paper-prefill-1';
+  const saved = post(srv.ctx, { token: srv.token, action: 'saveDay', payload: p });
+  assert.strictEqual(saved.ok, true, saved.error);
+  assert.strictEqual(saved.data.total, PAPER_TOTAL, 'the phone and the sheet read one night');
+  assert.strictEqual(saved.data.gcash, PAPER_GCASH);
+  assert.strictEqual(saved.data.excluded_total, PAPER_EXCL);
+  assert.strictEqual(saved.data.photo_url, rd.photo_url, 'and the paper is on the row');
+});
+
+test('THE MAPPING: a cheese box paid by GCash counts in cheese AND in GCash cheese', () => {
+  // The prompt tells the model exactly that, so `cheese` is ALL the cheese on
+  // the row however it was paid. The sheet's four buckets are exclusive, so the
+  // phone has to subtract — and the review card then reads the form's own two
+  // questions back out.
+  const t = readVia({ counts: [
+    { sku: 'box4', sod: 20, eod: 10, cheese: 4, gcash: 3, gcash_cheese: 1, confidence: 0.9 }
+  ], custom_amount: 0, custom_gcash: 0, total_on_paper: 0, notes: '', unread: [] });
+  const app = t.app, rd = t.reading;
+  app.applyReadingToForm(rd);
+  const row = app.benta.rows.find(r => r.sku === 'box4');
+  assert.strictEqual(row.gcashCheese, 1, 'gcashCheese = gcash_cheese');
+  assert.strictEqual(row.cheese, 3, 'cheese = cheese - gcash_cheese (the cheese paid in CASH)');
+  assert.strictEqual(row.gcash, 3, 'gcash = gcash (plain boxes paid by GCash)');
+  // The form's own two questions come straight back out of those buckets.
+  const f = app.paperFormFigures(rd.counts[0]);
+  assert.strictEqual(f.cheeseAll, 4, '"How many were cheese?" — all of them, however paid');
+  assert.strictEqual(f.gcashAll, 4, '"Sold with GCash" — 3 plain + 1 cheese');
+  assert.strictEqual(f.gcashOfCheese, 1);
+  assert.strictEqual(f.sold, 10);
+  assert.strictEqual(app.uiVal(row, 'C'), 4, 'and the screen shows the same four');
+  assert.strictEqual(app.uiVal(row, 'G'), 4);
+
+  // What this mapping CANNOT get wrong is the figure the cross-check tests: a
+  // misread of WHICH cheese box was paid how moves money between Cash and
+  // GCash and never changes the Total. That is why an agreeing total is still
+  // evidence, and why the split is printed for the eye instead.
+  const before = app.computeDay(app.bentaPayload());
+  const shifted = readVia({ counts: [
+    { sku: 'box4', sod: 20, eod: 10, cheese: 4, gcash: 2, gcash_cheese: 2, confidence: 0.9 }
+  ], custom_amount: 0, custom_gcash: 0, total_on_paper: 0, notes: '', unread: [] }).reading;
+  app.applyReadingToForm(shifted);
+  const after = app.computeDay(app.bentaPayload());
+  assert.strictEqual(after.total, before.total, 'the TOTAL cannot move on the payment split');
+  assert.notStrictEqual(after.cash, before.cash, 'but the Cash/GCash split does — so it is shown');
+});
+
+// --- THE CROSS-CHECK -------------------------------------------------------
+
+test('THE CROSS-CHECK agrees: the paper\'s own total and the form\'s, in one sentence', () => {
+  const app = showing(readVia(PAPER_READ)).app;
+  const cx = app.paperCross();
+  assert.strictEqual(cx.state, 'agree');
+  assert.strictEqual(cx.said, 'The paper says ₱2,365 and so does this — good.');
+  // The card carries it, escaped, and says nothing about a gap.
+  const h = app.paperCrossHTML({});
+  assert.ok(h.indexOf('₱2,365 and so does this') > -1, h);
+  assert.ok(h.indexOf('short') < 0 && h.indexOf('too much') < 0, h);
+});
+
+test('THE CROSS-CHECK names the gap IN PESOS and points at the rows it was least sure of', () => {
+  // The owner's own crossed-out figure: the page's standing total is 2,605.
+  const raw = paperWith({ total_on_paper: 2605 });
+  raw.counts.find(c => c.sku === 'box10').confidence = 0.6;
+  const app = showing(readVia(raw)).app;
+  const cx = app.paperCross();
+  assert.strictEqual(cx.state, 'differ');
+  assert.ok(cx.said.indexOf('The paper says ₱2,605 but these figures add up to ₱2,365') === 0, cx.said);
+  assert.ok(cx.said.indexOf('₱240 short') > -1, 'the gap is named IN PESOS: ' + cx.said);
+  assert.ok(cx.said.indexOf('Look at Box 10 first') > -1,
+    'and points at the row it was least sure of: ' + cx.said);
+  assert.ok(cx.said.indexOf('Nothing is saved yet') > -1,
+    'a mismatch INFORMS, it never blocks: ' + cx.said);
+  // The other direction reads the other way round, in the same shape.
+  const app2 = showing(readVia(paperWith({ total_on_paper: 2000 }))).app;
+  assert.ok(app2.paperCross().said.indexOf('₱365 too much') > -1, app2.paperCross().said);
+});
+
+test('money kept OUT of the cutoff is not a mismatch — the paper counts the tin', () => {
+  // Nori's ₱50 sits in the same tin and is very likely inside the page's own
+  // total, while it is deliberately outside the day's Total here. When THAT is
+  // the whole difference, the two DO agree, and crying mismatch would be a
+  // false alarm on an ordinary night.
+  const app = showing(readVia(paperWith({ total_on_paper: PAPER_TOTAL + PAPER_EXCL }))).app;
+  const cx = app.paperCross();
+  assert.strictEqual(cx.state, 'agree', cx.said);
+  assert.ok(cx.said.indexOf('₱50 that is kept out of the cutoff') > -1, cx.said);
+});
+
+test('no total on the paper claims nothing — it says there is nothing to check against', () => {
+  const raw = paperWith({});
+  delete raw.total_on_paper;
+  const t = showing(readVia(raw));
+  const app = t.app, rd = t.reading;
+  assert.strictEqual(rd.total_on_paper, '', 'unread, so BLANK');
+  assert.ok(rd.unread.some(u => /total/i.test(u)), 'and named: ' + JSON.stringify(rd.unread));
+  const cx = app.paperCross();
+  assert.strictEqual(cx.state, 'unknown');
+  assert.ok(cx.said.indexOf('nothing to check these figures against') > -1, cx.said);
+  // A reading belongs to ONE night. Moving the form elsewhere puts it away
+  // rather than letting it describe figures it never read.
+  app.loadBentaForm(ymdDaysAgo(1));
+  assert.strictEqual(app.paperCross(), null, 'no cross-check for a night it never saw');
+});
+
+// --- BLANK IS NOT ZERO -----------------------------------------------------
+
+test('BLANK STAYS BLANK: a figure the paper did not give is EMPTY on the form, never 0', () => {
+  // "one cheese, could not tell how it was paid", and no end count at all. The
+  // OMITTED field is how the schema lets the model say "I could not read this".
+  const t = readVia({ counts: [
+    { sku: 'box4', sod: 31, cheese: 1, gcash: 0, confidence: 0.5 }
+  ], custom_amount: 0, custom_gcash: 0, total_on_paper: 60, notes: '', unread: [] });
+  const app = t.app, rd = t.reading;
+  assert.strictEqual(rd.counts[0].eod, '', 'an unread end count is BLANK');
+  assert.strictEqual(rd.counts[0].gcash_cheese, '', 'and so is an unread overlap');
+  assert.ok(rd.unread.some(u => u.indexOf('Box 4') === 0),
+    'every blank is NAMED, in the owner\'s words: ' + JSON.stringify(rd.unread));
+  app.applyReadingToForm(rd);
+  const row = app.benta.rows.find(r => r.sku === 'box4');
+  assert.strictEqual(row.eod, '', 'the form holds the blank, not a 0');
+  assert.strictEqual(row.gcashCheese, '');
+  assert.strictEqual(row.cheese, 1,
+    'the one cheese it DID read stands; the subtraction treats the unread overlap as none');
+  // What the SCREEN shows: empty boxes, and no invented "Sold".
+  assert.strictEqual(app.stepVal(row.eod), '', 'a blank box shows blank');
+  assert.strictEqual(app.stepVal(row.sod), 31, 'a read figure shows itself');
+  assert.strictEqual(app.soldVal(row), '', '"31 in, end of day unread" is NOT 31 sold');
+  assert.strictEqual(app.uiVal(row, 'GC'), '', 'and neither is the unread overlap a 0');
+  assert.strictEqual(app.uiVal(row, 'C'), 1,
+    'a SUM may only read blank when every bucket behind it does');
+  // A ZERO it really read is a zero, and is not reported as unread.
+  assert.strictEqual(rd.counts[0].gcash, 0);
+  assert.ok(rd.unread.indexOf('Box 4 paid by GCash') < 0,
+    'a real 0 must never be listed as unread: ' + JSON.stringify(rd.unread));
+  assert.ok(rd.unread.indexOf('Box 4 with cheese and paid by GCash') > -1,
+    'while the one it truly could not see IS listed: ' + JSON.stringify(rd.unread));
+  // The review card says so out loud, and prints "not read" rather than a 0.
+  const card = app.paperReviewHTML(rd);
+  assert.ok(card.indexOf('not read') > -1, card.slice(0, 400));
+  assert.ok(card.indexOf('Every one of these is EMPTY on the form, not 0') > -1);
+});
+
+test('a start count with no end count is called out — the total prices the whole shelf as sold', () => {
+  // The one blank that INVENTS money: every figure the app sums reads a blank
+  // as 0, so a row with 31 in and nothing at the end reads as 31 sold while the
+  // total above it looks perfectly ordinary.
+  const app = showing(readVia({ counts: [
+    { sku: 'box4', sod: 31, cheese: 0, gcash: 0, gcash_cheese: 0, confidence: 0.5 }
+  ], custom_amount: 0, custom_gcash: 0, total_on_paper: 150, notes: '', unread: [] })).app;
+  const h = app.paperCrossHTML({});
+  assert.ok(h.indexOf('The end count is still empty on <b>Box 4</b>') > -1, h);
+  assert.ok(h.indexOf('count every one of those boxes as sold') > -1, h);
+  // Filled in, it settles — the sentence is read off the FORM, not the reading.
+  app.benta.rows.find(r => r.sku === 'box4').eod = 28;
+  assert.ok(app.paperCrossHTML({}).indexOf('The end count is still empty') < 0,
+    'a gap he has just closed must stop saying it is open');
+});
+
+// --- NOTHING AUTO-SAVES ----------------------------------------------------
+
+atest('NOTHING AUTO-SAVES: a whole reading queues nothing and writes no day', async () => {
+  const srv = loadServer();
+  const app = paperApp(DAY);
+  app.cfg.token = srv.token;
+  const logBefore = JSON.stringify(srv.ss.getSheetByName('DailyLog').getDataRange().getValues());
+  const daysBefore = JSON.stringify(app.state.days);
+  // Both doors are watched: the tracker's api() and the reader's own.
+  const seen = [];
+  app.hooks.fetch = (url, opts) => {
+    seen.push({ url: String(url), body: JSON.parse(opts.body) });
+    if (String(url).indexOf('vision') > -1) {
+      const ctx = loadVisionSeam();
+      ctx.UrlFetchApp._reply(200, geminiSaid(PAPER_READ));
+      return Promise.resolve({ ok: true, text: async () =>
+        ctx.doPost({ postData: { contents: opts.body } }).getContent() });
+    }
+    return Promise.resolve({ ok: true, text: async () =>
+      srv.ctx.doPost({ postData: { contents: opts.body } }).getContent() });
+  };
+  await app.paperTake({ size: 900000, name: 'paper.jpg' });
+
+  assert.strictEqual(app.paperErr, '', 'the reading worked: ' + app.paperErr);
+  assert.strictEqual(app.paperShowingFor(DAY), true, 'and it is on screen');
+  assert.strictEqual(app.benta.rows.find(r => r.sku === 'box4').sod, 31, 'the form was filled');
+  // ONE request left this phone, and it was the reader's.
+  assert.strictEqual(seen.length, 1, 'the reading path made ' + seen.length + ' requests');
+  assert.strictEqual(seen[0].url, 'https://vision.example/exec');
+  assert.strictEqual(seen[0].body.action, 'readSheet');
+  assert.strictEqual(seen[0].body.token, SEAM_TOK, 'its OWN token, never the sheet\'s');
+  assert.notStrictEqual(seen[0].body.token, srv.token, 'two doors, two keys');
+  // Nothing queued, nothing stored, not a cell of the sheet moved.
+  assert.strictEqual(app.queue.length, 0, 'a reading must never queue a saveDay');
+  assert.strictEqual(JSON.stringify(app.state.days), daysBefore,
+    'the reading wrote a day into local state — it must only touch the FORM');
+  assert.strictEqual(JSON.stringify(srv.ss.getSheetByName('DailyLog').getDataRange().getValues()),
+    logBefore, 'the sheet must be byte-identical after a reading');
+  // The night is committed by the ORDINARY Save day, and only then.
+  const p = app.bentaPayload();
+  p.entryId = 'paper-then-save';
+  app.applyLocalDay(p);
+  app.enqueue('saveDay', p);
+  await app.drainQueue();
+  assert.strictEqual(app.state.days[DAY].total, PAPER_TOTAL, 'and then it lands, as it always did');
+});
+
+test('SOURCE PIN: the photo-reader module cannot save, queue or persist anything', () => {
+  // The whole feature is one slab of the shipped file, so this is checkable at
+  // the source: if a later edit ever reaches for the queue from inside the
+  // reading path, this goes red before it can auto-save a night.
+  const paperSrc = S_PAPER;
+  for (const forbidden of ['enqueue(', 'saveBenta(', 'persistState(', 'persistQueue(',
+    'drainQueue(', 'doBootstrap(', 'applyLocalDay(', 'applyServerDay(']) {
+    assert.ok(paperSrc.indexOf(forbidden) < 0,
+      'the reading path must never call ' + forbidden + ' — nothing about this feature may save a day');
+  }
+  // bentaPayload IS called — once, by the cross-check, to price the form the way
+  // the receipt prices it. Reading the payload is not sending it, and this is
+  // the only place the module touches it.
+  assert.strictEqual((paperSrc.match(/bentaPayload\(\)/g) || []).length, 1,
+    'the cross-check reads the payload to compare; nothing here may send one');
+  assert.ok(/const c = computeDay\(bentaPayload\(\)\);/.test(paperSrc),
+    'and that one place is the comparison itself');
+  // It reaches the wire through its OWN door, with its own URL and its own
+  // token, and never through api() (which carries the sheet's).
+  assert.ok(/config\.visionUrl/.test(paperSrc) && /config\.visionToken/.test(paperSrc));
+  assert.ok(!/config\.apiUrl/.test(paperSrc) && !/config\.token\b/.test(paperSrc),
+    'the photo reader must never read the sheet\'s URL or the sheet\'s token');
+  // ONE call to the wire in the whole module, and it goes to the reader's own
+  // URL. Pinned as the CALL rather than the word, because the module's comments
+  // name api() deliberately (to explain that it shares its transport and
+  // nothing else).
+  const wire = paperSrc.match(/fetch\([^,)]*/g) || [];
+  assert.deepStrictEqual(wire, ['fetch(config.visionUrl'],
+    'the photo reader must reach the wire exactly once, through its own URL');
+  // The reading writes `benta` and the paper card, and nothing else.
+  assert.ok(/benta\.fromPaper = true;/.test(paperSrc), 'the form must SAY where the figures came from');
+  // The ordinary save is what clears the marker — pinned at the save itself,
+  // which is outside this slab.
+  const save = slab('function saveBenta(){', 'function prefersReduced(){');
+  assert.ok(/paperClear\(p\.date\);/.test(save) && /benta\.fromPaper = false;/.test(save),
+    'Save day is what stops the form saying "nothing has been saved"');
+});
+
+// --- UNTRUSTED TEXT --------------------------------------------------------
+
+test('everything the model says is escaped exactly once on its way to the screen', () => {
+  const t = readVia({
+    counts: [{ sku: 'box4', sod: 3, eod: 1, cheese: 0, gcash: 0, gcash_cheese: 0, confidence: 0.9 }],
+    custom_amount: 0, custom_gcash: 0, total_on_paper: 100,
+    notes: 'a smudge <script>alert("x")</script> & a blot',
+    unread: ['<img src=x onerror="alert(1)"> the corner']
+  });
+  const app = t.app, rd = t.reading;
+  const h = app.paperReviewHTML(rd);
+  assert.ok(h.indexOf('<script>') < 0, 'model prose must never reach the DOM as markup');
+  assert.ok(h.indexOf('<img') < 0, 'nor an unread line');
+  assert.ok(h.indexOf('&lt;script&gt;') > -1, 'escaped exactly once (not &amp;lt;)');
+  assert.ok(h.indexOf('&amp;lt;') < 0, 'and not twice');
+  assert.ok(h.indexOf('&amp; a blot') > -1, 'the ampersand too');
+  // A "link" that is not an http(s) address never becomes an href.
+  const bad = app.normReading({ counts: [], total_on_paper: 0,
+    photo_url: 'javascript:alert(1)' }, DAY);
+  assert.strictEqual(bad.photo_url, '');
+  assert.ok(app.paperReviewHTML(bad).indexOf('javascript:') < 0,
+    'a non-link must never be offered as one');
+  // Sheet data lands in the same markup (the product labels), escaped too.
+  const t2 = readVia({ counts: [{ sku: 'box4', sod: 3 }], custom_amount: 0,
+    custom_gcash: 0, total_on_paper: 0, notes: '', unread: [] });
+  t2.app.state.prices.find(p => p.sku === 'box4').label = 'Box <4> & "cheese"';
+  const h2 = t2.app.paperReviewHTML(t2.app.normReading(t2.data, DAY));
+  assert.ok(h2.indexOf('Box &lt;4&gt; &amp; &quot;cheese&quot;') > -1, h2.slice(0, 600));
+  assert.ok(h2.indexOf('<4>') < 0);
+});
+
+// --- ABSENT, RATHER THAN PRESENT AND BROKEN --------------------------------
+
+test('no photo reader configured = no button anywhere, and no request possible', () => {
+  const app = paperApp(DAY);
+  app.cfg.visionUrl = '';
+  app.cfg.visionToken = '';
+  assert.strictEqual(app.visionReady(), false);
+  assert.strictEqual(app.paperCardHTML(), '',
+    'the feature is ABSENT on a phone that has not been given it, not present and broken');
+  // Half of it is still nothing: a URL with no token is a button that can only
+  // ever be refused, and a dead button is worse than an absent one.
+  app.cfg.visionUrl = 'https://vision.example/exec';
+  assert.strictEqual(app.visionReady(), false);
+  assert.strictEqual(app.paperCardHTML(), '');
+  app.cfg.visionToken = SEAM_TOK;
+  assert.ok(app.paperCardHTML().indexOf('data-act="paper-shoot"') > -1,
+    'and it appears the moment BOTH halves are there');
+  // A closed day has no page of figures to read.
+  app.benta.closed = true;
+  assert.strictEqual(app.paperCardHTML(), '');
+  // SOURCE PIN: the button is both OFFERED and HANDLED, and the card is wired
+  // into the Sales screen at all (both are DOM-bound, so they are pinned here).
+  assert.ok(/if \(!visionReady\(\) \|\| !isObj\(benta\)\) return '';/.test(S_PAPER),
+    'paperCardHTML must return nothing at all when the reader is not set up');
+  for (const act of ['paper-shoot', 'paper-hide', 'vision-test']) {
+    assert.ok(HTML.indexOf('data-act="' + act + '"') > -1, act + ' is never offered');
+    assert.ok(HTML.indexOf("act === '" + act + "'") > -1, act + ' is offered but not handled');
+  }
+  const render = slab('function renderBenta(){', 'const CHEV =');
+  assert.ok(/h \+= paperCardHTML\(\);/.test(render), 'the card must be on the Sales screen');
+  assert.ok(/try\{ h \+= paperCardHTML\(\); \}catch/.test(render),
+    'and guarded, so a reading can never take the night-entry screen down');
+});
+
+test('an offline phone says so BEFORE the camera opens, and spends no photograph', () => {
+  // A photograph taken for nothing costs her a second trip to the paper, so
+  // both refusals happen before the camera is ever asked for.
+  const app = paperApp(DAY);
+  app.hooks.fetch = () => { throw new Error('the wire must not be touched'); };
+  const el = { value: 'x', clicked: 0, click(){ this.clicked++; } };
+  app.hooks.els.paperShot = el;
+  app.nav.onLine = false;
+  app.paperShoot();
+  assert.strictEqual(el.clicked, 0, 'the camera must not open with no signal');
+  assert.ok(/no internet just now/.test(app.paperErr), app.paperErr);
+  assert.ok(/type the night in by hand/.test(app.paperErr), app.paperErr);
+  assert.deepStrictEqual(app.hooks.confirms, [], 'and nothing was asked before it');
+  // Set up but not configured refuses in its own words, equally early.
+  app.nav.onLine = true;
+  app.cfg.visionToken = '';
+  app.paperShoot();
+  assert.strictEqual(el.clicked, 0);
+  assert.ok(/not set up on this phone/.test(app.paperErr), app.paperErr);
+  // Configured and online, it asks ONCE before replacing figures already on the
+  // form, and only then opens the camera.
+  app.cfg.visionToken = SEAM_TOK;
+  app.paperShoot();
+  assert.strictEqual(app.hooks.confirms.length, 1, 'one question, and only when there is something to lose');
+  assert.ok(/replace the figures now on the form/.test(app.hooks.confirms[0]));
+  assert.strictEqual(el.clicked, 1, 'and then the camera opens');
+  assert.strictEqual(el.value, '', 'cleared FIRST, or the same picture cannot be chosen twice');
+});
+
+// --- THE SIZE CAP ----------------------------------------------------------
+
+atest('the phone never sends a photo the reader would refuse for its size', async () => {
+  const app = paperApp(DAY);
+  // A 12-megapixel original. The ladder cuts quality before size and stops at
+  // the first pass that fits, so the bytes SENT are under the reader's own cap —
+  // which is proved by handing them to the real Vision.gs.
+  app.hooks.bitmap = () => ({ width: 4032, height: 3024, close(){} });
+  let sentBody = null;
+  app.hooks.fetch = (url, opts) => {
+    sentBody = JSON.parse(opts.body);
+    const ctx = loadVisionSeam();
+    ctx.UrlFetchApp._reply(200, geminiSaid(PAPER_READ));
+    return Promise.resolve({ ok: true, text: async () =>
+      ctx.doPost({ postData: { contents: opts.body } }).getContent() });
+  };
+  await app.paperTake({ size: 7 * 1024 * 1024, name: 'IMG_0001.HEIC' });
+  assert.strictEqual(app.paperErr, '', app.paperErr);
+  const b64 = sentBody.payload.imageBase64;
+  assert.ok(app.b64Bytes(b64) <= 4 * 1024 * 1024,
+    'the phone sent ' + app.b64Bytes(b64) + ' bytes, over the reader\'s 4 MB cap');
+  assert.strictEqual(sentBody.payload.mimeType, 'image/jpeg',
+    'whatever the camera wrote, it leaves this phone re-encoded');
+  // The ladder was walked, not jumped: the first attempt was the best quality.
+  assert.ok(app.hooks.encodes.length >= 1);
+  assert.strictEqual(app.hooks.encodes[0].q, 0.8);
+  assert.ok(app.hooks.encodes[0].w <= 1600 && app.hooks.encodes[0].h <= 1600,
+    'the long edge is brought down to 1600 before anything is sent');
+  // And a picture that will not fit even at the bottom of the ladder is refused
+  // HERE, in one plain sentence, rather than sent to be refused there.
+  const app2 = paperApp(DAY);
+  app2.hooks.jpegChars = () => 9 * 1024 * 1024;
+  app2.hooks.fetch = () => { throw new Error('nothing may be sent'); };
+  await app2.paperTake({ size: 20 * 1024 * 1024, name: 'huge.jpg' });
+  assert.ok(/too big to send even after shrinking/.test(app2.paperErr), app2.paperErr);
+  assert.ok(/type the night in by hand/.test(app2.paperErr),
+    'and every refusal says the way through is always still there');
+});
+
+atest('the reader\'s own refusals reach the screen as themselves, and fill nothing in', async () => {
+  const app = paperApp(DAY);
+  const before = JSON.stringify(app.benta.rows);
+  app.hooks.fetch = (url, opts) => {
+    const ctx = loadVisionSeam();
+    ctx.UrlFetchApp._reply(429, { error: { message: 'Quota exceeded for requests' } });
+    return Promise.resolve({ ok: true, text: async () =>
+      ctx.doPost({ postData: { contents: opts.body } }).getContent() });
+  };
+  await app.paperTake({ size: 800000, name: 'paper.jpg' });
+  assert.ok(/no quota left right now/.test(app.paperErr), app.paperErr);
+  assert.ok(/type the night in by hand/.test(app.paperErr), app.paperErr);
+  assert.ok(app.paperErr.indexOf(SEAM_KEY) < 0, 'and never carries the key out');
+  assert.strictEqual(app.paper, null, 'nothing is shown');
+  assert.strictEqual(JSON.stringify(app.benta.rows), before,
+    'and not one figure on the form was touched');
+  assert.strictEqual(app.queue.length, 0);
+});
+
 
 // ---------------------------------------------------------------------------
 // The async race tests run through the REAL drainQueue/doBootstrap promises,

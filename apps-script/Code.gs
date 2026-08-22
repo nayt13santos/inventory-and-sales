@@ -344,7 +344,15 @@ var SCHEMA = [
   // reads 0 (no cash was converted on a day saved before the column existed).
   // lid_boxes was appended in v2.7.0: a plain count with NO money, NO stock
   // tracking and NO note impact anywhere. Blank reads 0.
-  { name: TAB.DAILY_LOG, headers: ['date', 'closed', 'staff', 'gcash', 'total', 'cash', 'custom_amount', 'notes', 'entry_id', 'updated_at', 'custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes'], textCols: ['date', 'updated_at'] },
+  // photo_url was appended in v2.9.0: a link to the PHOTOGRAPH of the paper this
+  // night was read from ("Read it from the paper"). A STRING and nothing more —
+  // it moves no figure, reaches no cutoff, no note and no costing line, and this
+  // project gains NO permission to fetch or store it: the photo is kept by the
+  // separate Octogo Vision project (apps-script/Vision.gs), which hands the
+  // phone a URL, and the phone passes that URL through on the ordinary saveDay.
+  // Blank is the normal state (a night typed in by hand has no photo, and every
+  // row written before this column existed has none either).
+  { name: TAB.DAILY_LOG, headers: ['date', 'closed', 'staff', 'gcash', 'total', 'cash', 'custom_amount', 'notes', 'entry_id', 'updated_at', 'custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes', 'photo_url'], textCols: ['date', 'updated_at', 'photo_url'] },
   // gcash_qty / gcash_cheese_qty / gcash_amount were appended in v2.1.0.
   // in_cutoff was appended in v2.4.1: the SNAPSHOT of the sku's flag as it stood
   // when the day was saved, so flipping "counts in the cutoff" later can never
@@ -702,6 +710,14 @@ function apiSaveDay(ss, settings, payload) {
   // more. Absent means 0, like the other money on an old phone's payload.
   var lidBoxes = closed ? 0 : intOrThrow(payload.lidBoxes, 'Lid boxes used');
   if (lidBoxes < 0) throw new Error('Lid boxes used cannot be negative.');
+  // --- The photo of the paper this night was read from (v2.9.0). A LINK, kept
+  // beside the night purely so the figures can be checked against the paper
+  // later; it prices nothing and is read by no total. Absent (every payload
+  // queued before v2.9.0, and every night typed in by hand) means blank — and
+  // because the row is rebuilt by header name, a save that omits it CLEARS any
+  // link already there, deliberately: the reply must describe the payload it
+  // was given rather than half of this save and half of an older one.
+  var photoUrl = photoLinkOrThrow(payload.photoUrl);
   // payload.gcash is DELIBERATELY IGNORED. GCash used to be typed in from the
   // GCash app; it is now computed from the buckets above. A phone that queued
   // a saveDay before this update still carries the old typed `gcash` field —
@@ -1113,7 +1129,8 @@ function apiSaveDay(ss, settings, payload) {
     custom_amount: custom, custom_gcash: customGcash, notes: notes,
     entry_id: entryId, updated_at: stamp, salary: salary,
     excluded_total: excludedTotal,
-    gcash_converted: gcashConverted, lid_boxes: lidBoxes
+    gcash_converted: gcashConverted, lid_boxes: lidBoxes,
+    photo_url: photoUrl
   };
   var logRow = buildRow(log, logWidth, logObj, found > 0 ? padRow(log.values[found - 1], logWidth) : null);
   if (found > 0) {
@@ -1144,6 +1161,10 @@ function apiSaveDay(ss, settings, payload) {
     // money anywhere. Always present (0 when there is none).
     gcash_converted: gcashConverted,
     lid_boxes: lidBoxes,
+    // The link that was stored (v2.9.0), '' when there is none — always present,
+    // so the phone shows what the sheet actually holds instead of assuming its
+    // own payload landed.
+    photo_url: photoUrl,
     // Always present (empty when nothing was dropped) so the client never has
     // to guess whether an older server simply omitted it.
     dropped_skus: droppedSkus,
@@ -2877,6 +2898,9 @@ function readDays(ss, dailySalary) {
       gcash_converted: asNum(cellOf(r, t, 'gcash_converted')),
       // Lid boxes used (v2.7.0): a plain count, no money anywhere. Blank -> 0.
       lid_boxes: asNum(cellOf(r, t, 'lid_boxes')),
+      // The photograph this night was read from (v2.9.0). Blank -> '', which is
+      // the normal state; it is provenance, never a figure.
+      photo_url: asStr(cellOf(r, t, 'photo_url')),
       notes: asStr(cellOf(r, t, 'notes')),
       entry_id: asStr(cellOf(r, t, 'entry_id')),
       updated_at: asStr(cellOf(r, t, 'updated_at'))
@@ -3535,6 +3559,23 @@ function reqEntryDate(v, label) {
   }
   if (s < '2020-01-01') {
     throw new Error('That date (' + s + ') is before 2020, which cannot be right. Check the year.');
+  }
+  return s;
+}
+
+/**
+ * The photo link on a saveDay (v2.9.0), or ''. Blank/absent is the normal case.
+ * A non-blank value must be an ordinary http(s) link: this cell is provenance,
+ * and a "link" that cannot be opened is worse than none at all — it looks like
+ * a night that can be checked against its paper when it cannot. Refused in one
+ * plain sentence, like every other request the server will not take.
+ */
+function photoLinkOrThrow(v) {
+  var s = asStr(v);
+  if (!s) return '';
+  if (!/^https?:\/\/\S+$/.test(s) || s.length > 2000) {
+    throw new Error('The photo link for this day is not a web address the sheet can store, so ' +
+      'the day was not saved. Save the night without the photo and it will be kept as usual.');
   }
   return s;
 }
