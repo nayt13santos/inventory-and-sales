@@ -785,8 +785,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.9.4', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.9.4');
+  assert.strictEqual(g.data.version, '2.9.5', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.9.5');
 });
 
 // ---------------------------------------------------------------------------
@@ -5535,7 +5535,7 @@ test('readSheet: a good photo becomes a reading, and the PHOTO IS KEPT FIRST', (
   assert.strictEqual(d.total_on_paper, 2605);
   assert.deepStrictEqual(d.unread, [], 'a clean page names nothing as unread');
   assert.strictEqual(d.custom_amount, 0);
-  assert.strictEqual(d.model, 'gemini-2.5-flash', 'the reading says which model read it');
+  assert.strictEqual(d.model, 'gemini-3.6-flash', 'the reading says which model read it');
 
   // The photograph, kept before anything else, named by the night on the paper.
   assert.strictEqual(d.photo_saved, true);
@@ -5574,7 +5574,7 @@ test('the request: the model in the URL, muteHttpExceptions on, and THE KEY NOT 
   assert.strictEqual(ctx.UrlFetchApp._requests.length, 1, 'ONE call per photo');
   const req = ctx.UrlFetchApp._last();
   assert.strictEqual(req.url,
-    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent');
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent');
   assert.strictEqual(req.method, 'post');
   assert.strictEqual(req.contentType, 'application/json');
   // Without this a 429 arrives as an Apps Script exception full of engine debris
@@ -5750,6 +5750,82 @@ test('HTTP 429: the quota wall is named as itself, and as temporary', () => {
   assert.strictEqual(ctx.DriveApp._folders.get('Octogo Sales Photos')._files.length, 1);
 });
 
+test('HTTP 404: a RETIRED MODEL is an instruction, not a sentence cut in half (v2.9.5)', () => {
+  // THE REAL ONE, 2026-08-27. His first real photograph of Mama's page came back
+  // refused, and the phone showed Google's sentence chopped at 160 characters —
+  // "...for the latest features and im..." — which is exactly where it named the
+  // replacement. Verbatim body from that failure:
+  const REAL = 'This model models/gemini-2.5-flash is no longer available to new users. ' +
+    'Please update your code to use models/gemini-3.6-flash for the latest features and ' +
+    'improvements. See https://ai.google.dev/gemini-api/docs/changelog for more information.';
+  const ctx = loadVision();
+  // His deployment was still ASKING for 2.5 — that is why the service answered
+  // this. Reproduced exactly, rather than approximated: the suggestion is read
+  // as "the model named here that is not the one we asked for", so the model we
+  // asked for has to be the old one for this to be his failure at all.
+  ctx.MODEL = 'gemini-2.5-flash';
+  ctx.UrlFetchApp._reply(404, { error: { code: 404, message: REAL, status: 'NOT_FOUND' } });
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+
+  assert.strictEqual(r.ok, false);
+  // What Mama needs: nothing was filled in, and the night is still enterable.
+  assert.match(r.error, /no longer offers the model this app asks for/);
+  assert.match(r.error, /typed in by hand/);
+  // What HE needs: the one edit, and the name to type. Read out of the WHOLE
+  // message, not the truncated one.
+  assert.match(r.error, /set MODEL to 'gemini-3\.6-flash'/,
+    'the replacement the service itself suggested must survive into the message');
+  assert.match(r.error, /Octogo Vision project/, 'and where that line lives');
+  // The model we ASKED for is named too, so a stale paste is obvious — this is
+  // the line that tells him the project he deployed is behind the repo.
+  assert.match(r.error, /\(gemini-2\.5-flash\)/);
+  keepsSecrets(r.error);
+  // The photograph is still filed, so tonight can be checked against the paper
+  // by hand — the save happens before the model is ever called.
+  assert.strictEqual(ctx.DriveApp._folders.get('Octogo Sales Photos')._files.length, 1);
+
+  // THE TRUNCATION ITSELF. In his message the replacement happens to sit at
+  // character ~110, inside the 160 the phone shows — so reading the shortened
+  // message would have worked by luck. One longer preamble and it would not.
+  // This is the case that makes reading the WHOLE message load-bearing.
+  const LATE = 'The model you requested has been withdrawn as part of a scheduled deprecation ' +
+    'of older generations, and requests to it will now fail for every project created after ' +
+    'the cutover date. Please update your code to use models/gemini-9-flash instead.';
+  assert.ok(LATE.indexOf('models/') > 160,
+    'precondition: the suggestion must fall PAST the phone-facing cut, or this proves nothing');
+  const ctxLate = loadVision();
+  ctxLate.MODEL = 'gemini-2.5-flash';
+  ctxLate.UrlFetchApp._reply(404, { error: { code: 404, message: LATE } });
+  assert.match(vpost(ctxLate, { token: VISION_TOK, action: 'readSheet', payload: readPayload() }).error,
+    /set MODEL to 'gemini-9-flash'/,
+    'a suggestion past the 160-character cut must still reach him');
+
+  // Order-independence: the suggestion must be found whichever way round the
+  // service words it, because that wording is not ours.
+  const ctx2 = loadVision();
+  ctx2.UrlFetchApp._reply(404, { error: { code: 404,
+    message: 'Use models/gemini-9-flash instead; models/gemini-3.6-flash is retired.' } });
+  assert.match(vpost(ctx2, { token: VISION_TOK, action: 'readSheet', payload: readPayload() }).error,
+    /set MODEL to 'gemini-9-flash'/, 'whichever name is not the one we asked for is the suggestion');
+
+  // A bare 404 with nothing useful in it still says the right KIND of thing,
+  // and does not invent a model name.
+  const ctx3 = loadVision();
+  ctx3.UrlFetchApp._reply(404, { error: { code: 404, message: '' } });
+  const bare = vpost(ctx3, { token: VISION_TOK, action: 'readSheet', payload: readPayload() }).error;
+  assert.match(bare, /no longer offers the model/);
+  assert.match(bare, /the model the service now recommends/);
+  assert.ok(!/set MODEL to '/.test(bare), 'with no suggestion given, none is fabricated');
+
+  // And a 404 that names ONLY the model we asked for suggests nothing either.
+  const ctx4 = loadVision();
+  ctx4.UrlFetchApp._reply(404, { error: { code: 404,
+    message: 'models/gemini-3.6-flash is not found for API version v1beta.' } });
+  assert.ok(!/set MODEL to '/.test(
+    vpost(ctx4, { token: VISION_TOK, action: 'readSheet', payload: readPayload() }).error),
+    'the model we already use is not a suggestion');
+});
+
 test('HTTP 400: says what the service answered, without engine debris', () => {
   const ctx = loadVision();
   ctx.UrlFetchApp._reply(400, { error: { code: 400, message: 'Provided image is not valid' } });
@@ -5874,15 +5950,15 @@ test('an unknown action is refused by name, and doGet answers without a token', 
   assert.strictEqual(r.error, 'Unknown action: "saveDay".',
     'this app cannot save a day, and says so rather than pretending');
   const g = JSON.parse(ctx.doGet({}).getContent());
-  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.9.4' } });
+  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.9.5' } });
 });
 
 test('ping proves the setup WITHOUT spending a unit of quota — even with no key yet', () => {
   const ctx = loadVision({ keepKeyPlaceholder: true });
   const r = vpost(ctx, { token: VISION_TOK, action: 'ping', payload: {} });
   assert.strictEqual(r.ok, true, r.error);
-  assert.strictEqual(r.data.version, '2.9.4', 'the vision project ships with the release it belongs to');
-  assert.strictEqual(r.data.model, 'gemini-2.5-flash');
+  assert.strictEqual(r.data.version, '2.9.5', 'the vision project ships with the release it belongs to');
+  assert.strictEqual(r.data.model, 'gemini-3.6-flash');
   assert.strictEqual(r.data.key_configured, false, 'a yes/no — never the key itself');
   keepsSecrets(JSON.stringify(r));
   assert.strictEqual(ctx.UrlFetchApp._requests.length, 0, 'a ping never calls Gemini');

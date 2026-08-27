@@ -43,7 +43,7 @@
  * ========================================================================== */
 'use strict';
 
-var VERSION = '2.9.4';
+var VERSION = '2.9.5';
 var TZ = 'Asia/Manila';
 
 /** The Gemini API key, from aistudio.google.com. This project's only paid
@@ -67,8 +67,14 @@ var PHOTO_FOLDER = 'Octogo Sales Photos';
 /** The vision model. SWAPPABLE ON PURPOSE: this is the one line to change when
  *  a better or cheaper model appears, or when a quota moves — nothing else in
  *  this file knows the model's name, and the reading shape the phone consumes
- *  does not change with it. */
-var MODEL = 'gemini-2.5-flash';
+ *  does not change with it.
+ *
+ *  CHANGED 2026-08-27 (v2.9.5). The first real photograph came back refused:
+ *  404 "This model models/gemini-2.5-flash is no longer available to new users.
+ *  Please update your code to use models/gemini-3.6-flash". A model retiring is
+ *  not a bug in this app, it is weather — so a 404 now names the replacement the
+ *  service itself suggests, and this line is the only edit it asks for. */
+var MODEL = 'gemini-3.6-flash';
 
 var GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models/';
 
@@ -552,6 +558,19 @@ function httpRefusal_(code, text) {
     return 'The reading service would not accept this project\'s key, so this photo was not read' +
       (detail ? ' (' + detail + ')' : '') + ' — check GEMINI_API_KEY in the Octogo Vision project' + tail;
   }
+  // A RETIRED MODEL (v2.9.5). This is the one 4xx that is nobody's mistake and
+  // is certain to happen again: models are withdrawn on Google's schedule, not
+  // ours. The old generic branch pasted Google's sentence and cut it off at 160
+  // characters — mid-word, right where it named the replacement. Now the fix is
+  // the message. The endpoint carries the model in its URL, so a 404 from here
+  // means the model, whatever else the body says.
+  if (code === 404) {
+    var want = suggestedModel_(rawGeminiMessage_(text));
+    return 'The reading service no longer offers the model this app asks for (' + MODEL +
+      '), so nothing was filled in' + tail +
+      ' To fix it for good: open the Octogo Vision project and set MODEL to ' +
+      (want ? "'" + want + "'" : 'the model the service now recommends') + '.';
+  }
   if (code >= 400 && code < 500) {
     return 'The reading service could not use this photo (it answered ' + code +
       (detail ? ': ' + detail : '') + '), so nothing was filled in' + tail;
@@ -564,6 +583,14 @@ function httpRefusal_(code, text) {
 /** The human-readable part of a Gemini error body, if there is one. Kept short:
  *  a refusal is one sentence, not a stack trace pasted into a phone. */
 function geminiMessage_(text) {
+  var msg = rawGeminiMessage_(text);
+  return msg.length > 160 ? msg.slice(0, 157) + '...' : msg;
+}
+
+/** The same message, WHOLE. Truncation is for the phone screen; anything this
+ *  file needs to read out of the message (the replacement model's name, which
+ *  Google puts near the end of the sentence) must see all of it. */
+function rawGeminiMessage_(text) {
   var msg = '';
   try {
     var o = JSON.parse(text);
@@ -571,8 +598,20 @@ function geminiMessage_(text) {
   } catch (e) {
     msg = '';
   }
-  msg = msg.replace(/\s+/g, ' ').trim();
-  return msg.length > 160 ? msg.slice(0, 157) + '...' : msg;
+  return msg.replace(/\s+/g, ' ').trim();
+}
+
+/** The model the service is pointing us AT, out of a message that names both:
+ *  "This model models/A is no longer available ... use models/B ...". Whichever
+ *  name is not the one we just asked for is the suggestion — order-independent,
+ *  because the wording of that sentence is not ours to rely on. */
+function suggestedModel_(msg) {
+  var found = String(msg === null || msg === undefined ? '' : msg).match(/models\/[A-Za-z0-9._-]+/g) || [];
+  for (var i = 0; i < found.length; i++) {
+    var name = found[i].replace(/^models\//, '');
+    if (name && name !== MODEL) return name;
+  }
+  return '';
 }
 
 /** Never let the key travel back out in a message. Anything this app quotes

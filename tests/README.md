@@ -385,3 +385,15 @@ Suites: **204** (`run-tests.js`) + **211** (`contract.test.js`).
 One existing pin was **narrowed, deliberately**: the test asserting a live cutoff produced no caveats at all was about blank nights, and now says so instead of demanding silence about everything.
 
 Suites: **206** (`run-tests.js`) + **214** (`contract.test.js`).
+
+### v2.9.5 — the model retired
+
+His first real photograph, 2026-08-27. Not a defect in the app: `gemini-2.5-flash` was withdrawn for new keys, and the reader said so. The v2.9.0 guarantees all held — photo filed first, **nothing** filled in, night still enterable.
+
+One test, built from the **verbatim** failure body, covering five cases: the real refusal names the model asked for and the model to type and where to type it; a suggestion falling **past** the 160-character phone cut still reaches him; the suggestion is found whichever way round the service words the sentence; a bare 404 says the right kind of thing without inventing a name; and a 404 naming only the model we already use suggests nothing.
+
+The first cut of this test was **unrealistic and failed for the right reason**: it fed the old-model message while the code already asked for the new one, a state Google would never produce. Fixed by pointing the test's `MODEL` at 2.5 — which is what makes it his failure rather than an approximation of it.
+
+Then one mutant **survived**: reading the *truncated* message instead of the whole one still passed, because in his particular message the replacement sits at character ~110, inside the cut. Working by luck is not working. A case with a longer preamble (asserted to place the suggestion past character 160) now makes reading the whole message load-bearing — and with it, all five mutants are red.
+
+Suites: **207** (`run-tests.js`) + **214** (`contract.test.js`).

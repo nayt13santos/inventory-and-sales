@@ -5451,7 +5451,7 @@ test('the READING is snake_case throughout, and every figure is where the phone 
   assert.strictEqual(d.photo_saved, true);
   assert.ok(/^https?:\/\//.test(d.photo_url), 'a real link, or the phone drops it: ' + d.photo_url);
   assert.strictEqual(d.photo_error, '');
-  assert.strictEqual(d.model, 'gemini-2.5-flash');
+  assert.strictEqual(d.model, 'gemini-3.6-flash');
 });
 
 test('the reading survives the phone\'s own normalizer, and a camelCase reader would not', () => {
