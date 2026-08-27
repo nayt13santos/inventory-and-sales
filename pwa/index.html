@@ -590,7 +590,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.9.7';
+const APP_VERSION = '2.9.8';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -3103,12 +3103,20 @@ function loadBentaForm(date){
     rows.push(rowOf(c.sku, c));
   }
   // Opening = previous close (v2.7.0): a date with NO saved counts pre-fills
-  // each box sku's SOD from that sku's EOD on the latest saved day strictly
-  // before it. A prefill, never a lock — she edits it like anything typed — and
-  // a day that already has saved counts always loads its own figures above.
+  // each sku's SOD from that sku's EOD on the latest saved day strictly before
+  // it. A prefill, never a lock — she edits it like anything typed — and a day
+  // that already has saved counts always loads its own figures above.
+  //
+  // EVERY SKU, not only boxes (v2.9.8). v2.7.0 narrowed this to group=box with
+  // no reason given anywhere, and that left nori — his own line of business, and
+  // the one sku that is always group=simple because an excluded sku must be —
+  // starting at 0 every night. `sold` is sod − eod for EVERY sku, so counting 8
+  // nori left against a start of 0 read as max(0, 0 − 8) = nothing sold: his
+  // nori money vanished quietly, which is the one thing this app exists to stop.
+  // (Owner, 2026-08-27: "Bug in the starting count of nori, doesnt get the count
+  // from the previous day".)
   if (!counts.length){
     for (const r of rows){
-      if (!isBoxSku(r.sku)) continue;
       const prevEod = prevEodFor(r.sku, d);
       if (prevEod !== '') r.sod = prevEod;
     }
@@ -3182,7 +3190,13 @@ function prevEodFor(sku, date){
     for (const r of asArr(byDate[d])){
       if (txt(asObj(r).sku) !== txt(sku)) continue;
       bestDate = d;
-      best = num(asObj(r).eod);
+      // BLANK IS NEVER ZERO (v2.9.8), here as everywhere else. A row whose EOD
+      // was never read says nothing about what was left, so it prefills NOTHING
+      // and she counts it — rather than asserting 0 and making tonight's sold
+      // figure read high. Reaching further back would be worse still: it would
+      // carry a stale figure across a night we know happened. A typed 0 IS an
+      // answer (the tray emptied) and prefills 0.
+      best = isBlankVal(asObj(r).eod) ? '' : num(asObj(r).eod);
       break;
     }
   }

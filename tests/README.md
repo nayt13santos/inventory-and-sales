@@ -417,3 +417,17 @@ Previously **stubbed** in this harness (`function applyUpdateIfSafe(){}`), which
 One mutant survived the first pass: deleting `reloadingForUpdate = true` still passed, because clearing `updateWaiting` masked it. That guard exists for a race the test wasn't modelling — `location.reload()` is asynchronous, so another worker can claim the page before it unloads and set `updateWaiting` again. With that race added, all six mutants are red.
 
 Suites: **207** (`run-tests.js`) + **216** (`contract.test.js`).
+
+### v2.9.8 — the start count carries for every sku, nori included
+
+Owner: *"Bug in the starting count of nori, doesnt get the count from the previous day."*
+
+Reproduced in the browser before touching anything, which located it precisely: `prevEodFor('nori', today)` returned **8** all along, and `if (!isBoxSku(r.sku)) continue;` threw it away. Since the spec requires an excluded sku to be `group=simple`, nori was the one sku the prefill could never carry — and `sold` is `sod − eod` for every sku, so counting 8 left against a start of 0 read as `max(0, 0 − 8)` = **nothing sold**. His own line of business, quietly zeroed.
+
+An existing test pinned the old behaviour — `'a simple sku is not prefilled — boxes only'` — so this release **reverses a pinned decision**. It is recorded as owner-directed: v2.7.0 gave no reason for the narrowing, not in the test and not in SPEC, and the arithmetic contradicts it.
+
+Six cases: the reported carry-over (and that the corrected start is what gets **sent**, not merely shown); reaching back past a night that did not count nori; an unread close inventing nothing and **not** reaching further back; a typed zero carrying as a real answer; a saved day keeping its own figures; and an empty history answering with no figure.
+
+One mutant survived first: restoring `num(eod)` for a blank close still passed, because a fresh row's SOD default is already 0 — so "prefilled 0" and "not prefilled" are indistinguishable through the form. Moved to assert on the lookup, where the distinction actually lives. Six mutants now red, including a reversed date comparison that would take the oldest close instead of the latest.
+
+Suites: **207** (`run-tests.js`) + **217** (`contract.test.js`).

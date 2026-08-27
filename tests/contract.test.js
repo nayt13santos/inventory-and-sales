@@ -4653,6 +4653,80 @@ test('normDay/normCount read the new keys snake-first, legacy camelCase second, 
   assert.strictEqual(app.normCount({ date: V27_DAY, sku: 'box4' }).custom_qty, 0);
 });
 
+test('the START COUNT carries for EVERY sku, nori included (v2.9.8)', () => {
+  // HIS REPORT, 2026-08-27: "Bug in the starting count of nori, doesnt get the
+  // count from the previous day." Reproduced in the browser first: prevEodFor
+  // returned the right figure all along (8), and `if (!isBoxSku(r.sku)) continue`
+  // threw it away. nori is ALWAYS group=simple, because the spec requires an
+  // excluded sku to be — so his own line of business was the one thing the
+  // prefill never carried. With a start of 0, counting 8 left read as
+  // max(0, 0 − 8) = NOTHING SOLD, and the nori money vanished quietly.
+  const app = loadClient();
+  const D_OLD = ymdDaysAgo(5), D_MID = ymdDaysAgo(3), D_LAST = ymdDaysAgo(1), FRESH = ymdDaysAgo(0);
+  app.applyBootstrap(F.boot);
+  const row = sku => app.benta.rows.find(r => r.sku === sku) || {};
+  const counts = (obj) => { for (const k in app.state.counts) delete app.state.counts[k];
+                            Object.assign(app.state.counts, obj); };
+  const c = (sku, sod, eod) => ({ sku, sod, eod, cheese_qty:0, gcash_qty:0,
+                                  gcash_cheese_qty:0, custom_qty:0 });
+
+  // 1. THE REPORTED BUG. Last night closed with 8 nori and 12 box4 on the shelf.
+  counts({ [D_LAST]: [c('box4', 30, 12), c('nori', 20, 8)] });
+  app.loadBentaForm(FRESH);
+  assert.strictEqual(row('nori').sod, 8, 'nori must open at last night\'s close');
+  assert.strictEqual(row('box4').sod, 12, 'and boxes must not have regressed');
+  // The figure this was really about: 8 on the shelf, 8 left, nothing sold —
+  // which is only sayable once the start count is right.
+  row('nori').eod = 8;
+  assert.strictEqual(app.bentaPayload().counts.find(x => x.sku === 'nori').sod, 8,
+    'and the corrected start is what gets SENT, not just shown');
+
+  // 2. It reaches back past a night that did not count nori at all.
+  counts({ [D_OLD]: [c('nori', 10, 6)], [D_LAST]: [c('box4', 30, 9)] });
+  app.loadBentaForm(FRESH);
+  assert.strictEqual(row('nori').sod, 6, 'the latest night that DID count it wins');
+
+  // 3. BLANK IS NEVER ZERO. Last night's nori EOD was never read, so nothing is
+  // known about what was left: prefill NOTHING and let her count it. Asserting 0
+  // would make tonight read high; reaching further back would carry a stale
+  // figure across a night we know happened.
+  counts({ [D_OLD]: [c('nori', 10, 6)], [D_LAST]: [c('nori', 20, '')] });
+  app.loadBentaForm(FRESH);
+  assert.notStrictEqual(row('nori').sod, 6,
+    'an unread close must NOT reach back past the night it belongs to — that figure is stale');
+  // Asserted on the LOOKUP, because through `sod` alone this is invisible: the
+  // fresh-row default is already 0, so "prefilled 0" and "not prefilled" look
+  // identical on the form. The lookup is where the distinction lives.
+  assert.strictEqual(app.prevEodFor('nori', D_LAST < FRESH ? FRESH : FRESH), '',
+    'an unread close is NOT an answer of zero — the lookup must say it has none');
+  // What is left is the form's own default for a fresh row (0), NOT a claim
+  // about last night. Worth stating plainly: a legacy row saved before v2.9.0's
+  // blank-EOD refusal is the only way to reach this, and the honest reading of
+  // it is "nobody knows", which the prefill declines to guess at.
+  const noHistory = (() => { counts({}); app.loadBentaForm(FRESH); return row('nori').sod; })();
+  counts({ [D_OLD]: [c('nori', 10, 6)], [D_LAST]: [c('nori', 20, '')] });
+  app.loadBentaForm(FRESH);
+  assert.strictEqual(row('nori').sod, noHistory,
+    'an unread close leaves the row exactly as if there were no history — it invents nothing');
+
+  // 4. A TYPED ZERO IS AN ANSWER — the tray emptied — and must carry as 0.
+  counts({ [D_LAST]: [c('nori', 20, 0)] });
+  app.loadBentaForm(FRESH);
+  assert.strictEqual(row('nori').sod, 0, 'zero is a real close and carries');
+
+  // 5. A day with its OWN saved counts is never overwritten by a prefill.
+  counts({ [D_MID]: [c('nori', 20, 8)], [D_LAST]: [c('nori', 15, 4)] });
+  app.loadBentaForm(D_LAST);
+  assert.strictEqual(row('nori').sod, 15, 'its own figures, never the night before\'s close');
+
+  // 6. Nothing before it at all: the row keeps the form's default, and no
+  // figure is conjured from an empty history.
+  counts({});
+  app.loadBentaForm(FRESH);
+  assert.strictEqual(app.prevEodFor('nori', FRESH), '',
+    'no history means the lookup itself says so, rather than answering 0');
+});
+
 test('SOD prefill: a fresh date opens at the previous close; a saved day loads its own', () => {
   const srv = loadServer();
   const D1 = ymdDaysAgo(6), D2 = ymdDaysAgo(4), CLOSED = ymdDaysAgo(2), FRESH = ymdDaysAgo(3);
@@ -4679,7 +4753,12 @@ test('SOD prefill: a fresh date opens at the previous close; a saved day loads i
   const row = sku => app.benta.rows.find(r => r.sku === sku);
   assert.strictEqual(row('box4').sod, 2, 'the LATEST prior day (D2) wins, not the older D1');
   assert.strictEqual(row('box6').sod, 5, 'a sku D2 did not count reaches back to D1');
-  assert.strictEqual(row('nori').sod, 0, 'a simple sku is not prefilled — boxes only');
+  // PIN REVERSED (v2.9.8, owner-directed): v2.7.0 narrowed the prefill to
+  // group=box and gave no reason for it anywhere — not here, not in SPEC. nori
+  // is counted in and out exactly like a box, and `sold` is sod − eod for every
+  // sku, so the narrowing simply lost his nori money. It now carries like any
+  // other sku, reaching back to D1 because D2 did not count it.
+  assert.strictEqual(row('nori').sod, 3, 'a SIMPLE sku carries over too (v2.9.8)');
   assert.strictEqual(row('box4').eod, 0, 'only the SOD is prefilled — EOD is tonight\'s count');
   // A prefill, never a lock: it is an ordinary editable figure on the row.
   row('box4').sod = 9;
