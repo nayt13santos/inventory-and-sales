@@ -397,3 +397,13 @@ The first cut of this test was **unrealistic and failed for the right reason**: 
 Then one mutant **survived**: reading the *truncated* message instead of the whole one still passed, because in his particular message the replacement sits at character ~110, inside the cut. Working by luck is not working. A case with a longer preamble (asserted to place the suggestion past character 160) now makes reading the whole message load-bearing — and with it, all five mutants are red.
 
 Suites: **207** (`run-tests.js`) + **214** (`contract.test.js`).
+
+### v2.9.6 — a typed delivery counts
+
+His report: typing into "Stock came in" did nothing; only + counted. **Reproduced in the browser before touching the code** — typed `10`, state stayed `'0'`, then one + gave `'1'` rather than `'11'`, which is the part that could have logged a ten-pack delivery as one.
+
+Not reachable through the test harness (it is a document-level `input` listener, not a lifted function), so it is pinned at the source the way the other dispatch invariants are — but pinned on the things that actually broke: the arrival box carries `data-arr`, it is read **before** `const id = ev.target.id`, the unreachable `id.startsWith('in-arr-')` branch is gone rather than reordered, and the Sales branch requires a `sku` so it can only claim Sales steppers. Three mutants red: the attribute removed, the handling moved back below the id branches, and the Sales branch made greedy again.
+
+Two of my own assertions were wrong first, both for the same reason — the comment I added to explain the bug *quotes the code it describes*, so `indexOf` found the prose and a 500-character window fell short of the branch body. Anchored to `else if (id.startsWith('in-')){` with a window wide enough for the comment.
+
+Suites: **207** (`run-tests.js`) + **215** (`contract.test.js`).

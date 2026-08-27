@@ -5077,6 +5077,55 @@ test('the walk back from ANY cutoff lands on one that has actually run out (v2.9
   assert.deepStrictEqual(walk(old), old, 'a finished cutoff is already the answer');
 });
 
+test('a TYPED delivery counts: "Stock came in" is not shadowed by the Sales steppers (v2.9.6)', () => {
+  // HIS BUG, 2026-08-27: "when I input the number, it doesnt register, the plus
+  // sign must be used in order to count." Reproduced in the browser first, then
+  // pinned here. The cause is dispatch order, not arithmetic: the arrival boxes
+  // are called "in-arr-0", the document-level input listener tests
+  // `id.startsWith('in-')` for the Sales steppers FIRST, and that branch claimed
+  // them and threw the keystroke away — leaving the dedicated `in-arr-` branch
+  // below it unreachable from the day it was written. Worse than "ignored": with
+  // state still 0, one tap of + after typing 10 read 1, so a ten-pack delivery
+  // could be logged as one.
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+
+  // The arrival input must carry its OWN row index, the way the Sales-screen
+  // stock rows already do with data-stk — the pattern that never broke.
+  const arrBox = src.slice(src.indexOf("id=\"in-arr-'"), src.indexOf("id=\"in-arr-'") + 260);
+  assert.match(arrBox, /data-arr="' \+ i \+ '"/,
+    'the arrival box must be addressable without parsing its id');
+
+  // ...and be read by that attribute BEFORE any id is looked at.
+  const listener = src.indexOf("document.addEventListener('input'");
+  assert.ok(listener > 0);
+  const byAttr = src.indexOf('ds.arr != null', listener);
+  const byId = src.indexOf('const id = ev.target.id;', listener);
+  assert.ok(byAttr > 0, 'the arrival rows must be handled by their data attribute');
+  assert.ok(byAttr < byId,
+    'and BEFORE the id branches — after them is exactly where the keystroke was lost');
+
+  // The dead branch must be gone, not merely reordered around.
+  assert.ok(!/id\.startsWith\('in-arr-'\)/.test(src),
+    'the unreachable id-based branch must not linger to look like the handler');
+
+  // And the Sales branch must claim ONLY Sales steppers, so the NEXT id
+  // beginning with "in-" cannot be swallowed the same silent way.
+  // Anchored to the BRANCH, not the first mention of that string — the comment
+  // explaining this bug quotes it too.
+  const at = src.indexOf("else if (id.startsWith('in-')){");
+  assert.ok(at > 0, 'the Sales stepper branch must still exist');
+  const salesBranch = src.slice(at, at + 1200);
+  assert.match(salesBranch, /if \(st && st\.dataset\.sku\)/,
+    'the Sales stepper branch must require a sku, or it swallows other boxes silently');
+
+  // The three families of "in-…" box, each with its own way of being addressed:
+  // one shared prefix is what made this collide in the first place.
+  for (const [label, attr] of [['Sales counts', 'data-sku'], ['Sales stock', 'data-stk'],
+                               ['arrivals', 'data-arr']]) {
+    assert.ok(src.indexOf(attr + '="') > 0, label + ' must carry ' + attr);
+  }
+});
+
 test('SOURCE PIN: the jump is a WALK, not an assumption about the previous cutoff (v2.9.4)', () => {
   const src = fs.readFileSync(INDEX_HTML, 'utf8');
   const at = src.indexOf("act === 'cost-last-done'");

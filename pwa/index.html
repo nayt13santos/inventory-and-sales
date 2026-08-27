@@ -590,7 +590,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.9.5';
+const APP_VERSION = '2.9.6';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -5859,7 +5859,8 @@ function stockOnHandHTML(){
           (s.unit ? '<span class="stk-unit">by the ' + esc(s.unit) + '</span>' : '') + '</div>' +
         '<div class="stepper sm" data-arrstep="' + i + '">' +
           '<button type="button" class="step-btn" data-act="arrive-step" data-dir="-1" aria-label="One less: ' + esc(label) + '">−</button>' +
-          '<input class="step-val" id="in-arr-' + i + '" inputmode="numeric" autocomplete="off" ' +
+          '<input class="step-val" id="in-arr-' + i + '" data-arr="' + i + '" ' +
+            'inputmode="numeric" autocomplete="off" ' +
             'value="' + esc(txt(s.qty)) + '" aria-label="' + esc(label) + '">' +
           '<button type="button" class="step-btn" data-act="arrive-step" data-dir="1" aria-label="One more: ' + esc(label) + '">+</button>' +
         '</div>' +
@@ -7761,6 +7762,19 @@ document.addEventListener('input', (ev) => {
     if (r){ r.qty = ev.target.value; benta.dirty = true; updateStockCard(); validateBentaLive(); }
     return;
   }
+  /* "Stock came in" (v2.9.6). Read HERE, by its own data attribute, for the
+     reason the comment above gives — and because reading it by ID could not
+     work: these boxes are called "in-arr-0", which starts with "in-", so the
+     Sales steppers' `id.startsWith('in-')` branch claimed them first and threw
+     the keystroke away. The dedicated in-arr- branch further down that chain
+     was unreachable from the day it was written, so typing a delivery did
+     nothing at all: 10 packs typed stayed 0, and one tap of + then read 1
+     rather than 11. Only the +/- buttons ever moved the figure. */
+  if (ds.arr != null){
+    const r = asArr(arrival.rows)[num(ds.arr)];
+    if (r) r.qty = ev.target.value;
+    return;
+  }
   // Maintenance fields, all keyed by the row they belong to (sku or product).
   if (ds.mprice != null){ if (maintPrices[ds.mprice]) maintPrices[ds.mprice].price = ev.target.value; return; }
   if (ds.mcheese != null){ if (maintPrices[ds.mcheese]) maintPrices[ds.mcheese].cheesePrice = ev.target.value; return; }
@@ -7789,8 +7803,11 @@ document.addEventListener('input', (ev) => {
     // Take the sku/field from the stepper's data attributes rather than
     // parsing them back out of the id — a sku is sheet data and may contain
     // dashes or other characters that make the id ambiguous.
+    // `data-sku` required: this branch may only claim steppers that ARE Sales
+    // rows. Without that test it swallows any other "in-…" box silently, which
+    // is exactly how "Stock came in" lost every typed figure (v2.9.6).
     const st = ev.target.closest('.stepper');
-    if (st){
+    if (st && st.dataset.sku){
       const sku = st.dataset.sku;
       // A v2.7.0 presentation field writes the buckets through its own map.
       if (UI_FIELDS[st.dataset.field]){
@@ -7813,8 +7830,6 @@ document.addEventListener('input', (ev) => {
     setErr('err-gx-date', ev.target.value ? entryDateError(ev.target.value) : '');
   }
 
-  // More: the "Stock came in" fields (the quantity types like any stepper's box)
-  else if (id.startsWith('in-arr-')){ const r = asArr(arrival.rows)[num(id.slice(7))]; if (r) r.qty = ev.target.value; }
 
   // Cutoff fields. The split's residual follows the field as it is typed; only
   // the four figures it moves are rewritten, so the keyboard stays put.
