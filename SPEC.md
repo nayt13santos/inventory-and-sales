@@ -281,6 +281,14 @@ Dispatch order, not arithmetic. The arrival quantity boxes are `id="in-arr-<i>"`
 
 Three ids share the `in-` prefix and each is now addressed by its own attribute, the way the Sales *stock* rows always were: `data-sku` (sales counts), `data-stk` (sales stock), **`data-arr`** (arrivals). The arrival rows are read from that attribute at the **top** of the listener, before any id is examined, and the dead id branch is deleted rather than reordered. The Sales branch now requires `st.dataset.sku`, so the next box whose id begins with `in-` cannot be swallowed the same silent way.
 
+### v2.9.7 — an unsaved night must not freeze the version
+
+Owner, 2026-08-27, after v2.9.6 went live: *"still .5"*.
+
+`applyUpdateIfSafe` refused **flatly** while `benta.dirty`, and `applyBentaDraft` sets `benta.dirty = true` on **every load** — correctly, because a restored draft genuinely is unsent work. So a phone holding one unsaved night held its update back at every resume, for as long as that night stayed unsaved: stuck on old code indefinitely, with nothing on screen saying so. That is a fault that hides every later fix, which makes it worse than the bugs it hid.
+
+What the gate is actually for is not yanking the screen out from under her fingers, and not losing typing. Neither needs a permanent hold. The draft store round-trips every field on the form — `closed`, `staff`, the custom pair, the conversion and its direction, lids, wage, notes, the photo link, every count row and every stock line — so the update now **stashes the night first and then reloads**, and the restored draft announces itself on screen exactly as it always has. The hold that remains is narrow and honest: `isTypingNow()` (a focused field), a request in flight, or a photograph being read. `reloadingForUpdate` still bounds it to one reload per page load, which matters because `location.reload()` does not stop the world — a second worker can claim the page before it unloads.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.

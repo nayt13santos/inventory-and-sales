@@ -590,7 +590,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.9.6';
+const APP_VERSION = '2.9.7';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -8026,12 +8026,39 @@ let reloadingForUpdate = false;
 // initial claim to skip and the very next change is an update.)
 let sawInitialClaim = !!(navigator.serviceWorker && navigator.serviceWorker.controller);
 
-// Never reload while the day is half-entered or work is still unsent; hold the
-// update until it is safe (after a save, or the next time the app is opened).
+/** Is a field focused right now? Reloading out from under an open keyboard is
+ *  the one thing genuinely worth waiting for — the next resume or the next save
+ *  catches the update a moment later. */
+function isTypingNow(){
+  const el = document.activeElement;
+  if (!el) return false;
+  const tag = String(el.tagName || '').toLowerCase();
+  return tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable === true;
+}
+
+// Never reload while work could be lost; hold the update until it is safe
+// (after a save, or the next time the app is opened).
 function applyUpdateIfSafe(){
   if (!updateWaiting || reloadingForUpdate) return;
-  if (typeof benta === 'object' && benta && benta.dirty) return;      // half-typed day
   if (typeof syncing !== 'undefined' && syncing) return;              // request in flight
+  if (typeof paperBusy !== 'undefined' && paperBusy) return;          // a photo is being read
+  /* A HALF-ENTERED DAY IS NO LONGER A LIFE SENTENCE (v2.9.7).
+     `benta.dirty` was a flat refusal — and a RESTORED DRAFT sets it on every
+     single load, because it genuinely is unsent work. So a phone holding one
+     unsaved night held its update back at every resume, for as long as that
+     night stayed unsaved: stuck on old code indefinitely, with nothing on
+     screen saying so. That is how a phone sat on 2.9.5 while 2.9.6 was live.
+     What this gate is really for is not yanking the screen from under her
+     fingers and not losing typing — neither of which needs a permanent hold.
+     The draft store round-trips every field on the form (closed, staff, the
+     custom pair, the conversion and its direction, lids, wage, notes, the
+     photo link, every row and every stock line), so stashing first makes the
+     reload lossless, and the restored draft says so on screen as it always
+     has. */
+  if (typeof benta === 'object' && benta && benta.dirty){
+    if (isTypingNow()) return;
+    if (typeof stashBentaDraft === 'function') stashBentaDraft();
+  }
   // NOT blocked by a non-empty queue: queued mutations live in localStorage and
   // replay after the reload. Blocking on them would strand the app on an old
   // version forever in demo mode, or whenever the server is unreachable.

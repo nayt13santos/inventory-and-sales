@@ -3471,6 +3471,8 @@ const S_ARRFNS   = slab('function arriveStep(i, dir){', 'let maintOpen = false;'
 //               builder that turns model text into markup.
 const S_SKULIST  = slab('function bentaSkuList(){', '// Plain-English breakdown of one sku row:');
 const S_LISTPHR  = slab('function listPhrase(names){', 'function applyDroppedSkus(p, skus){');
+// The update gate (v2.9.7): when a downloaded version is allowed to take over.
+const S_UPDATE   = slab('let updateWaiting = false;', "if ('serviceWorker' in navigator){");
 const S_PAPER    = slab('function visionReady(){ return !!(txt(config.visionUrl)',
   '/* ============================================================ ' +
   'Event wiring — delegated clicks/inputs per panel + globals');
@@ -3611,6 +3613,33 @@ return {
   get paperErr(){ return paperErr; },
   get paperBusy(){ return paperBusy; },
   num, fmt, peso, esc, skuLabel
+};`;
+  // eslint-disable-next-line no-new-func
+  return new Function(src)();
+}
+
+/** The REAL update gate, with the small world it touches faked around it, so
+ *  "does a half-entered night keep this phone on old code forever" is a
+ *  question the suite can actually answer. */
+function loadUpdateGate(world) {
+  const src = `
+'use strict';
+const log = { reloads: 0, stashes: 0 };
+let benta = ${JSON.stringify(world.benta || null)};
+let syncing = ${world.syncing ? 'true' : 'false'};
+let paperBusy = ${JSON.stringify(world.paperBusy || '')};
+const focused = ${JSON.stringify(world.focusedTag || '')};
+const document = {
+  activeElement: focused ? { tagName: focused, isContentEditable: false } : null
+};
+const location = { reload(){ log.reloads++; } };
+function stashBentaDraft(){ log.stashes++; }
+${S_UPDATE}
+return {
+  log, applyUpdateIfSafe, isTypingNow,
+  get updateWaiting(){ return updateWaiting; },
+  set updateWaiting(v){ updateWaiting = v; },
+  get benta(){ return benta; }
 };`;
   // eslint-disable-next-line no-new-func
   return new Function(src)();
@@ -5075,6 +5104,72 @@ test('the walk back from ANY cutoff lands on one that has actually run out (v2.9
   // Already looking at a finished cutoff: the walk must not move at all.
   const old = { start: '2026-07-01', end: '2026-07-15' };
   assert.deepStrictEqual(walk(old), old, 'a finished cutoff is already the answer');
+});
+
+test('an unsaved night does NOT keep the phone on old code forever (v2.9.7)', () => {
+  // HIS REPORT, 2026-08-27: the app stayed on 2.9.5 after 2.9.6 was live.
+  // Cause: applyUpdateIfSafe refused flatly while `benta.dirty`, and a RESTORED
+  // DRAFT sets dirty on every single load (it genuinely is unsent work). So a
+  // phone holding one unsaved night held its update back at every resume, for
+  // as long as that night stayed unsaved — indefinitely, and silently.
+  const dirty = () => ({ dirty: true, date: '2026-08-27' });
+
+  // The stuck case: a restored draft, nothing focused. It must update, and it
+  // must stash the night FIRST so the reload brings it back.
+  const g = loadUpdateGate({ benta: dirty() });
+  g.updateWaiting = true;
+  g.applyUpdateIfSafe();
+  assert.strictEqual(g.log.reloads, 1, 'a half-entered night must not block the update forever');
+  assert.strictEqual(g.log.stashes, 1, 'and it must be stashed before the reload, not after');
+
+  // The case the gate exists for: her finger is in a field. Waiting here is
+  // right — the next resume or save catches it a moment later.
+  for (const tag of ['INPUT', 'TEXTAREA', 'SELECT']) {
+    const t = loadUpdateGate({ benta: dirty(), focusedTag: tag });
+    t.updateWaiting = true;
+    t.applyUpdateIfSafe();
+    assert.strictEqual(t.log.reloads, 0, 'must not reload while a ' + tag + ' has focus');
+    assert.strictEqual(t.log.stashes, 0, 'and must not stash behind her back either');
+  }
+
+  // In-flight work still blocks, both kinds.
+  const mid = loadUpdateGate({ benta: dirty(), syncing: true });
+  mid.updateWaiting = true; mid.applyUpdateIfSafe();
+  assert.strictEqual(mid.log.reloads, 0, 'never reload with a request in flight');
+
+  const photo = loadUpdateGate({ benta: dirty(), paperBusy: 'Reading the photo…' });
+  photo.updateWaiting = true; photo.applyUpdateIfSafe();
+  assert.strictEqual(photo.log.reloads, 0, 'never reload while a photograph is being read');
+
+  // A clean form updates and has nothing to stash.
+  const clean = loadUpdateGate({ benta: { dirty: false, date: '2026-08-27' } });
+  clean.updateWaiting = true; clean.applyUpdateIfSafe();
+  assert.strictEqual(clean.log.reloads, 1);
+  assert.strictEqual(clean.log.stashes, 0, 'nothing typed, nothing to keep');
+
+  // No pending update: nothing happens, however clean things are.
+  const idle = loadUpdateGate({ benta: { dirty: false } });
+  idle.applyUpdateIfSafe();
+  assert.strictEqual(idle.log.reloads, 0, 'no update waiting, no reload');
+
+  // ONE reload per page load, even if every trigger fires at once.
+  const once = loadUpdateGate({ benta: dirty() });
+  once.updateWaiting = true;
+  once.applyUpdateIfSafe(); once.applyUpdateIfSafe(); once.applyUpdateIfSafe();
+  assert.strictEqual(once.log.reloads, 1, 'never a reload loop');
+
+  // And once a reload is UNDER WAY: location.reload() does not stop the world,
+  // so a second worker claiming the page before it unloads sets updateWaiting
+  // again. Clearing that flag alone would not hold here — `reloadingForUpdate`
+  // is what does, and this is the race that makes it load-bearing.
+  const race = loadUpdateGate({ benta: { dirty: false, date: '2026-08-27' } });
+  race.updateWaiting = true;
+  race.applyUpdateIfSafe();
+  assert.strictEqual(race.log.reloads, 1, 'precondition: the first reload started');
+  race.updateWaiting = true;            // another controllerchange, mid-unload
+  race.applyUpdateIfSafe();
+  assert.strictEqual(race.log.reloads, 1,
+    'a reload already under way must not start a second one');
 });
 
 test('a TYPED delivery counts: "Stock came in" is not shadowed by the Sales steppers (v2.9.6)', () => {

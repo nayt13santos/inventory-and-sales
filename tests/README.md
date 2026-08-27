@@ -407,3 +407,13 @@ Not reachable through the test harness (it is a document-level `input` listener,
 Two of my own assertions were wrong first, both for the same reason — the comment I added to explain the bug *quotes the code it describes*, so `indexOf` found the prose and a 500-character window fell short of the branch body. Anchored to `else if (id.startsWith('in-')){` with a window wide enough for the comment.
 
 Suites: **207** (`run-tests.js`) + **215** (`contract.test.js`).
+
+### v2.9.7 — an unsaved night must not freeze the version
+
+His two words after 2.9.6 shipped: *"still .5"*. The update gate refused flatly on `benta.dirty`, and a restored draft sets that on every load — so one unsaved night pinned the phone to old code indefinitely, silently. A fault that hides every later fix is worse than the faults it hides.
+
+Previously **stubbed** in this harness (`function applyUpdateIfSafe(){}`), which is why no test could see it. Now lifted as a real slab with a faked world around it — `document.activeElement`, `location.reload`, `stashBentaDraft`, `syncing`, `paperBusy` — so the question "does a half-entered night keep this phone on old code forever" is one the suite can answer. Eight cases: the stuck case updates **and stashes first**; a focused INPUT/TEXTAREA/SELECT still waits and does **not** stash behind her back; a request in flight and a photograph being read still block; a clean form updates with nothing to stash; no pending update does nothing; and one reload per page load.
+
+One mutant survived the first pass: deleting `reloadingForUpdate = true` still passed, because clearing `updateWaiting` masked it. That guard exists for a race the test wasn't modelling — `location.reload()` is asynchronous, so another worker can claim the page before it unloads and set `updateWaiting` again. With that race added, all six mutants are red.
+
+Suites: **207** (`run-tests.js`) + **216** (`contract.test.js`).
