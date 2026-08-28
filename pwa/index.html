@@ -590,7 +590,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.10.2';
+const APP_VERSION = '2.11.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -2118,6 +2118,113 @@ function stockUnitOf(product){
   return txt(it && it.unit);
 }
 function lowStockList(){ return stockStatusList().filter(s => s.low); }
+
+/* ============================================================
+   "HOW THE NIGHTS COMPARE" (v2.11.0)
+   ------------------------------------------------------------
+   The Cutoff screen settles up with his partner and the costing screen prices a
+   ball. Neither answers the two questions a stall owner actually asks between
+   cutoffs: WHICH NIGHTS ARE WORTH OPENING, and WHAT IS ACTUALLY EARNING. Both
+   are already answerable from figures on the phone — no schema, no server call.
+
+   Same discipline as everything else here: only OPEN nights (a closed night is
+   not a slow night), never tonight (it is not finished), every figure states
+   the COUNT behind it so it can be checked against the paper, and silence
+   rather than an average drawn from two nights.
+   ============================================================ */
+const TREND_MIN_NIGHTS = 8;        // before there is anything worth saying
+const TREND_MIN_WEEKDAY = 3;       // before a weekday's average is named
+const TREND_SKU_WINDOW = 30;       // the open nights the sku mix is read from
+
+/** Open nights up to YESTERDAY, newest first: [{date, total}]. */
+function trendNights(limit){
+  const out = [];
+  const days = asObj(state.days);
+  const yday = addDays(todayStr(), -1);
+  const dates = Object.keys(days).filter(d => isDateStr(d) && d <= yday).sort().reverse();
+  for (const d of dates){
+    if (limit && out.length >= limit) break;
+    const day = asObj(days[d]);
+    if (truthy(day.closed)) continue;
+    out.push({ date: d, total: num(day.total) });
+  }
+  return out;
+}
+
+/** Average take per night of the week, for weekdays with enough nights to
+ *  average at all. Newest-first input, sorted best-first out. */
+function trendByWeekday(){
+  const bag = Object.create(null);
+  for (const n of trendNights(0)){
+    const w = weekdayName(n.date);
+    if (!w) continue;
+    if (!bag[w]) bag[w] = { name: w, nights: 0, total: 0 };
+    bag[w].nights++;
+    bag[w].total += n.total;
+  }
+  const out = [];
+  for (const w in bag){
+    if (bag[w].nights < TREND_MIN_WEEKDAY) continue;
+    out.push({ name: w, nights: bag[w].nights, avg: r2(bag[w].total / bag[w].nights) });
+  }
+  out.sort((a, b) => b.avg - a.avg);
+  return out;
+}
+
+/** What each sku earned over the last TREND_SKU_WINDOW open nights. Money comes
+ *  from the row's own stored `amount` — the snapshot the sheet holds — so this
+ *  can never disagree with the receipt that night printed. */
+function trendBySku(){
+  const nights = trendNights(TREND_SKU_WINDOW);
+  const within = Object.create(null);
+  for (const n of nights) within[n.date] = true;
+  const bag = Object.create(null);
+  const byDate = asObj(state.counts);
+  for (const d in byDate){
+    if (!within[d]) continue;
+    for (const r of asArr(byDate[d])){
+      const sku = txt(asObj(r).sku);
+      if (!sku) continue;
+      if (!bag[sku]) bag[sku] = { sku: sku, sold: 0, amount: 0, free: 0 };
+      bag[sku].sold += Math.max(0, num(r.sold));
+      bag[sku].amount += num(r.amount);
+      bag[sku].free += Math.max(0, num(r.free_qty));
+    }
+  }
+  const out = [];
+  for (const sku in bag) out.push(bag[sku]);
+  // Every ACTIVE sku appears, even one that sold nothing — a product earning
+  // zero is the most useful line on this list, and leaving it out would hide it.
+  for (const pr of activePrices()){
+    if (!bag[pr.sku]) out.push({ sku: pr.sku, sold: 0, amount: 0, free: 0 });
+  }
+  out.sort((a, b) => b.amount - a.amount || b.sold - a.sold);
+  return { nights: nights.length, rows: out };
+}
+
+/** The last two FINISHED cutoffs, so the comparison is like for like. A period
+ *  still running is not compared to a whole one — the v2.9.4 lesson, in the one
+ *  other place it applies. */
+function trendCutoffs(){
+  const yday = addDays(todayStr(), -1);
+  let per = currentPeriod(todayStr());
+  let guard = 0;
+  while (per.end > yday && guard++ < 40) per = shiftPeriod(per, -1);
+  const prev = shiftPeriod(per, -1);
+  const sum = (p) => {
+    let total = 0, nights = 0;
+    for (const n of trendNights(0)){
+      if (n.date < p.start || n.date > p.end) continue;
+      total += n.total; nights++;
+    }
+    return { start: p.start, end: p.end, total: r2(total), nights: nights,
+             avg: nights ? r2(total / nights) : 0 };
+  };
+  const a = sum(per), b = sum(prev);
+  if (!a.nights || !b.nights) return null;
+  return { latest: a, before: b, change: r2(a.total - b.total) };
+}
+
 
 /* ============================================================
    HOW LONG WHAT IS ON THE SHELF WILL LAST (v2.10.2)
@@ -6076,6 +6183,7 @@ function renderIbapa(){
 
   // "What it costs" (v2.8.0) — Nayt's costing, read from the server. Sits above
   // Maintenance because that is where the two costs it needs are typed.
+  try{ h += trendHTML(); }catch(err){ console.error(err); }
   try{ h += costingHTML(); }catch(err){ console.error(err); }
 
   // Maintenance — the prices, the constants and the stock list, without opening
@@ -6752,6 +6860,106 @@ function costWhyNone(daysOpen, balls){
   if (!(daysOpen > 0)) return 'No night in this cutoff is open yet, so there is nothing to divide by.';
   if (!(balls > 0)) return 'No boxes were counted in this cutoff, so there are no balls to divide by.';
   return '';
+}
+
+let trendOpen = false;    // whether "How the nights compare" is showing
+
+/** The trend section. Worked out entirely on the phone, so it opens instantly
+ *  and works with no signal — unlike the costing, which must ask the server. */
+function trendHTML(){
+  let h = '<div class="section-title">How the nights compare</div>';
+  if (!trendOpen){
+    return h + '<div class="card"><p class="hint" style="margin-bottom:10px;">Which nights of the week are worth opening, ' +
+      'what is actually earning, and how this fortnight sits against the last. Worked out on this phone from the nights already logged.</p>' +
+      '<button type="button" class="btn block" data-act="trend-open">Show me the nights</button></div>';
+  }
+  const nights = trendNights(0);
+  if (nights.length < TREND_MIN_NIGHTS){
+    return h + '<div class="card"><p class="hint">' + esc(nights.length === 0
+      ? 'No finished nights are logged yet, so there is nothing to compare.'
+      : 'Only ' + nights.length + (nights.length === 1 ? ' night is' : ' nights are') +
+        ' logged so far. This needs at least ' + TREND_MIN_NIGHTS +
+        ' to say anything worth acting on — it will fill in on its own.') + '</p>' +
+      '<button type="button" class="btn block" data-act="trend-close" style="margin-top:10px;">Close</button></div>';
+  }
+
+  // ① NIGHTS OF THE WEEK. The question is "is Tuesday worth opening?", so the
+  // count behind each average is printed beside it — an average of three nights
+  // and an average of twelve are not the same claim.
+  const wk = trendByWeekday();
+  h += '<div class="card"><div class="pay-intro">Average take, by night of the week</div>';
+  if (!wk.length){
+    h += '<p class="hint">No night of the week has ' + TREND_MIN_WEEKDAY +
+      ' finished nights yet, so there is nothing to average.</p>';
+  } else {
+    for (const w of wk){
+      h += '<div class="co-row"><span>' + esc(w.name) + ' <span class="hint">(' + w.nights +
+        (w.nights === 1 ? ' night' : ' nights') + ')</span></span><span class="v">' + peso(w.avg) + '</span></div>';
+    }
+    if (wk.length >= 2){
+      const best = wk[0], worst = wk[wk.length - 1];
+      h += '<p class="hint" style="margin-top:8px;">' + esc(best.name) + 's bring in about ' +
+        esc(peso(best.avg)) + ' and ' + esc(worst.name) + 's about ' + esc(peso(worst.avg)) +
+        '. That is what the nights have done, not what they will do — a fiesta or a downpour is not in here.</p>';
+    }
+    const missing = 7 - wk.length;
+    if (missing > 0){
+      h += '<p class="hint">' + missing + (missing === 1 ? ' night' : ' nights') +
+        ' of the week are left out — fewer than ' + TREND_MIN_WEEKDAY + ' finished nights each so far.</p>';
+    }
+  }
+  h += '</div>';
+
+  // ② WHAT IS EARNING. Money from each row's own stored amount, so this can
+  // never disagree with the receipt that night printed.
+  const mix = trendBySku();
+  h += '<div class="card"><div class="pay-intro">What earned, last ' + mix.nights +
+    (mix.nights === 1 ? ' night' : ' nights') + '</div>';
+  for (const r of mix.rows){
+    h += '<div class="co-row"><span>' + esc(skuLabel(r.sku)) + ' <span class="hint">(' + esc(fmt(r.sold) + ' sold') +
+      (r.free > 0 ? ', ' + fmt(r.free) + ' given away' : '') + ')</span></span>' +
+      '<span class="v">' + peso(r.amount) + '</span></div>';
+  }
+  const idle = mix.rows.filter(r => r.sold === 0);
+  if (idle.length){
+    h += '<p class="hint" style="margin-top:8px;">' +
+      esc(listPhrase(idle.map(r => skuLabel(r.sku)))) +
+      ' sold nothing in these nights. Worth knowing before you buy more of it.</p>';
+  }
+  h += '</div>';
+
+  // ③ THE LAST TWO FINISHED FORTNIGHTS — like for like. A cutoff still running
+  // is never compared to a whole one (the v2.9.4 lesson).
+  const cut = trendCutoffs();
+  h += '<div class="card"><div class="pay-intro">The last two finished cutoffs</div>';
+  if (!cut){
+    h += '<p class="hint">Two finished cutoffs with nights in them are needed before they can be compared. Not yet.</p>';
+  } else {
+    const row = (label, c) => '<div class="co-row"><span>' + esc(label) +
+      ' <span class="hint">(' + c.nights + (c.nights === 1 ? ' night' : ' nights') +
+      ', ' + esc(peso(c.avg)) + ' a night)</span></span><span class="v">' + peso(c.total) + '</span></div>';
+    h += row(periodLabelOf(cut.before), cut.before) + row(periodLabelOf(cut.latest), cut.latest);
+    const d = cut.change;
+    h += '<p class="hint" style="margin-top:8px;">' + (d === 0
+      ? 'The two came to the same.'
+      : (d > 0 ? 'Up ' : 'Down ') + esc(peso(Math.abs(d))) + ' on the cutoff before it' +
+        (cut.latest.nights !== cut.before.nights
+          ? ' — on ' + cut.latest.nights + ' nights against ' + cut.before.nights +
+            ', so the take a night is the fairer figure'
+          : '')) + '.</p>';
+  }
+  h += '</div>';
+
+  h += '<div class="card"><button type="button" class="btn block" data-act="trend-close">Close</button></div>';
+  return h;
+}
+
+/** "August 16 - 31" for a period, reusing the same wording the Cutoff screen
+ *  uses so one fortnight is never named two ways. */
+function periodLabelOf(p){
+  const s = d2parts(txt(asObj(p).start)), e = d2parts(txt(asObj(p).end));
+  return monthName(asObj(p).start) + ' ' + s.d + ' – ' +
+    (s.m === e.m ? '' : monthName(asObj(p).end) + ' ') + e.d;
 }
 
 function costingHTML(){
@@ -8009,6 +8217,8 @@ document.addEventListener('click', (ev) => {
     if (!costPer) costPer = currentPeriod(todayStr());
     loadCosting();
   }
+  else if (act === 'trend-open'){ trendOpen = true; renderIbapa(); }
+  else if (act === 'trend-close'){ trendOpen = false; renderIbapa(); }
   else if (act === 'cost-close'){ costOpen = false; renderIbapa(); }
   else if (act === 'cost-prev'){
     costPer = shiftPeriod(costPer || currentPeriod(todayStr()), -1);

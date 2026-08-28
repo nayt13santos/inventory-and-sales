@@ -472,3 +472,17 @@ Two tests, 9 mutants, all red. Four of my own mistakes are recorded here because
 - **A rate was being formatted as money.** `fmt` is the peso formatter and pads to two decimals, so a fifth of a gallon read `0.20 of a gallon` — the shape of a price on a figure that is not one. The test caught it; the code now renders a rate as a count.
 
 Suites: **208** (`run-tests.js`) + **224** (`contract.test.js`).
+
+### v2.11.0 — how the nights compare
+
+Weekday averages, the earning mix, and the last two finished cutoffs. Client-only, from state the phone already holds.
+
+Four tests, **11 mutants, no survivors** — the first clean sweep in a while, which I put down to the guards here being the same ones v2.10.0 and v2.10.2 already taught me to arm deliberately (closed nights, tonight, a minimum history, and a running period never compared to a whole one).
+
+Three of my own expectations were wrong first, all arithmetic rather than code:
+
+- **Nine nights averages no weekday at all.** Nine nights is one or two per weekday against a bar of three, so the honest result is an empty list — I had asserted a partial one. The partial case needs **seventeen** nights (2×7 + 3), which yields exactly three qualifying weekdays; the test now pins both, and the "4 nights of the week are left out" sentence with it.
+- **A "night outside the window" needs a window to be outside of.** With only a dozen nights logged, a night sixty days back is still inside the last thirty open nights, so counting it was correct. Proving the cap needs more than thirty nights to exist.
+- `weekdayName` was not exposed on the client, which is only ever a reminder that a test asserting on weekday grouping must read weekdays the same way the code does.
+
+Suites: **208** (`run-tests.js`) + **228** (`contract.test.js`).

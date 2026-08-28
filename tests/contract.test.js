@@ -223,6 +223,9 @@ return {
   stockStatusOf, stockStatusList, qtyWithUnit, daySalary, splitFor, dailySalary,
   // v2.10.2: how long what is on the shelf will last, at the rate it is going.
   stockRunway, stockRunwayText,
+  // v2.11.0: how the nights compare.
+  trendNights, trendByWeekday, trendBySku, trendCutoffs, trendHTML, weekdayName,
+  trendState(v){ if (v && 'open' in v) trendOpen = v.open; },
   currentPeriod, shiftPeriod, periodKey, num, fmt, fmtShort, activePrices,
   // v2.3.1: the Split field's one reading, the note guard, what may be said
   // about a refused day, the two collapsible cards, and the price rule.
@@ -4745,6 +4748,188 @@ test('GIVEN AWAY OR RUINED: what left the tray unpaid is not revenue (v2.10.1)',
   assert.strictEqual(cost.ok, true, cost.error);
   assert.strictEqual(cost.data.balls, 10 * 4,
     'all ten boxes of four were MADE — free ones cost the same to make');
+});
+
+test('HOW THE NIGHTS COMPARE: weekday averages, honestly counted (v2.11.0)', () => {
+  // The Cutoff screen settles with his partner; the costing prices a ball.
+  // Neither answers "is Tuesday worth opening?" — which is answerable from
+  // figures already on the phone.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const TODAY = app.todayStr();
+  const back = (n) => app.addDays(TODAY, -n);
+  const dow = (d) => app.weekdayName(d);
+
+  for (const k in app.state.days) delete app.state.days[k];
+  // 28 finished nights, all open, all ₱1,000 — so every weekday averages the
+  // same and the arithmetic is checkable by eye.
+  for (let i = 1; i <= 28; i++){
+    const d = back(i);
+    app.state.days[d] = { date: d, closed: false, total: 1000, cash: 1000, gcash: 0 };
+  }
+  let wk = app.trendByWeekday();
+  assert.strictEqual(wk.length, 7, 'four weeks gives every weekday enough nights');
+  assert.ok(wk.every(w => w.avg === 1000 && w.nights === 4), JSON.stringify(wk));
+
+  // A CLOSED night is not a slow night: counting its zero would drag that
+  // weekday's average down and make him think a good night was a bad one.
+  const shut = back(3);
+  const shutDay = dow(shut);
+  app.state.days[shut] = { date: shut, closed: true, total: 0, cash: 0, gcash: 0 };
+  wk = app.trendByWeekday();
+  const row = wk.find(w => w.name === shutDay);
+  assert.strictEqual(row.nights, 3, 'the closed night is not counted');
+  assert.strictEqual(row.avg, 1000, 'and it does not drag the average down');
+
+  // TONIGHT is not finished, so it is not averaged — the same line the costing
+  // and the stock runway draw at yesterday. One system, one answer.
+  app.state.days[TODAY] = { date: TODAY, closed: false, total: 1, cash: 1, gcash: 0 };
+  const todayRow = app.trendByWeekday().find(w => w.name === dow(TODAY));
+  assert.strictEqual(todayRow.avg, 1000, 'tonight is not in the average yet');
+
+  // SORTED BEST FIRST, because the question is which nights are worth opening.
+  for (const k in app.state.days) delete app.state.days[k];
+  for (let i = 1; i <= 28; i++){
+    const d = back(i);
+    const isTue = dow(d) === 'Tuesday';
+    app.state.days[d] = { date: d, closed: false, total: isTue ? 300 : 2000,
+                          cash: isTue ? 300 : 2000, gcash: 0 };
+  }
+  wk = app.trendByWeekday();
+  assert.strictEqual(wk[wk.length - 1].name, 'Tuesday', 'the worst night is last');
+  assert.strictEqual(wk[wk.length - 1].avg, 300);
+  assert.ok(wk[0].avg === 2000, 'and the best is first');
+
+  // A weekday with too FEW nights is left out rather than averaged from one.
+  // Nine nights gives every weekday one or two, so NOTHING qualifies — and the
+  // honest answer to "which night is best" is then no answer at all.
+  for (const k in app.state.days) delete app.state.days[k];
+  for (let i = 1; i <= 9; i++){
+    const d = back(i);
+    app.state.days[d] = { date: d, closed: false, total: 1000, cash: 1000, gcash: 0 };
+  }
+  assert.strictEqual(app.trendByWeekday().length, 0,
+    'nine nights is one or two per weekday — no weekday can be averaged yet');
+
+  // Seventeen nights is 2×7 + 3, so exactly THREE weekdays reach the bar. The
+  // rest stay out, and the screen says how many it left out.
+  for (const k in app.state.days) delete app.state.days[k];
+  for (let i = 1; i <= 17; i++){
+    const d = back(i);
+    app.state.days[d] = { date: d, closed: false, total: 1000, cash: 1000, gcash: 0 };
+  }
+  wk = app.trendByWeekday();
+  assert.strictEqual(wk.length, 3, 'only the weekdays with three nights are named');
+  assert.ok(wk.every(w => w.nights >= 3), 'never an average from fewer than three nights');
+  app.trendState({ open: true });
+  assert.match(app.trendHTML(), /4 nights of the week are left out/,
+    'and it says out loud what it is not telling him');
+});
+
+test('HOW THE NIGHTS COMPARE: what earned, and what did not (v2.11.0)', () => {
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const TODAY = app.todayStr();
+  const back = (n) => app.addDays(TODAY, -n);
+  for (const k in app.state.days) delete app.state.days[k];
+  for (const k in app.state.counts) delete app.state.counts[k];
+  for (let i = 1; i <= 12; i++){
+    const d = back(i);
+    app.state.days[d] = { date: d, closed: false, total: 1000, cash: 1000, gcash: 0 };
+    app.state.counts[d] = [
+      { date: d, sku: 'box4', sod: 20, eod: 0, sold: 20, amount: 1000, free_qty: i === 3 ? 2 : 0 }
+    ];
+  }
+  const mix = app.trendBySku();
+  assert.strictEqual(mix.nights, 12);
+  const b4 = mix.rows.find(r => r.sku === 'box4');
+  assert.strictEqual(b4.sold, 240, 'units come from `sold` — what left the tray');
+  assert.strictEqual(b4.amount, 12000, 'money comes from the row\'s OWN stored amount');
+  assert.strictEqual(b4.free, 2, 'and what was given away is counted apart, not hidden');
+
+  // AN ACTIVE SKU THAT SOLD NOTHING IS THE MOST USEFUL LINE ON THE LIST, so it
+  // must appear rather than being absent for lack of a row.
+  const idle = mix.rows.filter(r => r.sold === 0 && r.amount === 0);
+  assert.ok(idle.length >= 1, 'a product that earned nothing is still listed');
+  assert.ok(idle.some(r => r.sku !== 'box4'));
+
+  // Sorted by money, so the answer to "what is earning" is the first line.
+  assert.strictEqual(mix.rows[0].sku, 'box4');
+
+  // A night OUTSIDE the window contributes nothing. The window is the last 30
+  // OPEN nights, so proving that needs more than thirty nights to exist — with
+  // only a dozen logged, a night sixty days back is still inside the window and
+  // counting it would be correct.
+  for (let i = 13; i <= 34; i++){
+    const d = back(i);
+    app.state.days[d] = { date: d, closed: false, total: 1000, cash: 1000, gcash: 0 };
+    app.state.counts[d] = [{ date: d, sku: 'box4', sod: 20, eod: 0, sold: 20, amount: 1000 }];
+  }
+  const inWindow = app.trendBySku();
+  assert.strictEqual(inWindow.nights, 30, 'the window caps at thirty open nights');
+  assert.strictEqual(inWindow.rows.find(r => r.sku === 'box4').amount, 30000,
+    'thirty nights at 1,000 — the four oldest nights are outside and add nothing');
+});
+
+test('HOW THE NIGHTS COMPARE: a running cutoff is never compared to a whole one (v2.11.0)', () => {
+  // The v2.9.4 lesson, in the one other place it applies: a fortnight that is
+  // still running has fewer nights in it, so setting it beside a finished one
+  // invents a fall that never happened.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const TODAY = app.todayStr();
+  const back = (n) => app.addDays(TODAY, -n);
+  for (const k in app.state.days) delete app.state.days[k];
+  for (let i = 1; i <= 70; i++){
+    const d = back(i);
+    app.state.days[d] = { date: d, closed: false, total: 1000, cash: 1000, gcash: 0 };
+  }
+  const cut = app.trendCutoffs();
+  assert.ok(cut, 'two finished cutoffs are available');
+  const live = app.currentPeriod(TODAY);
+  assert.notStrictEqual(cut.latest.start, live.start,
+    'the cutoff being lived in is NOT the one reported');
+  assert.ok(cut.latest.end < TODAY, 'the newer of the two has finished');
+  assert.ok(cut.before.end < cut.latest.start, 'and the other is the one before it');
+  assert.strictEqual(cut.latest.avg, 1000);
+  assert.strictEqual(cut.change, cut.latest.total - cut.before.total);
+
+  // With only one fortnight of history there is nothing to compare it TO, and
+  // it says so instead of comparing against zero.
+  for (const k in app.state.days) delete app.state.days[k];
+  for (let i = 1; i <= 5; i++){
+    const d = back(i);
+    app.state.days[d] = { date: d, closed: false, total: 1000, cash: 1000, gcash: 0 };
+  }
+  assert.strictEqual(app.trendCutoffs(), null, 'one cutoff is not a comparison');
+});
+
+test('HOW THE NIGHTS COMPARE: thin history says so, and says why (v2.11.0)', () => {
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const TODAY = app.todayStr();
+  const back = (n) => app.addDays(TODAY, -n);
+  for (const k in app.state.days) delete app.state.days[k];
+  app.trendState({ open: true });
+
+  // Nothing at all.
+  assert.match(app.trendHTML(), /No finished nights are logged yet/);
+
+  // Some, but not enough to act on — and it names how many and how many are
+  // needed, rather than looking broken.
+  for (let i = 1; i <= 3; i++){
+    const d = back(i);
+    app.state.days[d] = { date: d, closed: false, total: 1000, cash: 1000, gcash: 0 };
+  }
+  const h = app.trendHTML();
+  assert.match(h, /Only 3 nights are logged so far/);
+  assert.match(h, /at least 8/, 'the bar is stated, not hidden');
+  assert.match(h, /fill in on its own/, 'and it is not asking her to do anything');
+
+  // Closed until asked for: it must not compute on every render of More.
+  app.trendState({ open: false });
+  assert.match(app.trendHTML(), /Show me the nights/);
+  assert.ok(!/Average take/.test(app.trendHTML()), 'nothing is worked out until it is opened');
 });
 
 test('STOCK RUNWAY: how long it lasts, at the rate it is actually going (v2.10.2)', () => {

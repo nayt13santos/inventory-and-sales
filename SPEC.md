@@ -335,6 +335,18 @@ It is measured from the **same baseline the on-hand figure is measured from**, s
 
 It stays quiet where it would only be noise: fewer than `RUNWAY_MIN_NIGHTS` (5) measured nights, nothing opened since the count, or an on-hand figure of zero or below — that last case already has its own louder sentence ("count it again"), and a runway would be arithmetic built on the very figure that is wrong. The nights left are **floored**, because "about 3" when it is 3.8 is the safe direction to be wrong in, and less than one night is said as itself rather than as "about 0 nights". A rate reads as a **count**, not as money: `0.2 of a gallon`, never `0.20`.
 
+### v2.11.0 — "How the nights compare"
+
+The Cutoff screen settles up with his partner; the costing screen prices a ball. Neither answers the two questions a stall owner actually asks in between: **which nights are worth opening**, and **what is actually earning**. Both were already answerable from figures on the phone, so this is a new section under More — computed **entirely on the device**, which means it opens instantly and works with no signal, unlike the costing.
+
+Three blocks:
+
+1. **Average take, by night of the week** — sorted best first, because that is the question. Every average prints the **count behind it** (`Saturday (5 nights) ₱2,500`), since an average of three nights and an average of twelve are not the same claim. A weekday with fewer than `TREND_MIN_WEEKDAY` (3) finished nights is left out, and the card **says how many it left out** rather than quietly showing a partial week. It also states plainly that this is what the nights *have* done, not what they will do — a fiesta or a downpour is not in the figures.
+2. **What earned, last 30 open nights** — units and money per sku, money taken from each row's **own stored `amount`**, so this can never disagree with the receipt that night printed. Give-aways (v2.10.1) are shown apart rather than folded in. **Every active sku appears, including one that sold nothing** — a product earning zero is the most useful line on the list, and leaving it out for lack of a row would hide exactly that.
+3. **The last two finished cutoffs** — like for like. A cutoff still running is never set beside a whole one (the v2.9.4 lesson, in the one other place it applies), and when the two have different night counts the card says the take *per night* is the fairer figure.
+
+Same discipline as the rest: only **open** nights (a closed night is not a slow night), never **tonight** (not finished — the same line the costing and the stock runway draw at yesterday), and **silence** rather than an average drawn from two nights. Below `TREND_MIN_NIGHTS` (8) it says how many nights are logged, how many are needed, and that it will fill in on its own. Nothing is computed until the section is opened.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.
