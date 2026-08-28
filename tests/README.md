@@ -486,3 +486,16 @@ Three of my own expectations were wrong first, all arithmetic rather than code:
 - `weekdayName` was not exposed on the client, which is only ever a reminder that a test asserting on weekday grouping must read weekdays the same way the code does.
 
 Suites: **208** (`run-tests.js`) + **228** (`contract.test.js`).
+
+### v2.12.0 — where the money came from
+
+The prerequisite for counting the tin, and useful on its own: the Cutoff screen can now say what should be left in it.
+
+One end-to-end test and one source pin; **12 mutants, all red**. Two survived the first pass, and both are lessons this project has already learned once:
+
+- **A source pin passed while the check was dead.** I pinned the unknown-money *sentence*, and the mutant that turned its `if` into `if (false)` left the sentence sitting in the source looking perfectly correct — exactly the v2.9.1 failure. The pin is now on the **condition**.
+- **Nothing tested that the form actually sends the choice.** `submitGasto` reads the DOM, so there is no return value to assert on; the pin is now on the payload expression it builds, plus the chip handler's whitelist, so a stale attribute can never set a fourth value.
+
+The end-to-end test walks the seam: tin money subtracted, GCash and own money not, a row that says nothing counted **apart** rather than assumed either way, an invalid source refused by name, and the value surviving sheet → bootstrap → phone with a legacy row staying blank.
+
+Suites: **208** (`run-tests.js`) + **230** (`contract.test.js`).

@@ -1965,7 +1965,7 @@ test('MIGRATION: setupSheet appends the new columns and moves no existing cell',
     [['box4', 0.375], ['box6', 3], ['box10', 4.6]],
     'box_cost is backfilled onto the live rows — his bundle price per container');
   assert.deepStrictEqual(ss.getSheetByName('Expenses').getDataRange().getValues()[0].slice(8),
-    ['stock_product', 'stock_qty']);
+    ['stock_product', 'stock_qty', 'paid_from']);
 
   // Nothing that existed before may have moved, changed or disappeared.
   for (const tab in before) {
@@ -4748,6 +4748,124 @@ test('GIVEN AWAY OR RUINED: what left the tray unpaid is not revenue (v2.10.1)',
   assert.strictEqual(cost.ok, true, cost.error);
   assert.strictEqual(cost.data.balls, 10 * 4,
     'all ten boxes of four were MADE — free ones cost the same to make');
+});
+
+test('THE TIN: cash in, less what she took out of it, and what it cannot say (v2.12.0)', () => {
+  // Owner, 2026-08-28: "its collected until every cutoff" — the tin is emptied
+  // at settlement, not nightly, and Mama buys supplies out of that same tin. So
+  // across a fortnight the tin holds its cash sales less the cash SHE took back
+  // out. Nothing recorded where an expense's money came from until now.
+  const srv = loadServer();
+  const app = syncedClient(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+  const D = ymdDaysAgo(2);
+  const per = app.currentPeriod(D);
+
+  // A night that took ₱2,000, all cash.
+  app.loadBentaForm(D);
+  const box4 = app.benta.rows.find(r => r.sku === 'box4');
+  box4.sod = 40; box4.eod = 0;
+  const night = app.computeDay(app.bentaPayload());
+  app.applyLocalDay(app.bentaPayload());
+  assert.strictEqual(Number(night.gcash), 0, 'precondition: an all-cash night');
+  const cash = Number(night.cash);
+
+  const spend = (amount, paidFrom, id) => {
+    const p = { date: D, category: 'Supplies', item: 'Veggies', amount: amount,
+                backlogRef: '', notes: '', entryId: id };
+    if (paidFrom !== undefined) p.paidFrom = paidFrom;
+    app.applyLocalExpense(p);
+    return p;
+  };
+
+  // Nothing marked yet: the card must not appear, because it would just be the
+  // night's cash restated under a new heading.
+  let f = app.computeCutoff(per);
+  assert.strictEqual(f.tinOut, 0);
+  assert.strictEqual(f.tinUnknown, 0);
+
+  // ₱300 of veggies out of the tin.
+  spend(300, 'tin', 'tin-1');
+  f = app.computeCutoff(per);
+  assert.strictEqual(f.tinOut, 300, 'what she took out of the tin');
+  assert.strictEqual(f.tinExpected, Math.round((cash - 300) * 100) / 100, 'and what should be left in it');
+
+  // GCash and his own money do NOT come out of the tin.
+  spend(500, 'gcash', 'gc-1');
+  spend(250, 'own', 'own-1');
+  f = app.computeCutoff(per);
+  assert.strictEqual(f.tinOut, 300, 'only tin money is subtracted');
+  assert.strictEqual(f.tinExpected, Math.round((cash - 300) * 100) / 100);
+  assert.strictEqual(f.tinUnknown, 0, 'a stated source is not an unknown one');
+
+  // A row that says NOTHING — an older queued row, or one of the Cutoff
+  // screen's one-tap doors — is counted apart and never assumed either way.
+  spend(400, undefined, 'legacy-1');
+  f = app.computeCutoff(per);
+  assert.strictEqual(f.tinOut, 300, 'an unknown source is NOT quietly treated as the tin');
+  assert.strictEqual(f.tinUnknown, 400, 'it is named instead');
+  assert.strictEqual(f.tinExpected, Math.round((cash - 300) * 100) / 100,
+    'so the figure shown is the one the app can actually stand behind');
+
+  // The card's WORDING is pinned in the source-level test below — renderCutoff
+  // writes straight into the DOM, so there is no return value to assert on.
+
+  // THE SEAM: the sheet must store and return it, and an expense that says
+  // nothing must land exactly as an older phone's does.
+  const r1 = post(srv.ctx, { token: srv.token, action: 'saveExpense', payload:
+    { date: D, category: 'Supplies', item: 'Veggies', amount: 300, backlogRef: '',
+      notes: '', paidFrom: 'tin', entryId: 'srv-tin' } });
+  assert.strictEqual(r1.ok, true, r1.error);
+  assert.strictEqual(r1.data.paid_from, 'tin', 'the response is snake_case');
+  const r2legacy = post(srv.ctx, { token: srv.token, action: 'saveExpense', payload:
+    { date: D, category: 'Supplies', item: 'Eggs', amount: 100, backlogRef: '',
+      notes: '', entryId: 'srv-legacy' } });
+  assert.strictEqual(r2legacy.ok, true, r2legacy.error);
+  assert.strictEqual(r2legacy.data.paid_from, '', 'silence stays silence');
+
+  // A source that is not one of the three is REFUSED, not coerced — filing an
+  // unknown source as "the tin" would invent a shortage.
+  const bad = post(srv.ctx, { token: srv.token, action: 'saveExpense', payload:
+    { date: D, category: 'Supplies', item: 'Eggs', amount: 100, backlogRef: '',
+      notes: '', paidFrom: 'pocket', entryId: 'srv-bad' } });
+  assert.strictEqual(bad.ok, false);
+  assert.match(bad.error, /Invalid paidFrom "pocket"/);
+  assert.match(bad.error, /tin, gcash, own, or blank/);
+
+  // And it survives the round trip onto the phone.
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} });
+  const back = boot.data.expenses.find(e => e.entry_id === 'srv-tin');
+  assert.strictEqual(back.paid_from, 'tin', 'bootstrap returns it');
+  const app2 = syncedClient(boot.data);
+  assert.strictEqual(app2.state.expenses['srv-tin'].paid_from, 'tin', 'and the phone keeps it');
+  assert.strictEqual(app2.state.expenses['srv-legacy'].paid_from, '', 'a legacy row stays blank');
+});
+
+test('SOURCE PIN: the tin card names its unknown money and asks for a count (v2.12.0)', () => {
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+  const at = src.indexOf('What should be in the tin');
+  assert.ok(at > 0, 'the card must exist');
+  const card = src.slice(at - 600, at + 1800);
+  assert.match(card, /if \(num\(f\.tinOut\) > 0 \|\| num\(f\.tinUnknown\) > 0\)/,
+    'it stays away until something has actually been marked');
+  // Pinned as the CONDITION, not just the sentence: a dead `if` leaves the
+  // sentence sitting in the source looking correct (the v2.9.1 lesson).
+  assert.match(card, /if \(num\(f\.tinUnknown\) > 0\)\{/,
+    'the unknown-money line must be GATED on there being some');
+  assert.match(card, /do not say where the money came from, so it is NOT/,
+    'unknown money is named, not folded in');
+  assert.match(card, /the real figure is lower by that much/,
+    'and the DIRECTION of the doubt is stated');
+  assert.match(card, /Count the tin before you collect it/, 'with what to do about it');
+
+  // AND THE FORM MUST ACTUALLY SEND THE CHOICE. submitGasto reads the DOM, so
+  // this is pinned at the payload it builds — the one place the chip's answer
+  // becomes a fact the sheet will keep.
+  const sub = src.slice(src.indexOf('function submitGasto('), src.indexOf('function submitGasto(') + 2600);
+  assert.match(sub, /paidFrom: gx\.paidFrom/,
+    'the expense payload must carry where the money came from');
+  assert.match(src, /data-act="gastos-paid"/, 'and the chips must exist to choose it');
+  assert.match(src, /if \(PAID_FROM_CHOICES\.some\(c => c\.key === want\)\) gx\.paidFrom = want;/,
+    'only one of the three may ever be set, never a stale attribute');
 });
 
 test('HOW THE NIGHTS COMPARE: weekday averages, honestly counted (v2.11.0)', () => {

@@ -279,7 +279,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.11.0';
+var VERSION = '2.12.0';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -406,7 +406,7 @@ var SCHEMA = [
   // stock_product / stock_qty were appended in v2.3.0: a delivery is an
   // ordinary expense row that additionally names what arrived. Money stays in
   // exactly one place (`amount`); the quantity rides along on the same row.
-  { name: TAB.EXPENSES, headers: ['date', 'category', 'item', 'amount', 'backlog_ref', 'notes', 'entry_id', 'updated_at', 'stock_product', 'stock_qty'], textCols: ['date', 'updated_at'] },
+  { name: TAB.EXPENSES, headers: ['date', 'category', 'item', 'amount', 'backlog_ref', 'notes', 'entry_id', 'updated_at', 'stock_product', 'stock_qty', 'paid_from'], textCols: ['date', 'updated_at', 'paid_from'] },
   { name: TAB.BACKLOGS, headers: ['name', 'description', 'total_amount', 'start_date', 'active'], textCols: ['start_date'] },
   // The Split is an ENTERED amount per cutoff (v2.3.0), no longer the residual.
   { name: TAB.CUTOFF_INPUTS, headers: ['start', 'end', 'split_amount', 'entry_id', 'updated_at'], textCols: ['start', 'end', 'updated_at'] },
@@ -414,6 +414,19 @@ var SCHEMA = [
 ];
 
 var EXPENSE_CATEGORIES = ['Supplies', 'Octopus', 'Electric', 'Mama', 'Backlog', 'Other'];
+
+/* WHERE THE MONEY CAME FROM (v2.12.0). Owner, 2026-08-28: the tin is emptied
+ * "until every cutoff" — cash accumulates across the fortnight and is collected
+ * at settlement — and Mama buys supplies out of that same tin. So what the tin
+ * should hold at any point in a cutoff is its cash sales less the cash SHE took
+ * out of it, and until now no row said which expenses those were.
+ *
+ * BLANK IS A REAL AND PERMANENT ANSWER HERE: every row written before this
+ * column existed says nothing about where the money came from, and nothing can
+ * honestly be inferred for it. The reconciliation NAMES that money rather than
+ * assuming it either way — the same rule the costing follows for a cost it does
+ * not have. */
+var PAID_FROM = ['tin', 'gcash', 'own'];
 
 // The ONLY Settings keys the Maintenance screen may write. `token` is
 // deliberately absent and must stay absent: an API that can rewrite its own
@@ -1286,6 +1299,14 @@ function apiSaveExpense(ss, payload) {
   }
   var item = asStr(payload.item);
   var notes = asStr(payload.notes);
+  // Where the money came from (v2.12.0). Omitted or blank stays blank — an
+  // older phone knows nothing about this and must keep landing exactly as it
+  // did. A value that is not one of the three is refused rather than coerced:
+  // silently filing an unknown source as "the tin" would invent a shortage.
+  var paidFrom = asStr(payload.paidFrom);
+  if (paidFrom !== '' && PAID_FROM.indexOf(paidFrom) === -1) {
+    throw new Error('Invalid paidFrom "' + paidFrom + '". Allowed: ' + PAID_FROM.join(', ') + ', or blank.');
+  }
 
   // --- An expense carries MONEY ONLY (v2.6.0). Deliveries used to ride on this
   // row (stock_product/stock_qty), which forced a price onto unpaid flour — his
@@ -1311,7 +1332,8 @@ function apiSaveExpense(ss, payload) {
   // let a replayed edit wipe a legacy delivery's quantity off the shelf.
   var obj = {
     date: date, category: category, item: item, amount: amount,
-    backlog_ref: backlogRef, notes: notes, entry_id: entryId, updated_at: nowStamp()
+    backlog_ref: backlogRef, notes: notes, entry_id: entryId, updated_at: nowStamp(),
+    paid_from: paidFrom
   };
 
   // Upsert by entry_id: replaying the same mutation rewrites the same row.
@@ -1328,7 +1350,7 @@ function apiSaveExpense(ss, payload) {
   } else {
     t.sheet.appendRow(row);
   }
-  return { entry_id: entryId, updated: found > 0 }; // RESPONSE: snake_case
+  return { entry_id: entryId, updated: found > 0, paid_from: paidFrom }; // RESPONSE: snake_case
 }
 
 function apiDeleteExpense(ss, payload) {
@@ -3308,6 +3330,9 @@ function readExpenses(ss) {
       // A delivery names what arrived and how much of it. Blank on most rows —
       // most expenses are not tracked stock. `amount` is the money and is
       // counted exactly once, as it always was; stock_qty feeds only the ledger.
+      // Where the money came from (v2.12.0). A blank legacy cell stays blank —
+      // it is genuinely unknown, and the tin figure says so out loud.
+      paid_from: asStr(cellOf(r, t, 'paid_from')),
       stock_product: asStr(cellOf(r, t, 'stock_product')),
       stock_qty: asNum(cellOf(r, t, 'stock_qty'))
     });

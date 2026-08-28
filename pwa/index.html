@@ -590,7 +590,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.11.0';
+const APP_VERSION = '2.12.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -1018,6 +1018,9 @@ function normExpense(e, key){
     // money that paid for it. Blank on most rows — most expenses are not tracked
     // stock. `amount` is the money and is counted exactly once, as always;
     // stock_qty feeds only the stock ledger.
+    // Where the money came from (v2.12.0): 'tin' | 'gcash' | 'own' | '' when the
+    // row predates the column and genuinely does not say.
+    paid_from: txt(pick(e, 'paid_from', 'paidFrom')),
     stock_product: txt(pick(e, 'stock_product', 'stockProduct')),
     stock_qty: num(pick(e, 'stock_qty', 'stockQty'))
   };
@@ -1831,6 +1834,20 @@ function computeCutoff(per){
   // Stock usage is deliberately absent everywhere here: it is quantities, never
   // money. A delivery's stock_qty likewise moves only the ledger — its `amount`
   // is the money and it is already inside b.Supplies exactly once.
+  /* WHAT THE TIN SHOULD HOLD (v2.12.0). The tin is emptied at the cutoff, not
+     nightly (owner: "its collected until every cutoff"), so across a fortnight
+     it holds the cash that came in less the cash SHE took back out of it. Only
+     rows that SAY they came from the tin are subtracted; rows that say nothing
+     — every row written before the column, and the Cutoff screen's own one-tap
+     doors — are counted apart and NAMED, never assumed either way. */
+  let tinOut = 0, unknownOut = 0;
+  for (const id in exps){
+    const e = asObj(exps[id]);
+    if (!inPeriod(e.date, per)) continue;
+    const from = txt(e.paid_from);
+    if (from === 'tin') tinOut += num(e.amount);
+    else if (from === '') unknownOut += num(e.amount);
+  }
   const supplies = r2(b.Supplies);
   const other = r2(b.Backlog + b.Other);
   const mama = r2(b.Mama), octopus = r2(b.Octopus), electric = r2(b.Electric);
@@ -1852,6 +1869,9 @@ function computeCutoff(per){
     mama, supplies, octopus, electric, other, salary,
     split, perPartner: r2(split / 2), splitEntered: sp.entered,
     remaining,
+    // The tin (v2.12.0): what went in as cash, what she took back out of it,
+    // and what this app cannot say either way.
+    tinOut: r2(tinOut), tinUnknown: r2(unknownOut), tinExpected: r2(cash - tinOut),
     excluded: x.total, excludedLines: x.lines
   };
 }
@@ -2372,6 +2392,11 @@ function applyLocalExpense(p){
     date:p.date, category:p.category, item:p.item || '', amount:num(p.amount),
     backlog_ref:p.backlogRef || '', notes:p.notes || '',
     entry_id:p.entryId, updated_at:new Date().toISOString(),
+    // Where the money came from (v2.12.0). Mirrored locally exactly as sent, so
+    // the tin figure reads the same before and after the row syncs. A payload
+    // that says nothing (an older queued row, or one of the Cutoff screen's
+    // one-tap doors) stays blank rather than being filed as the tin.
+    paid_from: (p.paidFrom === 'tin' || p.paidFrom === 'gcash' || p.paidFrom === 'own') ? p.paidFrom : '',
     // The optional delivery riding on this row. Money stays in `amount`, counted
     // once; the quantity feeds only the stock ledger.
     stock_product: txt(p.stockProduct),
@@ -5296,7 +5321,16 @@ function afterCountChange(sku){
 // quantities already enter under Stock on hand, so an expense needs only its
 // bucket, amount and date. Mama, Electric and backlog payments keep their own
 // doors on the Cutoff screen; the server still accepts every category.
-let gx = { open:false, pick:'', amount:'', date:todayStr() };
+/* PAID FROM (v2.12.0). Defaults to the tin because that is what actually
+   happens on this screen — Mama buys the veggies and the octopus out of the
+   same tin the night's cash goes into. One tap changes it, and the choice is
+   remembered for the next entry so a run of tin purchases is one tap each. */
+const PAID_FROM_CHOICES = [
+  { key:'tin',   label:'From the tin' },
+  { key:'gcash', label:'GCash' },
+  { key:'own',   label:'My own money' }
+];
+let gx = { open:false, pick:'', amount:'', date:todayStr(), paidFrom:'tin' };
 // The last expense that was dated OUTSIDE the cutoff being listed. It saved
 // correctly but it cannot appear in this list, so it is named here instead of
 // seeming to vanish. { label, item, amount, date }
@@ -5355,6 +5389,14 @@ function renderGastos(){
     h += '<div class="field"><label for="gxAmount">How much? (₱)</label>' +
       '<input class="input money" id="gxAmount" inputmode="decimal" autocomplete="off" placeholder="0" value="' + esc(gx.amount) + '">' +
       '<p class="err" id="err-gx-amount" hidden></p></div>';
+    h += '<div class="field"><label>Where did the money come from?</label>' +
+      '<div class="chips" role="group" aria-label="Where the money came from">';
+    for (const c of PAID_FROM_CHOICES){
+      h += '<button type="button" class="chip" data-act="gastos-paid" data-paid="' + c.key +
+        '" aria-pressed="' + String(gx.paidFrom === c.key) + '">' + esc(c.label) + '</button>';
+    }
+    h += '</div><p class="hint" style="margin-top:8px;">The tin is what the night’s cash goes into. ' +
+      'Marking it here is what lets the Cutoff screen say what should be left in it.</p></div>';
     h += '<div class="field"><label for="gxDate">Date</label>' +
       '<input class="input" type="date" id="gxDate" value="' + esc(gx.date) + '" max="' + todayStr() + '">' +
       '<p class="err" id="err-gx-date" hidden></p></div>';
@@ -5437,6 +5479,9 @@ function submitGasto(){
     amount: num(gx.amount),
     backlogRef: '',
     notes: '',
+    // Where the money came from (v2.12.0) — always sent from this screen, so
+    // the tin figure never has to guess about a row SHE entered.
+    paidFrom: gx.paidFrom === 'gcash' || gx.paidFrom === 'own' ? gx.paidFrom : 'tin',
     entryId: uuid()
   };
   applyLocalExpense(payload);
@@ -5453,7 +5498,7 @@ function submitGasto(){
     : null;
   // `pick` clears so the next tap is a fresh choice; the date is remembered so
   // a run of same-day entries types it once.
-  gx = { open:true, pick:'', amount:'', date:gx.date };
+  gx = { open:true, pick:'', amount:'', date:gx.date, paidFrom:gx.paidFrom };
   renderGastos();
   toast(elsewhere ? 'Saved to ' + periodLabel(itsPeriod) + '.' : 'Expense added.');
   drainQueue();
@@ -5671,6 +5716,29 @@ function renderCutoff(){
   const typed = Object.prototype.hasOwnProperty.call(splitEdits, key) ? splitEdits[key] : null;
   const splitVal = typed == null ? f.split : typed;
   const live = liveCutoff(per);
+
+  /* WHAT SHOULD BE IN THE TIN (v2.12.0). Its own card, below the settlement
+     figures, because it answers a different question: not "how do we divide
+     this" but "is the cash actually there before we divide it". Shown only once
+     something has been marked as coming from the tin — until then it would be
+     the day's cash restated under a new heading, which teaches nothing. */
+  if (num(f.tinOut) > 0 || num(f.tinUnknown) > 0){
+    h += '<div class="card">' +
+      '<div class="pay-intro">What should be in the tin</div>' +
+      '<div class="co-row"><span>Cash taken in</span><span class="v">' + peso(f.cash) + '</span></div>' +
+      '<div class="co-row"><span>Paid out of the tin</span><span class="v">−' + peso(f.tinOut) + '</span></div>' +
+      '<div class="r-sep" role="presentation"></div>' +
+      '<div class="co-row big"><span>Should be left</span><span class="v">' + peso(f.tinExpected) + '</span></div>';
+    if (num(f.tinUnknown) > 0){
+      h += '<p class="hint" style="margin-top:8px;">' + esc(peso(f.tinUnknown)) +
+        ' of this cutoff\'s payments do not say where the money came from, so it is NOT ' +
+        'subtracted above. If any of it came out of the tin, the real figure is lower by that much. ' +
+        'Payments entered on the Expenses screen say where they came from; the one-tap chips here do not yet.</p>';
+    }
+    h += '<p class="hint" style="margin-top:8px;">Count the tin before you collect it. ' +
+      'A figure that does not match is worth finding tonight rather than next fortnight.</p>' +
+    '</div>';
+  }
 
   // Live local preview
   h += '<div class="card">' +
@@ -8137,6 +8205,12 @@ document.addEventListener('click', (ev) => {
     gx.pick = txt(el.dataset.pick);
     renderGastos();
     const f = $('gxAmount'); if (f) f.focus();
+  }
+  else if (act === 'gastos-paid'){
+    const want = txt(el.dataset.paid);
+    // Only one of the three, never whatever a stale attribute happens to say.
+    if (PAID_FROM_CHOICES.some(c => c.key === want)) gx.paidFrom = want;
+    renderGastos();
   }
   else if (act === 'gastos-submit') submitGasto();
   else if (act === 'gastos-del') deleteGasto(el.dataset.id);

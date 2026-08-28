@@ -347,6 +347,18 @@ Three blocks:
 
 Same discipline as the rest: only **open** nights (a closed night is not a slow night), never **tonight** (not finished — the same line the costing and the stock runway draw at yesterday), and **silence** rather than an average drawn from two nights. Below `TREND_MIN_NIGHTS` (8) it says how many nights are logged, how many are needed, and that it will fill in on its own. Nothing is computed until the section is opened.
 
+### v2.12.0 — where the money came from, and what should be in the tin
+
+Owner, 2026-08-28, asked whether the tin keeps a float overnight: **"its collected until every cutoff."** So the tin is not a nightly drawer — cash accumulates across the fortnight and is collected at settlement — and Mama buys supplies out of that same tin. What the tin should hold at any point in a cutoff is therefore **its cash sales less the cash she took back out of it**, and until now no row said which expenses those were.
+
+Expenses append **`paid_from`**: `tin` | `gcash` | `own`, or **blank**. The Expenses screen gains a second chip row — **[From the tin] [GCash] [My own money]** — defaulting to the tin, because that is what actually happens there, and the choice is remembered for the next entry so a run of tin purchases stays one tap each. A value outside the three is **refused**, never coerced: quietly filing an unknown source as "the tin" would invent a shortage.
+
+**Blank is a real and permanent answer here.** Every row written before the column says nothing about where its money came from, and nothing can honestly be inferred for it. So the Cutoff screen's new card subtracts only what *says* it came from the tin, and **names** the rest: *"₱500 of this cutoff's payments do not say where the money came from, so it is NOT subtracted above. If any of it came out of the tin, the real figure is lower by that much."* The direction of the doubt is stated, which is the difference between a figure he can act on and one he has to trust.
+
+The card stays away entirely until something has been marked, because before that it would be the day's cash restated under a new heading. It ends by asking for the count — *"Count the tin before you collect it"* — which is the half this release does not yet do.
+
+**Known gap, stated on the card itself:** the Cutoff screen's own one-tap doors (the Mama and Electric chips, "Pay a backlog") do not yet say where their money came from, so they land blank and show up in that unknown total.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.
