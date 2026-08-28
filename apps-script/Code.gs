@@ -279,7 +279,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.12.0';
+var VERSION = '2.12.1';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -409,7 +409,7 @@ var SCHEMA = [
   { name: TAB.EXPENSES, headers: ['date', 'category', 'item', 'amount', 'backlog_ref', 'notes', 'entry_id', 'updated_at', 'stock_product', 'stock_qty', 'paid_from'], textCols: ['date', 'updated_at', 'paid_from'] },
   { name: TAB.BACKLOGS, headers: ['name', 'description', 'total_amount', 'start_date', 'active'], textCols: ['start_date'] },
   // The Split is an ENTERED amount per cutoff (v2.3.0), no longer the residual.
-  { name: TAB.CUTOFF_INPUTS, headers: ['start', 'end', 'split_amount', 'entry_id', 'updated_at'], textCols: ['start', 'end', 'updated_at'] },
+  { name: TAB.CUTOFF_INPUTS, headers: ['start', 'end', 'split_amount', 'entry_id', 'updated_at', 'tin_counted'], textCols: ['start', 'end', 'updated_at'] },
   { name: TAB.CUTOFFS, headers: ['start', 'end', 'total', 'cash', 'gcash', 'mama', 'split', 'per_partner', 'supplies', 'octopus', 'other', 'electric', 'note_text', 'generated_at'], textCols: ['start', 'end', 'generated_at'] }
 ];
 
@@ -520,6 +520,9 @@ function doPost(e) {
         break;
       case 'saveCutoffSplit':
         data = withLock(function () { return apiSaveCutoffSplit(ss, payload); });
+        break;
+      case 'saveTinCount':
+        data = withLock(function () { return apiSaveTinCount(ss, payload); });
         break;
       case 'savePrices':
         data = withLock(function () { return apiSavePrices(ss, payload); });
@@ -1483,6 +1486,36 @@ function apiSaveCutoffSplit(ss, payload) {
     entry_id: entryId, start: start, end: end,
     split_amount: amount, per_partner: round2(amount / 2)
   };
+}
+
+/**
+ * WHAT WAS ACTUALLY IN THE TIN, for one cutoff (v2.12.1).
+ *
+ * The other half of v2.12.0. The app can say what the tin SHOULD hold — cash
+ * sales less what was paid out of it — and this is the figure that says what it
+ * really held, so the two can be set side by side before the money is collected.
+ *
+ * It lives on the SAME CutoffInputs row as the split, keyed on (start, end), and
+ * writes ONLY its own cell: buildRow starts from the existing row, so saving a
+ * count can never disturb a split that was already entered (and the reverse).
+ *
+ * Centavos are allowed here, unlike the split: a tin holds coins, and rounding
+ * her count would manufacture the very difference this screen exists to find.
+ */
+function apiSaveTinCount(ss, payload) {
+  var start = reqDate(payload.start, 'start');
+  var end = reqDate(payload.end, 'end');
+  if (start > end) throw new Error('start (' + start + ') must be on or before end (' + end + ').');
+  var entryId = asStr(payload.entryId);
+  if (!entryId) throw new Error('entryId is required.');
+  var counted = numOrThrow(payload.counted, 'The counted cash');
+  if (counted < 0) throw new Error('The counted cash cannot be negative — a tin cannot hold less than nothing.');
+
+  upsertRows(ss, TAB.CUTOFF_INPUTS, [{
+    start: start, end: end, tin_counted: round2(counted),
+    entry_id: entryId, updated_at: nowStamp()
+  }], ['start', 'end']);
+  return { entry_id: entryId, start: start, end: end, tin_counted: round2(counted) };
 }
 
 /** Maintenance screen: edit prices without opening the sheet on a phone.
@@ -3258,6 +3291,10 @@ function readCutoffInputs(ss) {
       start: start,
       end: end,
       split_amount: asNum(cellOf(r, t, 'split_amount')),
+      // What the tin actually held (v2.12.1). Kept RAW: a blank means nobody has
+      // counted this cutoff yet, which is different from counting it and finding
+      // nothing — and only the raw value can tell those apart.
+      tin_counted: asStr(cellOf(r, t, 'tin_counted')),
       entry_id: asStr(cellOf(r, t, 'entry_id')),
       updated_at: asStr(cellOf(r, t, 'updated_at'))
     });

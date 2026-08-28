@@ -499,3 +499,16 @@ One end-to-end test and one source pin; **12 mutants, all red**. Two survived th
 The end-to-end test walks the seam: tin money subtracted, GCash and own money not, a row that says nothing counted **apart** rather than assumed either way, an invalid source refused by name, and the value surviving sheet → bootstrap → phone with a legacy row staying blank.
 
 Suites: **208** (`run-tests.js`) + **230** (`contract.test.js`).
+
+### v2.12.1 — counting the tin
+
+**11 mutants, no survivors.** Two of them are worth naming because they guard a class of bug rather than a line:
+
+- `SERVER count wipes the split` — the count and the split share one `CutoffInputs` row, and the test proves an upsert in **either order** leaves the other field standing, on the sheet and on the phone.
+- `CLIENT uncounted reads zero` — coercing a blank `tin_counted` to 0 would report a shortage of the whole tin on every cutoff nobody counted. Pinned as `counted === null`, with a **counted zero** asserted separately as a real answer that reads as a full shortage.
+
+Building it surfaced a bug I would otherwise have shipped: `applyLocalCutoffSplit` **replaced** the whole local row, so saving a split would have dropped a tin count that the sheet itself kept — the mirror disagreeing with the server about a row they share. Both appliers now merge, matching `buildRow`.
+
+One test expectation of my own was wrong: I asserted `tinUnknown === 500` when the shared fixture already carries unknown-source expenses in that period, so the figure was 1,700. Measured as a **delta** now — an absolute figure there was pinning the fixture, not the behaviour.
+
+Suites: **208** (`run-tests.js`) + **232** (`contract.test.js`).

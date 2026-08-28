@@ -590,7 +590,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.12.0';
+const APP_VERSION = '2.12.1';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -958,6 +958,10 @@ function normCutoffInput(r){
   return {
     start: txt(r.start), end: txt(r.end),
     split_amount: num(pick(r, 'split_amount', 'splitAmount')),
+    // What the tin actually held (v2.12.1). RAW on purpose: a blank means nobody
+    // has counted this cutoff, and coercing it to 0 would report a shortage of
+    // the whole tin on every cutoff nobody has got round to counting.
+    tin_counted: rawNum(pick(r, 'tin_counted', 'tinCounted')),
     entry_id: txt(pick(r, 'entry_id', 'entryId')),
     updated_at: txt(pick(r, 'updated_at', 'updatedAt'))
   };
@@ -1127,6 +1131,7 @@ const SNAPSHOT_ACTIONS = Object.assign(Object.create(null),
 const QUEUE_KEY_FOR = Object.assign(Object.create(null), {
   saveDay:'date', saveExpense:'entryId', deleteExpense:'entryId',
   saveStockCount:'entryId', saveStockDelivery:'entryId', saveCutoffSplit:'entryId',
+  saveTinCount:'entryId',
   savePrices:'entryId', saveSettings:'entryId', saveStockItems:'entryId'
 });
 function sanitizeQueue(raw){
@@ -1724,6 +1729,36 @@ function daySalary(row){
 /** The SPLIT for a period: an ENTERED amount, not the residual (owner,
  *  2026-08-03). The row saved for this exact period if there is one, else the
  *  Settings default. `entered` lets the screen say which one it is showing. */
+/** What the tin was counted at for this cutoff, and how that sits against what
+ *  it should hold. `counted: null` means nobody has counted — a fact, not a
+ *  zero. `off` is counted − expected: negative is short, positive is over. */
+function tinCountFor(per, f){
+  const row = asObj(asObj(state.cutoffInputs)[periodKey(per)]);
+  const raw = row.tin_counted;
+  if (raw === '' || raw == null) return { counted: null, off: 0 };
+  const counted = Math.max(0, r2(raw));
+  return { counted: counted, off: r2(counted - num(asObj(f).tinExpected)) };
+}
+
+/** The one sentence that says what the difference means. Kept apart from the
+ *  card so the wording is testable without a DOM. */
+function tinVerdict(per, f){
+  const t = tinCountFor(per, f);
+  if (t.counted === null) return '';
+  const unknown = num(asObj(f).tinUnknown);
+  const tail = unknown > 0
+    ? ' Bear in mind ' + peso(unknown) + ' of this cutoff\'s payments do not say where they came from, ' +
+      'so some of a shortage may simply be that.'
+    : '';
+  if (t.off === 0) return 'Counted ' + peso(t.counted) + ' — exactly what it should hold.' + tail;
+  if (t.off < 0){
+    return 'Counted ' + peso(t.counted) + ', which is ' + peso(-t.off) + ' SHORT of what it should hold. ' +
+      'Worth finding tonight: a wrong change given, a purchase nobody wrote down, or a count that slipped.' + tail;
+  }
+  return 'Counted ' + peso(t.counted) + ', which is ' + peso(t.off) +
+    ' MORE than it should hold. Usually a sale that never got written down, or a purchase entered twice.' + tail;
+}
+
 function splitFor(per){
   const row = asObj(state.cutoffInputs)[periodKey(per)];
   if (isObj(row) && row.split_amount !== '' && row.split_amount != null){
@@ -2439,11 +2474,31 @@ function applyLocalCutoffSplit(p){
   ensureShape();
   const per = { start:txt(p.start), end:txt(p.end) };
   if (!isDateStr(per.start) || !isDateStr(per.end)) return;
-  state.cutoffInputs[periodKey(per)] = {
+  // MERGE, never replace (v2.12.1): the tin count shares this row, and the
+  // server's own upsert starts from the existing row and overwrites only the
+  // cells it was given. A local mirror that replaced the row would drop a
+  // counted figure the moment a split was saved.
+  const key = periodKey(per);
+  const was = asObj(asObj(state.cutoffInputs)[key]);
+  state.cutoffInputs[key] = Object.assign({}, was, {
     start:per.start, end:per.end, split_amount:Math.max(0, r2(p.amount)),
     entry_id:txt(p.entryId), updated_at:new Date().toISOString()
-  };
+  });
   invalidateNoteFor(per.start);
+}
+
+/** What the tin actually held, for one cutoff. Shares CutoffInputs with the
+ *  split and touches only its own field — same rule, opposite direction. */
+function applyLocalTinCount(p){
+  ensureShape();
+  const per = { start:txt(p.start), end:txt(p.end) };
+  if (!isDateStr(per.start) || !isDateStr(per.end)) return;
+  const key = periodKey(per);
+  const was = asObj(asObj(state.cutoffInputs)[key]);
+  state.cutoffInputs[key] = Object.assign({}, was, {
+    start:per.start, end:per.end, tin_counted:Math.max(0, r2(p.counted)),
+    entry_id:txt(p.entryId), updated_at:new Date().toISOString()
+  });
 }
 /* ---- Maintenance writers, applied locally so the screens show the new figures
    straight away and keep showing them offline. Each one touches ONLY the fields
@@ -2536,6 +2591,7 @@ const LOCAL_APPLIERS = {
   saveStockCount: p => applyLocalStockCount(p),
   saveStockDelivery: p => applyLocalStockDelivery(p),
   saveCutoffSplit: p => applyLocalCutoffSplit(p),
+  saveTinCount: p => applyLocalTinCount(p),
   savePrices: p => applyLocalPrices(p),
   saveSettings: p => applyLocalSettings(p),
   saveStockItems: p => applyLocalStockItems(p)
@@ -5735,9 +5791,27 @@ function renderCutoff(){
         'subtracted above. If any of it came out of the tin, the real figure is lower by that much. ' +
         'Payments entered on the Expenses screen say where they came from; the one-tap chips here do not yet.</p>';
     }
-    h += '<p class="hint" style="margin-top:8px;">Count the tin before you collect it. ' +
-      'A figure that does not match is worth finding tonight rather than next fortnight.</p>' +
-    '</div>';
+    // THE COUNT (v2.12.1). Its own field on the same card, so the figure it is
+    // compared against is on screen while she types — the expected figure is the
+    // hard half, and the app already has it.
+    const t = tinCountFor(per, f);
+    const draft = Object.prototype.hasOwnProperty.call(tinEdits, periodKey(per))
+      ? tinEdits[periodKey(per)]
+      : (t.counted === null ? '' : String(t.counted));
+    h += '<div class="r-sep" role="presentation"></div>' +
+      '<div class="field" style="margin-bottom:8px;"><label for="tinCountIn">How much is actually in the tin? (₱)</label>' +
+        '<input class="input money" id="tinCountIn" inputmode="decimal" autocomplete="off" placeholder="0" value="' + esc(draft) + '">' +
+        '<p class="err" id="err-tin" hidden></p></div>' +
+      '<button type="button" class="btn block" data-act="tin-save">Save the count</button>';
+    const verdict = tinVerdict(per, f);
+    if (verdict){
+      h += '<p style="margin-top:10px;' + (t.off < 0 ? 'color:var(--alert);font-weight:600;' : '') + '">' +
+        esc(verdict) + '</p>';
+    } else {
+      h += '<p class="hint" style="margin-top:10px;">Count the tin before you collect it. ' +
+        'A figure that does not match is worth finding tonight rather than next fortnight.</p>';
+    }
+    h += '</div>';
   }
 
   // Live local preview
@@ -6071,6 +6145,42 @@ function updateSplitLive(){
   const block = $('noteBlock');
   if (block) block.hidden = !!pendingSplit(cutoffPer);
   setErr('err-split', num(raw) < 0 ? 'The split cannot be less than zero.' : '');
+}
+
+/** Save what the tin actually held for the cutoff on screen (v2.12.1). Reuses
+ *  the row's existing entry_id so re-counting rewrites ONE row and the queue
+ *  keeps one item for it — the same rule the split follows. */
+function saveTinCount(){
+  const per = cutoffPer || currentPeriod(todayStr());
+  const key = periodKey(per);
+  const raw = Object.prototype.hasOwnProperty.call(tinEdits, key) ? tinEdits[key] : '';
+  const el = $('err-tin');
+  const say = (msg) => { if (el){ el.textContent = msg; el.hidden = !msg; } };
+  if (txt(raw).trim() === ''){
+    say('Enter what you counted, or leave the tin alone for now.');
+    return;
+  }
+  const counted = num(raw);
+  if (!(counted >= 0)){
+    say('The counted cash cannot be less than zero.');
+    return;
+  }
+  say('');
+  const existing = asObj(asObj(state.cutoffInputs)[key]);
+  const payload = {
+    start: per.start, end: per.end, counted: r2(counted),
+    entryId: txt(existing.entry_id) || uuid()
+  };
+  applyLocalTinCount(payload);
+  enqueue('saveTinCount', payload);
+  delete tinEdits[key];
+  persistState();
+  renderCutoff();
+  const f = computeCutoff(per);
+  const t = tinCountFor(per, f);
+  toast(t.off === 0
+    ? 'Counted ' + peso(t.counted) + ' — it matches.'
+    : 'Counted ' + peso(t.counted) + ' — ' + peso(Math.abs(t.off)) + (t.off < 0 ? ' short.' : ' over.'));
 }
 
 function saveSplit(){
@@ -6930,6 +7040,9 @@ function costWhyNone(daysOpen, balls){
   return '';
 }
 
+// What is typed into the tin-count field, per cutoff, before it is saved —
+// the same shape splitEdits uses, so the keyboard never jumps mid-entry.
+const tinEdits = Object.create(null);
 let trendOpen = false;    // whether "How the nights compare" is showing
 
 /** The trend section. Worked out entirely on the phone, so it opens instantly
@@ -8291,6 +8404,7 @@ document.addEventListener('click', (ev) => {
     if (!costPer) costPer = currentPeriod(todayStr());
     loadCosting();
   }
+  else if (act === 'tin-save') saveTinCount();
   else if (act === 'trend-open'){ trendOpen = true; renderIbapa(); }
   else if (act === 'trend-close'){ trendOpen = false; renderIbapa(); }
   else if (act === 'cost-close'){ costOpen = false; renderIbapa(); }
@@ -8411,6 +8525,9 @@ document.addEventListener('input', (ev) => {
 
   // Cutoff fields. The split's residual follows the field as it is typed; only
   // the four figures it moves are rewritten, so the keyboard stays put.
+  else if (id === 'tinCountIn'){
+    if (cutoffPer) tinEdits[periodKey(cutoffPer)] = ev.target.value;
+  }
   else if (id === 'coSplitIn'){
     if (cutoffPer) splitEdits[periodKey(cutoffPer)] = ev.target.value;
     updateSplitLive();

@@ -223,6 +223,8 @@ return {
   stockStatusOf, stockStatusList, qtyWithUnit, daySalary, splitFor, dailySalary,
   // v2.10.2: how long what is on the shelf will last, at the rate it is going.
   stockRunway, stockRunwayText,
+  // v2.12.1: the tin count and what the difference means.
+  tinCountFor, tinVerdict, applyLocalTinCount, applyLocalCutoffSplit,
   // v2.11.0: how the nights compare.
   trendNights, trendByWeekday, trendBySku, trendCutoffs, trendHTML, weekdayName,
   trendState(v){ if (v && 'open' in v) trendOpen = v.open; },
@@ -4750,6 +4752,126 @@ test('GIVEN AWAY OR RUINED: what left the tray unpaid is not revenue (v2.10.1)',
     'all ten boxes of four were MADE — free ones cost the same to make');
 });
 
+test('THE TIN COUNT: over, short, exact — and never a zero nobody entered (v2.12.1)', () => {
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const D = ymdDaysAgo(2);
+  const per = app.currentPeriod(D);
+
+  // ₱2,000 cash in, ₱300 out of the tin → ₱1,700 should be left.
+  app.loadBentaForm(D);
+  const box4 = app.benta.rows.find(r => r.sku === 'box4');
+  box4.sod = 40; box4.eod = 0;
+  app.applyLocalDay(app.bentaPayload());
+  app.applyLocalExpense({ date: D, category: 'Supplies', item: 'Veggies', amount: 300,
+    backlogRef: '', notes: '', paidFrom: 'tin', entryId: 'tin-e1' });
+  let f = app.computeCutoff(per);
+  const should = f.tinExpected;
+  assert.ok(should > 0, 'precondition: the tin should hold something');
+
+  // NOBODY HAS COUNTED. That is a fact, not a zero — reporting a shortage of the
+  // whole tin on every uncounted cutoff would make the figure worthless.
+  assert.strictEqual(app.tinCountFor(per, f).counted, null, 'uncounted is null, never 0');
+  assert.strictEqual(app.tinVerdict(per, f), '', 'and it says nothing at all');
+
+  // EXACT.
+  app.applyLocalTinCount({ start: per.start, end: per.end, counted: should, entryId: 'tc-1' });
+  f = app.computeCutoff(per);
+  assert.strictEqual(app.tinCountFor(per, f).off, 0);
+  assert.match(app.tinVerdict(per, f), /exactly what it should hold/);
+
+  // SHORT — named as short, with the peso figure and where to look.
+  app.applyLocalTinCount({ start: per.start, end: per.end, counted: should - 200, entryId: 'tc-1' });
+  f = app.computeCutoff(per);
+  assert.strictEqual(app.tinCountFor(per, f).off, -200);
+  let v = app.tinVerdict(per, f);
+  assert.match(v, /SHORT of what it should hold/);
+  assert.match(v, /a purchase nobody wrote down/, 'and the likely causes, in her terms');
+
+  // OVER — a different story, so a different sentence.
+  app.applyLocalTinCount({ start: per.start, end: per.end, counted: should + 50, entryId: 'tc-1' });
+  f = app.computeCutoff(per);
+  assert.strictEqual(app.tinCountFor(per, f).off, 50);
+  v = app.tinVerdict(per, f);
+  assert.match(v, /MORE than it should hold/);
+  assert.match(v, /a sale that never got written down/);
+
+  // UNKNOWN MONEY QUALIFIES THE VERDICT: a shortage may simply be a payment
+  // that never said where it came from, and the sentence must admit that.
+  // Measured as a DELTA: the shared fixture already carries expenses in this
+  // period that say nothing about their source, so an absolute figure here would
+  // be pinning the fixture rather than the behaviour.
+  const unknownBefore = app.computeCutoff(per).tinUnknown;
+  app.applyLocalExpense({ date: D, category: 'Mama', item: '', amount: 500,
+    backlogRef: '', notes: '', entryId: 'tin-unknown' });
+  f = app.computeCutoff(per);
+  assert.strictEqual(f.tinUnknown, Math.round((unknownBefore + 500) * 100) / 100,
+    'a payment that says nothing adds to the unknown total, exactly once');
+  assert.match(app.tinVerdict(per, f), /do not say where they came from/,
+    'the verdict must not blame a shortage it cannot account for');
+
+  // A count of ZERO is a real answer — the tin was empty — and must read as a
+  // shortage of the whole expected figure, not as "not counted".
+  app.applyLocalTinCount({ start: per.start, end: per.end, counted: 0, entryId: 'tc-1' });
+  f = app.computeCutoff(per);
+  assert.strictEqual(app.tinCountFor(per, f).counted, 0, 'a counted zero is a count');
+  assert.match(app.tinVerdict(per, f), /SHORT/);
+});
+
+test('THE TIN COUNT and the SPLIT share one row without treading on each other (v2.12.1)', () => {
+  // Both live on the CutoffInputs row for (start, end). The server's upsert
+  // starts from the existing row and overwrites only what it was given; the
+  // local mirror has to do the same, or saving one would drop the other.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const per = app.currentPeriod(ymdDaysAgo(2));
+
+  app.applyLocalCutoffSplit({ start: per.start, end: per.end, amount: 3000, entryId: 'ci-1' });
+  app.applyLocalTinCount({ start: per.start, end: per.end, counted: 1700, entryId: 'ci-1' });
+  let row = app.state.cutoffInputs[app.periodKey(per)];
+  assert.strictEqual(row.split_amount, 3000, 'the split survived the count');
+  assert.strictEqual(row.tin_counted, 1700, 'and the count is there');
+
+  // ...and the other way round.
+  app.applyLocalCutoffSplit({ start: per.start, end: per.end, amount: 4000, entryId: 'ci-1' });
+  row = app.state.cutoffInputs[app.periodKey(per)];
+  assert.strictEqual(row.tin_counted, 1700, 'the count survived a re-saved split');
+  assert.strictEqual(row.split_amount, 4000);
+
+  // THE SEAM: the sheet must behave the same way, in both orders.
+  const srv = loadServer();
+  const p1 = post(srv.ctx, { token: srv.token, action: 'saveCutoffSplit',
+    payload: { start: per.start, end: per.end, amount: 3000, entryId: 'srv-ci' } });
+  assert.strictEqual(p1.ok, true, p1.error);
+  const p2 = post(srv.ctx, { token: srv.token, action: 'saveTinCount',
+    payload: { start: per.start, end: per.end, counted: 1700.5, entryId: 'srv-ci' } });
+  assert.strictEqual(p2.ok, true, p2.error);
+  assert.strictEqual(p2.data.tin_counted, 1700.5, 'centavos are kept — a tin holds coins');
+
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} });
+  const ci = boot.data.cutoffInputs.find(r => r.start === per.start && r.end === per.end);
+  assert.strictEqual(Number(ci.split_amount), 3000, 'the split is still on the row');
+  assert.strictEqual(Number(ci.tin_counted), 1700.5, 'beside the count');
+
+  // A negative count is refused rather than clamped: a tin cannot hold less
+  // than nothing, and silently reading it as 0 would report a false shortage.
+  const bad = post(srv.ctx, { token: srv.token, action: 'saveTinCount',
+    payload: { start: per.start, end: per.end, counted: -5, entryId: 'srv-ci' } });
+  assert.strictEqual(bad.ok, false);
+  assert.match(bad.error, /cannot be negative/);
+
+  // And an UNCOUNTED cutoff comes back blank, not zero.
+  const other = app.shiftPeriod(per, -1);
+  post(srv.ctx, { token: srv.token, action: 'saveCutoffSplit',
+    payload: { start: other.start, end: other.end, amount: 2000, entryId: 'srv-other' } });
+  const boot2 = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} });
+  const ci2 = boot2.data.cutoffInputs.find(r => r.start === other.start);
+  assert.strictEqual(ci2.tin_counted, '', 'never counted stays blank on the wire');
+  const app2 = syncedClient(boot2.data);
+  assert.strictEqual(app2.tinCountFor(other, app2.computeCutoff(other)).counted, null,
+    'and reads as "nobody counted" on the phone');
+});
+
 test('THE TIN: cash in, less what she took out of it, and what it cannot say (v2.12.0)', () => {
   // Owner, 2026-08-28: "its collected until every cutoff" — the tin is emptied
   // at settlement, not nightly, and Mama buys supplies out of that same tin. So
@@ -4844,7 +4966,7 @@ test('SOURCE PIN: the tin card names its unknown money and asks for a count (v2.
   const src = fs.readFileSync(INDEX_HTML, 'utf8');
   const at = src.indexOf('What should be in the tin');
   assert.ok(at > 0, 'the card must exist');
-  const card = src.slice(at - 600, at + 1800);
+  const card = src.slice(at - 600, at + 3600);
   assert.match(card, /if \(num\(f\.tinOut\) > 0 \|\| num\(f\.tinUnknown\) > 0\)/,
     'it stays away until something has actually been marked');
   // Pinned as the CONDITION, not just the sentence: a dead `if` leaves the
@@ -4855,7 +4977,14 @@ test('SOURCE PIN: the tin card names its unknown money and asks for a count (v2.
     'unknown money is named, not folded in');
   assert.match(card, /the real figure is lower by that much/,
     'and the DIRECTION of the doubt is stated');
-  assert.match(card, /Count the tin before you collect it/, 'with what to do about it');
+  // v2.12.1: the ask is now the FALLBACK — once she has counted, the verdict
+  // takes its place, so both branches are pinned.
+  assert.match(card, /Count the tin before you collect it/,
+    'it asks for the count while there is none');
+  assert.match(card, /const verdict = tinVerdict\(per, f\);/,
+    'and once counted, the verdict replaces the ask');
+  assert.match(card, /id="tinCountIn"/, 'with a field to count into');
+  assert.match(card, /data-act="tin-save"/, 'and a way to save it');
 
   // AND THE FORM MUST ACTUALLY SEND THE CHOICE. submitGasto reads the DOM, so
   // this is pinned at the payload it builds — the one place the chip's answer

@@ -359,6 +359,16 @@ The card stays away entirely until something has been marked, because before tha
 
 **Known gap, stated on the card itself:** the Cutoff screen's own one-tap doors (the Mama and Electric chips, "Pay a backlog") do not yet say where their money came from, so they land blank and show up in that unknown total.
 
+### v2.12.1 — counting the tin
+
+The other half of v2.12.0. The app can say what the tin **should** hold; this is the figure that says what it **really** held, so the two sit side by side before the money is collected.
+
+New action **`saveTinCount`** `{start, end, counted, entryId}`. It lives on the **same `CutoffInputs` row as the split**, keyed on `(start, end)`, and writes only its own cell — `buildRow` starts from the existing row, so saving a count can never disturb a split already entered, or the reverse. The **local mirror had to be taught the same rule**: both appliers now merge instead of replacing, or saving one would have dropped the other on the phone while the sheet kept both. Centavos are kept, unlike the split: a tin holds coins, and rounding her count would manufacture the very difference this screen exists to find. A negative count is refused rather than clamped.
+
+**Uncounted is `null`, never `0`.** `tin_counted` is carried RAW from the sheet, so "nobody has counted this cutoff" and "counted it and found nothing" stay distinguishable — coercing a blank to zero would report a shortage of the entire tin on every cutoff nobody got round to counting. A counted **zero** is a real answer and reads as a full shortage.
+
+The verdict is one sentence with the peso figure, the direction, and where to look — *short*: "a wrong change given, a purchase nobody wrote down, or a count that slipped"; *over*: "usually a sale that never got written down, or a purchase entered twice". A shortage is shown in the alert colour. When unknown-source money exists in the cutoff, the verdict **says so and refuses to blame a difference it cannot account for**.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.
