@@ -736,7 +736,10 @@ test('saveDay computed figures: price snapshot, cheese split, cash = total - gca
     price: 50, cheese_price: 60,
     // How many of sold the special order used (v2.7.0) — 0 on a day with no
     // customBoxes, and ALWAYS present so the phone never guesses.
-    custom_qty: 0
+    custom_qty: 0,
+    // ...and how many were given away or ruined (v2.10.1), on the same rule:
+    // always present, 0 when nothing was.
+    free_qty: 0
   }]);
   assert.strictEqual(r.data.excluded_total, 0,
     'a day with nothing excluded still answers the key, so the phone never guesses');
@@ -785,8 +788,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.10.0', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.10.0');
+  assert.strictEqual(g.data.version, '2.10.1', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.10.1');
 });
 
 // ---------------------------------------------------------------------------
@@ -883,7 +886,7 @@ test('setupSheet APPENDS the new columns and moves nothing', () => {
 
   const counts = ss.getSheetByName('DailyCounts').getDataRange().getValues();
   assert.deepStrictEqual(counts[0],
-    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty']),
+    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty', 'free_qty']),
     'new DailyCounts columns must be appended to the RIGHT, in schema order');
   assert.deepStrictEqual(counts[1].slice(0, 9), OLD_COUNT_ROWS[0], 'existing cells must not shift');
   assert.deepStrictEqual(counts[2].slice(0, 9), OLD_COUNT_ROWS[1]);
@@ -893,7 +896,7 @@ test('setupSheet APPENDS the new columns and moves nothing', () => {
   // current Prices tab; a blank custom_qty (v2.7.0) reads 0 — no special order
   // ever drew from a pre-column row. None may be written as a 0 or a FALSE by
   // the migration.
-  assert.deepStrictEqual(counts[1].slice(9), ['', '', '', '', '', '', ''], 'new cells start blank');
+  assert.deepStrictEqual(counts[1].slice(9), ['', '', '', '', '', '', '', ''], 'new cells start blank');
 
   const log = ss.getSheetByName('DailyLog').getDataRange().getValues();
   assert.deepStrictEqual(log[0], OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes', 'photo_url']));
@@ -1064,8 +1067,8 @@ test('after migrating, a new day writes the new columns and old rows are untouch
   assert.deepStrictEqual(counts[2].slice(0, 9), OLD_COUNT_ROWS[1]);
   const fresh = counts.slice(1).find(x => x[0] === '2026-07-22');
   assert.deepStrictEqual(fresh,
-    ['2026-07-22', 'box6', 10, 4, 6, 1, 2, 420, 'new-day-1', 2, 1, 210, true, 65, 80, 0],
-    'and the in_cutoff + price + custom_qty snapshots are written beside the money they decided');
+    ['2026-07-22', 'box6', 10, 4, 6, 1, 2, 420, 'new-day-1', 2, 1, 210, true, 65, 80, 0, 0],
+    'and the in_cutoff + price + custom_qty + free_qty snapshots are written beside the money they decided');
 });
 
 test('saveDay on a not-yet-migrated sheet self-heals instead of failing', () => {
@@ -1088,7 +1091,7 @@ test('saveDay on a not-yet-migrated sheet self-heals instead of failing', () => 
   assert.strictEqual(r.data.salary, 200, 'the wage is snapshotted even before setupSheet is re-run');
   // The tabs and columns it needed were created/appended on the fly...
   assert.deepStrictEqual(ss.getSheetByName('DailyCounts').getDataRange().getValues()[0],
-    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty']));
+    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty', 'free_qty']));
   assert.deepStrictEqual(ss.getSheetByName('DailyLog').getDataRange().getValues()[0],
     OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes', 'photo_url']));
   const healed = ss.getSheetByName('DailyLog').getDataRange().getValues().slice(1)
@@ -1113,7 +1116,7 @@ test('a hand-added column is never overwritten: new columns land to its right', 
   ctx.setupSheet();
 
   assert.deepStrictEqual(dc.getDataRange().getValues()[0],
-    OLD_COUNT_HEADERS.concat(['owner_note', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty']),
+    OLD_COUNT_HEADERS.concat(['owner_note', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty', 'free_qty']),
     'new columns must go to the right of everything already there');
   assert.strictEqual(dc.getDataRange().getValues()[1][9], 'sobrang ulan',
     "the owner's column would have been reinterpreted as a GCash quantity");
@@ -1131,7 +1134,7 @@ test('a hand-added column is never overwritten: new columns land to its right', 
   }).ok, true);
   const after = dc.getDataRange().getValues();
   assert.deepStrictEqual(after.slice(1).find(x => x[0] === '2026-07-23'),
-    ['2026-07-23', 'box6', 3, 0, 3, 0, 2, 195, 'hand-1', '', 1, 0, 65, true, 65, 80, 0]);
+    ['2026-07-23', 'box6', 3, 0, 3, 0, 2, 195, 'hand-1', '', 1, 0, 65, true, 65, 80, 0, 0]);
   assert.strictEqual(after[1][9], 'sobrang ulan', 'a block rewrite must carry unknown columns through');
 });
 
@@ -1198,8 +1201,8 @@ test('the four buckets sum to sold and produce amount + gcash_amount', () => {
   assert.strictEqual(r.data.gcash, 210);
   assert.strictEqual(r.data.cash, 320);
   const row = countsRowsFor(ss.getSheetByName('DailyCounts'), '2026-07-30')[0];
-  assert.deepStrictEqual(row.slice(5), [2, 4, 530, 'buckets-1', 3, 1, 210, true, 50, 60, 0],
-    'cheese_qty, regular_qty, amount, entry_id, gcash_qty, gcash_cheese_qty, gcash_amount, in_cutoff, price, cheese_price, custom_qty');
+  assert.deepStrictEqual(row.slice(5), [2, 4, 530, 'buckets-1', 3, 1, 210, true, 50, 60, 0, 0],
+    'cheese_qty, regular_qty, amount, entry_id, gcash_qty, gcash_cheese_qty, gcash_amount, in_cutoff, price, cheese_price, custom_qty, free_qty');
 });
 
 test('saveDay ignores a client-sent gcash (an old queued payload cannot write it)', () => {
@@ -1446,7 +1449,7 @@ test('B1: a column holding data under a BLANK header keeps its header blank', ()
 
   const v = dc.getDataRange().getValues();
   assert.deepStrictEqual(v[0],
-    OLD_COUNT_HEADERS.concat(['', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty']),
+    OLD_COUNT_HEADERS.concat(['', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty', 'free_qty']),
     'the new columns must be appended BEYOND every occupied column, so J1 stays blank');
   assert.deepStrictEqual([v[1][9], v[2][9]], [3, 'kulang ang harina'],
     "the owner's own column was claimed and its values relabelled as a GCash quantity");
@@ -1487,7 +1490,7 @@ test('B1: a later save writes the GCash columns in their REAL positions', () => 
   // gcash_qty / gcash_cheese_qty / gcash_amount live in columns 11-13 here, the
   // in_cutoff snapshot in 14, the price snapshot in 15-16, custom_qty in 17.
   assert.deepStrictEqual(v.slice(1).find(x => x[0] === '2026-07-23'),
-    ['2026-07-23', 'box6', 3, 0, 3, 0, 2, 195, 'b1-save', '', 1, 0, 65, true, 65, 80, 0]);
+    ['2026-07-23', 'box6', 3, 0, 3, 0, 2, 195, 'b1-save', '', 1, 0, 65, true, 65, 80, 0, 0]);
   assert.strictEqual(v[1][9], 3, 'a block rewrite must carry the unnamed column through');
   assert.strictEqual(v[2][9], 'kulang ang harina');
 });
@@ -1504,7 +1507,7 @@ test('B1: append beyond a STRAY value too, leaving the blank gap alone', () => {
 
   const v = dc.getDataRange().getValues();
   assert.deepStrictEqual(v[0].slice(9),
-    ['', '', '', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty'],
+    ['', '', '', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty', 'free_qty'],
     'columns 10-12 stay blank-headed; the schema lands at 13-19');
   assert.strictEqual(v[2][11], 'ANO ITO', 'a stray value must not be relabelled either');
   assert.strictEqual(post(ctx, { token: LEGACY_TOKEN, action: 'bootstrap', payload: {} })
@@ -5189,6 +5192,66 @@ test('costing CAVEATS: a floor switches the price advice OFF, a thin period leav
   assert.deepStrictEqual(r.data.targets, [], 'an unpriced ingredient withholds it too');
 });
 
+test('given away or ruined: the server REFUSES what cannot be true (v2.10.1)', () => {
+  const ss = new FakeSpreadsheet();
+  // An explicit clock: the stub freezes time in early August, so a hard-coded
+  // late-August date would be refused as "has not happened yet" and every
+  // assertion below would be measuring the wrong refusal.
+  const ctx = makeContext(ss, new Date('2026-08-23T04:00:00Z'));
+  vm.createContext(ctx);
+  vm.runInContext(source, ctx, { filename: 'Code.gs' });
+  const token = ctx.setupSheet();
+  const p = (b) => JSON.parse(ctx.doPost({ postData: { contents: JSON.stringify(b) } }).getContent());
+  const day = (counts, extra) => p({ token, action: 'saveDay', payload: Object.assign({
+    date: '2026-08-20', closed: false, staff: 'Mama', customAmount: 0, customGcash: 0,
+    notes: '', counts: counts, entryId: 'free-srv' }, extra || {}) });
+
+  // More given away than ever left the tray.
+  let r = day([{ sku: 'box4', sod: 10, eod: 8, freeQty: 5 }]);
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /5 given away or ruined, but only 2 left the tray/,
+    'both figures are named, so she can see which one is wrong');
+
+  // A fraction of a box cannot be given away.
+  r = day([{ sku: 'box4', sod: 10, eod: 0, freeQty: 1.5 }]);
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /whole number/);
+
+  // Negative is refused in its own words.
+  r = day([{ sku: 'box4', sod: 10, eod: 0, freeQty: -1 }]);
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /cannot be negative/);
+
+  // The buckets bound against what was PAID for, and the refusal says why the
+  // room shrank — naming BOTH reasons when both apply.
+  r = day([{ sku: 'box4', sod: 10, eod: 0, freeQty: 3, cheeseQty: 8 }]);
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /but only 7 were sold at menu price \(3 were given away or ruined\)/);
+
+  r = day([{ sku: 'box4', sod: 10, eod: 0, freeQty: 2, cheeseQty: 8 }],
+    { customAmount: 100, customBoxes: [{ sku: 'box4', qty: 1 }] });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /the special order used 1, 2 were given away or ruined/,
+    'both reasons, in one sentence, in the order the money left');
+
+  // And the honest case lands, with `sold` untouched and the money reduced.
+  r = day([{ sku: 'box4', sod: 10, eod: 0, freeQty: 2 }]);
+  assert.strictEqual(r.ok, true, r.error);
+  const l = r.data.lines.find(x => x.sku === 'box4');
+  assert.strictEqual(l.sold, 10, 'ten left the tray');
+  assert.strictEqual(l.free_qty, 2);
+  assert.strictEqual(l.regular_qty, 8, 'eight were paid for');
+  assert.strictEqual(r.data.total, 8 * l.price);
+
+  // A payload that says nothing about give-aways means none — an older phone
+  // must keep landing exactly as it did.
+  r = day([{ sku: 'box4', sod: 10, eod: 0 }], { entryId: 'free-legacy' });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.data.lines.find(x => x.sku === 'box4').free_qty, 0,
+    'silence means nothing was given away, and the key is still answered');
+  assert.strictEqual(r.data.total, 10 * r.data.lines.find(x => x.sku === 'box4').price);
+});
+
 test('costing: the per-cutoff shares are owed ONCE PER CUTOFF the window touches (v2.9.4)', () => {
   // Probe-proven against v2.9.2: `shares` was mama_per_cutoff + electric_per
   // _cutoff taken ONCE, however long the window. A 1 Jul - 22 Aug window owes
@@ -5950,14 +6013,14 @@ test('an unknown action is refused by name, and doGet answers without a token', 
   assert.strictEqual(r.error, 'Unknown action: "saveDay".',
     'this app cannot save a day, and says so rather than pretending');
   const g = JSON.parse(ctx.doGet({}).getContent());
-  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.10.0' } });
+  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.10.1' } });
 });
 
 test('ping proves the setup WITHOUT spending a unit of quota — even with no key yet', () => {
   const ctx = loadVision({ keepKeyPlaceholder: true });
   const r = vpost(ctx, { token: VISION_TOK, action: 'ping', payload: {} });
   assert.strictEqual(r.ok, true, r.error);
-  assert.strictEqual(r.data.version, '2.10.0', 'the vision project ships with the release it belongs to');
+  assert.strictEqual(r.data.version, '2.10.1', 'the vision project ships with the release it belongs to');
   assert.strictEqual(r.data.model, 'gemini-3.6-flash');
   assert.strictEqual(r.data.key_configured, false, 'a yes/no — never the key itself');
   keepsSecrets(JSON.stringify(r));

@@ -309,6 +309,22 @@ So this compares tonight with the **nights before it**. It is the plain-language
 
 Every claim it makes is **auditable against her own paper** ("sold on 9 of the last 10 nights", "all 20 are still there"), because a warning she cannot check is a warning she has to take on faith.
 
+### v2.10.1 — given away or ruined: what left the tray unpaid is not revenue
+
+Owner, 2026-08-28, asked directly: takoyaki **does** get given away and **does** get ruined.
+
+`sold` is `sod − eod` — which is what left the **tray**, not what was paid for. So every freebie and every dropped box was being booked at full menu price: money the app claimed and the tin never saw, and a cost-per-ball comparison flattered by revenue that never existed.
+
+DailyCounts appends **`free_qty`** (append-only; blank reads 0, and a row written before the column meant exactly that). `sold` keeps its plain physical meaning, so **stock usage and the balls the costing counts are unchanged** — a ball given away ate its ingredients like any other. Only the **priced** quantity shrinks, extending the subtraction v2.7.0 already established for special orders:
+
+```
+regular_qty = sold − custom_qty − free_qty
+```
+
+The four buckets describe **paid** sales, so they bound against `sold − custom_qty − free_qty`, and the refusal names *which* reason shrank the room — both, when both apply. `free_qty` is refused when it is not whole, is negative, or exceeds what actually left the tray (less whatever the special order took), and the phone refuses in the server's own words beside its own stepper, so an impossible figure never queues.
+
+On screen it is one small question on **every** sku card — nori is ruined as readily as a box is — deliberately not folded into the cheese/GCash card, because those describe how paid sales were *paid* and this is the opposite of a paid sale. The receipt says it out loud: `Box 4 ×20, less 2 given away or ruined`, so the tin can still be reconciled by eye.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.

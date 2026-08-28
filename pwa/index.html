@@ -590,7 +590,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.10.0';
+const APP_VERSION = '2.10.1';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -883,6 +883,9 @@ function normCount(c, key){
     // row alone must be able to say so. Blank/absent reads 0 — no special order
     // drew from this line, so all of `sold` was priced, exactly as it was.
     custom_qty: num(pick(c, 'custom_qty', 'customQty')),
+    // Given away or ruined (v2.10.1). Blank on every row saved before the
+    // column existed, and blank reads 0 — an old row claimed nothing was.
+    free_qty: num(pick(c, 'free_qty', 'freeQty')),
     entry_id: txt(pick(c, 'entry_id', 'entryId')),
     // Whether THIS row's money counted, as decided the night it was saved
     // (v2.4.1). Kept raw — '' when the row predates the column — because a blank
@@ -1211,7 +1214,7 @@ function sanitizeDrafts(rawv){
         sku: txt(r.sku), sod: raw1(r.sod), eod: raw1(r.eod),
         cheese: raw1(r.cheese), gcash: raw1(r.gcash), gcashCheese: raw1(r.gcashCheese),
         // Boxes the special order used from this sku (v2.7.0); '' on old drafts.
-        custom: raw1(r.custom)
+        custom: raw1(r.custom), free: raw1(r.free)
       })),
       // A draft written by the old build also carries a `supplies` array. It is
       // dropped here on purpose: that card is retired, and reviving those figures
@@ -1598,7 +1601,11 @@ function computeDay(p){
       // the rest; here the preview reads it as 0 so the receipt stays sensible
       // while validateBenta shows the refusal inline).
       const customQty = (isBox && inCutoff) ? clampQty(customBySku[c.sku], sold) : 0;
-      const avail = sold - customQty;
+      // Given away or ruined (v2.10.1): it LEFT the tray, so `sold` keeps it —
+      // but nobody paid, so the priced quantity does not. Clamped against what
+      // is left after the special order, exactly the bound apiSaveDay enforces.
+      const freeQty = clampQty(pick(c, 'freeQty', 'free_qty'), sold - customQty);
+      const avail = sold - customQty - freeQty;
       const cheese = (isBox && inCutoff) ? clampQty(c.cheeseQty, avail) : 0;
       const gcashQty = inCutoff ? clampQty(c.gcashQty, avail - cheese) : 0;
       const gcashCheese = (isBox && inCutoff) ? clampQty(c.gcashCheeseQty, avail - cheese - gcashQty) : 0;
@@ -1614,6 +1621,9 @@ function computeDay(p){
         // receipt can say "less N for the special order" and applyLocalDay can
         // store the snapshot exactly as the sheet does.
         custom_qty: customQty,
+        // How many of `sold` nobody paid for (v2.10.1), carried on the line so
+        // the receipt can say so and applyLocalDay can store the snapshot.
+        free_qty: freeQty,
         // Did this line's money COUNT? Carried on the line so the receipt can print
         // an excluded sku apart instead of leaving the totals looking wrong.
         in_cutoff: inCutoff
@@ -2164,6 +2174,7 @@ function applyLocalDay(p){
     // How many of `sold` the special order used (v2.7.0) — the last piece of the
     // snapshot: this row's `amount` prices sold − custom_qty units.
     custom_qty: l.custom_qty,
+    free_qty: l.free_qty,
     // The flag SNAPSHOTTED beside the money it decided, exactly as the sheet stores
     // it (v2.4.1). Whether this line's money counted is a fact about THIS day,
     // settled when it was saved — so a later tick of "counts in the cutoff" cannot
@@ -2771,6 +2782,8 @@ function applyServerDay(p, data){
         // guard: an older deployment sends none and the phone's figure stands.
         const cq = pick(l, 'custom_qty', 'customQty');
         if (cq != null && cq !== '') r.custom_qty = num(cq);
+        const fq = pick(l, 'free_qty', 'freeQty');
+        if (fq != null && fq !== '') r.free_qty = num(fq);
       }
     }
   }
@@ -3091,7 +3104,9 @@ function loadBentaForm(date){
     cheese:num(c.cheese_qty), gcash:num(c.gcash_qty), gcashCheese:num(c.gcash_cheese_qty),
     // Boxes the special order used from this sku (v2.7.0), loaded from the same
     // snapshot the sheet stores. 0 on every row saved before the column existed.
-    custom:num(c.custom_qty)
+    custom:num(c.custom_qty),
+    // Given away or ruined (v2.10.1), loaded back like the special order's boxes.
+    free:num(c.free_qty)
   });
   for (const pr of activePrices()){
     rows.push(rowOf(pr.sku, counts.find(x => x.sku === pr.sku) || {}));
@@ -3239,8 +3254,12 @@ function applyBentaDraft(dr){
     if (row){
       row.sod = d.sod; row.eod = d.eod; row.cheese = d.cheese; row.gcash = d.gcash; row.gcashCheese = d.gcashCheese;
       if (d.custom !== '' && d.custom != null) row.custom = d.custom;
+      // Guarded the same way (v2.10.1): a draft from an older build says nothing
+      // about give-aways, so the loaded row's own figure stands.
+      if (d.free !== '' && d.free != null) row.free = d.free;
     }
-    else benta.rows.push({ sku:d.sku, sod:d.sod, eod:d.eod, cheese:d.cheese, gcash:d.gcash, gcashCheese:d.gcashCheese, custom:raw1(d.custom) });
+    else benta.rows.push({ sku:d.sku, sod:d.sod, eod:d.eod, cheese:d.cheese, gcash:d.gcash,
+      gcashCheese:d.gcashCheese, custom:raw1(d.custom), free:raw1(d.free) });
   }
   for (const d of asArr(dr.stock)){
     const row = benta.stock.find(r => r.product === d.product);
@@ -3404,7 +3423,11 @@ function bentaPayload(){
         sku:r.sku, sod:num(r.sod), eod:num(r.eod),
         cheeseQty: b.cheeseQty,
         gcashQty: b.gcashQty,
-        gcashCheeseQty: b.gcashCheeseQty
+        gcashCheeseQty: b.gcashCheeseQty,
+        // Given away or ruined (v2.10.1). Sent as the row holds it: a figure
+        // validateBenta refuses never queues, so nothing here can send what the
+        // server would refuse. Always present, like sod and eod.
+        freeQty: Math.max(0, num(r.free))
       };
       const pr = asArr(state.prices).find(p => isObj(p) && p.sku === r.sku);
       if (pr){
@@ -3494,7 +3517,10 @@ function skuSplitText(pr, row){
 const ROW_FIELDS = Object.assign(Object.create(null),
   { sod:'sod', eod:'eod', cheese:'cheese', gcash:'gcash', gcashCheese:'gcashCheese',
     // Boxes the special order used from this sku (v2.7.0) — customBoxes[].qty.
-    custom:'custom' });
+    custom:'custom',
+    // Units that left the tray without being paid for (v2.10.1) — given away
+    // or ruined. counts[].freeQty.
+    free:'free' });
 
 /* ---- The v2.7.0 presentation of the SAME three entered buckets. ----
    The sheet, the payload and `benta.rows` all keep the four buckets exactly as
@@ -3945,6 +3971,18 @@ function renderBenta(){
       // saved again. Same rule the missing-sku placeholder uses for its cheese
       // steppers — whatever the row already holds must render, so it can be
       // seen and zeroed on purpose, never zeroed behind her back.
+      /* GIVEN AWAY OR RUINED (v2.10.1). Its own small question, on EVERY sku —
+         nori gets ruined as readily as a box does — because `sold` is what left
+         the tray and the app must not price a freebie or a dropped box at full
+         menu price. Not folded into the cheese/GCash card: those describe how
+         paid sales were paid, and this is the opposite of a paid sale. */
+      const freeAsk = '<div class="buckets">' +
+        payRow('Given away or ruined?',
+          stepperHTML(pr.sku, 'free', num(row.free), 'Given away or ruined, ' + pr.label, true), false) +
+        '<p class="hint" style="margin-top:4px;">Counted in “Sold”, because it did leave the tray — just not paid for, so no money is added for it.</p>' +
+        '<p class="err" id="err-free-' + sk + '" hidden></p>' +
+      '</div>';
+
       let oldBuckets = '';
       if (!inCut){
         const held = BUCKETS.filter(b => num(row[b.field]) !== 0);
@@ -3984,8 +4022,8 @@ function renderBenta(){
         // so, and old bucket figures the row still holds render so they can be
         // zeroed — see oldBuckets.
         (inCut
-          ? cheeseFact
-          : oldBuckets + '<p class="excl-note">Count it as usual — its money is kept separate.</p>' +
+          ? cheeseFact + freeAsk
+          : oldBuckets + freeAsk + '<p class="excl-note">Count it as usual — its money is kept separate.</p>' +
             '<div class="sku-split" id="split-' + sk + '">' + skuSplitText(prEff, row) + '</div>') +
         '<p class="err" id="err-sku-' + sk + '" hidden></p>' +
       '</div>';
@@ -4370,8 +4408,11 @@ function updateReceipt(){
       // the order's own money is the Custom order line below (v2.7.0).
       if (l.regular_qty > 0 || l.custom_qty > 0){
         any = true;
-        h += rLine(l.label + ' ×' + (l.regular_qty + l.custom_qty) +
-          (l.custom_qty > 0 ? ', less ' + l.custom_qty + ' for the special order' : ''),
+        const aside = [];
+        if (l.custom_qty > 0) aside.push(l.custom_qty + ' for the special order');
+        if (num(l.free_qty) > 0) aside.push(num(l.free_qty) + ' given away or ruined');
+        h += rLine(l.label + ' ×' + (l.regular_qty + l.custom_qty + num(l.free_qty)) +
+          (aside.length ? ', less ' + aside.join(' and ') : ''),
           l.regular_qty * l.price);
       }
       if (l.cheese_qty > 0){ any = true; h += rLine(l.label + ' cheese ×' + l.cheese_qty, l.cheese_qty * l.cheese_price); }
@@ -4738,6 +4779,21 @@ function validateBenta(){
     // it — exactly apiSaveDay's guard, which never sees an invalid customQty
     // because it throws on those first.
     const customQty = (!errs[cboxKey] && cq > 0) ? cq : 0;
+    // Given away or ruined (v2.10.1), in the server's own sentences and its own
+    // order. Its error slot is on the sku card, under its own stepper.
+    const fq = num(r.free);
+    const freeKey = 'free:' + r.sku;
+    if (!isWhole(fq)){
+      errs[freeKey] = label + ': given away or ruined must be a whole number (got "' + txt(r.free) + '").';
+    } else if (fq < 0){
+      errs[freeKey] = label + ': given away or ruined cannot be negative.';
+    } else if (fq > Math.max(0, sold) - customQty){
+      errs[freeKey] = label + ': ' + fq + ' given away or ruined, but only ' +
+        (Math.max(0, sold) - customQty) + ' left the tray' +
+        (customQty > 0 ? ' after the special order took ' + customQty : '') +
+        '. Lower it, or check the counts.';
+    }
+    const freeQty = (!errs[freeKey] && fq > 0) ? fq : 0;
     if (!isWhole(sod) || !isWhole(eod) || !isWhole(cheese) || !isWhole(gcash) || !isWhole(gcashCheese)){
       errs[key] = 'Use whole numbers only — half a box cannot be sold.';
     } else if (sod < 0 || eod < 0){
@@ -4754,14 +4810,18 @@ function validateBenta(){
       // Nothing sold yet, so there is nothing to split. Blaming the buckets
       // ("can only go up to 0") points at the wrong field entirely.
       errs[key] = 'Enter Start of day and End of day first, then split the boxes.';
-    } else if (cheese + gcash + gcashCheese > sold - customQty){
-      // The buckets describe PRICED sales only, so the bound is sold minus the
-      // special order's boxes (v2.7.0) — with no special order this is the
-      // guard it always was, word for word, with the server's own clause
-      // appended when there is one.
+    } else if (cheese + gcash + gcashCheese > sold - customQty - freeQty){
+      // The buckets describe PAID sales only, so the bound is sold minus the
+      // special order's boxes (v2.7.0) and minus what was given away or ruined
+      // (v2.10.1) — with neither, this is the guard it always was, word for
+      // word, with the server's own clauses appended when there are any.
+      const why = [];
+      if (customQty > 0) why.push('the special order used ' + customQty);
+      if (freeQty > 0) why.push(freeQty + ' were given away or ruined');
       errs[key] = 'Cheese (' + cheese + ') + GCash (' + gcash + ') + GCash cheese (' + gcashCheese +
-        ') adds up to ' + (cheese + gcash + gcashCheese) + ', but only ' + (sold - customQty) + ' were sold' +
-        (customQty > 0 ? ' at menu price (the special order used ' + customQty + ')' : '') +
+        ') adds up to ' + (cheese + gcash + gcashCheese) + ', but only ' +
+        (sold - customQty - freeQty) + ' were sold' +
+        (why.length ? ' at menu price (' + why.join(', ') + ')' : '') +
         '. Lower one of them.';
     }
     // The two excluded-sku rules the server enforces, in the server's own words.
@@ -4860,6 +4920,7 @@ function validateBentaLive(){
   for (const r of asArr(benta.rows)){
     setErr('err-sku-' + r.sku, errs['sku:' + r.sku]);
     setErr('err-cbox-' + r.sku, errs['cbox:' + r.sku]);
+    setErr('err-free-' + r.sku, errs['free:' + r.sku]);
     const sold = num(r.sod) - num(r.eod);
     const badge = $('soldbadge-' + r.sku);
     if (badge) badge.classList.toggle('neg', sold < 0);

@@ -447,3 +447,15 @@ Four tests, 13 mutants, all red. The interesting part was how many guards my fir
 One fixture bug of my own: I set the historical totals to ₱4,600 while the counts behind them produced ~₱1,500, so the band check fired on a night I had called "normal" — the check was right and my numbers were not. The usual take is now derived from the very counts the fixture builds.
 
 Suites: **207** (`run-tests.js`) + **221** (`contract.test.js`).
+
+### v2.10.1 — given away or ruined
+
+He confirmed it happens, so `sold = sod − eod` was overstating revenue on every freebie and every dropped box. This is the first schema change in a while and it touches the money path, so it is tested from both ends and mutated on both sides.
+
+The contract test walks the whole seam on one night: ten leave the tray, two given away — `sold` stays 10, `regular_qty` is 8, the total drops by exactly two boxes' worth, the request carries `freeQty` camelCase, **the sheet agrees to the peso**, the response carries `free_qty` snake_case, reopening the night remembers it, and the costing still counts **all ten boxes as made** because a free ball costs the same to make. The server test covers the four refusals and, importantly, that a payload which says nothing about give-aways still lands exactly as an older phone's would.
+
+12 mutants across both files, all red — including `free` not subtracted on either side, the bucket bound ignoring it, the snapshot not stored, bootstrap dropping the column, the reopen forgetting it, and the receipt going quiet. One survived first: the **client** guard, because only the server's refusals were tested — but the phone guard exists precisely so a night that cannot land never queues, so it now has its own assertions, including that the complaint lands in its own slot rather than being reported as a counting mistake.
+
+Two of my own errors, both worth recording: I hard-coded a late-August date into a server test while the stub's clock is frozen in early August, so every refusal I was asserting on was really "that date has not happened yet" — the test now passes an explicit clock. And I asserted on `errs['sku:box4']` in a state where the row had already been reset, which passed for the wrong reason until I pinned it to a state that genuinely arms the guard.
+
+Suites: **208** (`run-tests.js`) + **222** (`contract.test.js`).

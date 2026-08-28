@@ -279,7 +279,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.10.0';
+var VERSION = '2.10.1';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -364,12 +364,19 @@ var SCHEMA = [
   // re-save of the same date reuses them, so correcting a count weeks later can
   // never re-price the night at today's prices. Blank (legacy row) falls back
   // to the current Prices tab.
+  // free_qty was appended in v2.10.1: how many of this row's sold units left the
+  // tray WITHOUT being paid for — given away or ruined. `sold` keeps its plain
+  // physical meaning (what left the tray), so stock usage and the balls the
+  // costing counts are unchanged: a ball given away still ate its ingredients.
+  // Only the PRICED quantity shrinks. Blank on every row saved before the
+  // column existed, and blank reads 0 — an old row claimed nothing was given
+  // away, which is exactly what it meant.
   // custom_qty was appended in v2.7.0: how many of this row's sold boxes a
   // special order physically used. Those boxes carry NO menu-price money (the
   // typed custom amount is the order's entire value), so this row's amount was
   // computed from sold − custom_qty. A snapshot like price/cheese_price,
   // rewritten with the date block; a blank legacy cell reads 0.
-  { name: TAB.DAILY_COUNTS, headers: ['date', 'sku', 'sod', 'eod', 'sold', 'cheese_qty', 'regular_qty', 'amount', 'entry_id', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty'], textCols: ['date'] },
+  { name: TAB.DAILY_COUNTS, headers: ['date', 'sku', 'sod', 'eod', 'sold', 'cheese_qty', 'regular_qty', 'amount', 'entry_id', 'gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty', 'free_qty'], textCols: ['date'] },
   // opening_qty / opening_date / reorder_at were appended in v2.3.0 (stock
   // ledger). opening_date is a yyyy-MM-dd string and BLANK means "count the
   // whole history" — see computeStockStatus.
@@ -924,21 +931,43 @@ function apiSaveDay(ss, settings, payload) {
       }
     }
 
-    // The four buckets describe PRICED sales only, so they bound against
-    // sold − customQty (v2.7.0) — with no special order that is `sold`, exactly
-    // the guard this always was, word for word.
+    // --- GIVEN AWAY OR RUINED (v2.10.1). Owner, 2026-08-28: takoyaki does get
+    // given away and does get ruined. `sold` is sod − eod, which is what left
+    // the TRAY, not what was paid for — so every freebie and every dropped box
+    // was being booked at full menu price. That is money the app claimed and
+    // the tin never saw, and it also flattered the cost-per-ball comparison.
+    // Whole units, never negative, and never more than actually left the tray
+    // (less whatever the special order already took).
+    var freeQty = 0;
+    if (c.freeQty !== undefined && c.freeQty !== null && asStr(c.freeQty) !== '') {
+      freeQty = intOrThrow(c.freeQty, p.label + ' given away or ruined');
+      if (freeQty < 0) throw new Error(p.label + ': given away or ruined cannot be negative.');
+      if (freeQty > sold - customQty) {
+        throw new Error(p.label + ': ' + freeQty + ' given away or ruined, but only ' +
+          (sold - customQty) + ' left the tray' +
+          (customQty > 0 ? ' after the special order took ' + customQty : '') +
+          '. Lower it, or check the counts.');
+      }
+    }
+
+    // The four buckets describe PAID sales only, so they bound against
+    // sold − customQty − freeQty (v2.10.1; v2.7.0 for the special order) — with
+    // neither of those, that is `sold`, exactly the guard this always was.
     var paid = cheeseQty + gcashQty + gcashCheeseQty;
-    if (paid > sold - customQty) {
+    if (paid > sold - customQty - freeQty) {
+      var roomWhy = [];
+      if (customQty > 0) roomWhy.push('the special order used ' + customQty);
+      if (freeQty > 0) roomWhy.push(freeQty + ' were given away or ruined');
       throw new Error(p.label + ': cheese (' + cheeseQty + ') + GCash (' + gcashQty +
         ') + GCash cheese (' + gcashCheeseQty + ') adds up to ' + paid +
-        ', but only ' + (sold - customQty) + ' were sold' +
-        (customQty > 0 ? ' at menu price (the special order used ' + customQty + ')' : '') +
+        ', but only ' + (sold - customQty - freeQty) + ' were sold' +
+        (roomWhy.length ? ' at menu price (' + roomWhy.join(', ') + ')' : '') +
         '. Lower one of them.');
     }
     // The remainder is plain cash regular — always derived, never sent — and
-    // the special order's boxes are outside it, so the amounts below price
-    // exactly sold − customQty units.
-    var regularQty = sold - paid - customQty;
+    // both the special order's boxes and the give-aways are outside it, so the
+    // amounts below price exactly sold − customQty − freeQty units.
+    var regularQty = sold - paid - customQty - freeQty;
 
     // --- The EFFECTIVE prices for this line (v2.5.0). A date being RE-SAVED
     // reuses the prices already stored on its own rows — a correction weeks
@@ -996,7 +1025,11 @@ function apiSaveDay(ss, settings, payload) {
       // How many of `sold` the special order used (v2.7.0). Part of the same
       // snapshot: this row's `amount` prices sold − custom_qty units, and the
       // row alone must be able to say so.
-      custom_qty: customQty
+      custom_qty: customQty,
+      // How many of `sold` were never paid for (v2.10.1). Same snapshot rule:
+      // this row's `amount` prices sold − custom_qty − free_qty units, and the
+      // row alone must be able to say so.
+      free_qty: freeQty
     });
   });
 
@@ -1104,9 +1137,10 @@ function apiSaveDay(ss, settings, payload) {
       // amounts on this row can now always be explained from the row alone, and
       // a re-save of this date reuses these instead of today's price list.
       price: l.price, cheese_price: l.cheese_price,
-      // How many of `sold` the special order used (v2.7.0) — the last piece of
-      // the snapshot: `amount` prices sold − custom_qty units.
-      custom_qty: l.custom_qty
+      // How many of `sold` the special order used (v2.7.0) and how many were
+      // never paid for (v2.10.1) — the rest of the snapshot: `amount` prices
+      // sold − custom_qty − free_qty units.
+      custom_qty: l.custom_qty, free_qty: l.free_qty
     };
   }));
   rewriteDateBlock(ss, TAB.STOCK_USAGE, date, stockRows.map(function (r) {
@@ -1181,8 +1215,9 @@ function apiSaveDay(ss, settings, payload) {
         // phone's mirror of the day matches the sheet's snapshot exactly.
         price: l.price, cheese_price: l.cheese_price,
         // How many of `sold` the special order used (v2.7.0), so the receipt
-        // can print "Box 10 ×6, less 1 for the special order" from the reply.
-        custom_qty: l.custom_qty
+        // can print "Box 10 ×6, less 1 for the special order" from the reply —
+        // and how many were given away or ruined (v2.10.1), for the same reason.
+        custom_qty: l.custom_qty, free_qty: l.free_qty
       };
     })
   };
@@ -3071,7 +3106,11 @@ function readCounts(ss, priceMap) {
       // How many of `sold` a special order used (v2.7.0): this row's `amount`
       // prices sold − custom_qty units. A blank legacy cell reads 0 — no
       // special order ever drew from a row written before the column existed.
-      custom_qty: asNum(cellOf(r, t, 'custom_qty'))
+      custom_qty: asNum(cellOf(r, t, 'custom_qty')),
+      // How many of `sold` were never paid for (v2.10.1): given away or ruined.
+      // A blank legacy cell reads 0 — a row written before the column existed
+      // claimed nothing was given away, which is exactly what it meant.
+      free_qty: asNum(cellOf(r, t, 'free_qty'))
     });
   }
   return out;

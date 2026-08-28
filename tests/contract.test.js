@@ -1402,6 +1402,9 @@ test('CLIENT: reopening the day re-derives the identical total / GCash / Cash', 
   // money — and the classification — the receipt and the tin showed.
   assert.deepStrictEqual(payload.counts.find(c => c.sku === 'box4'),
     { sku: 'box4', sod: 10, eod: 0, cheeseQty: 2, gcashQty: 2, gcashCheeseQty: 1,
+      // Given away or ruined (v2.10.1) — always present, like sod and eod, so
+      // the server never has to guess whether the phone knows about the field.
+      freeQty: 0,
       price: 50, cheesePrice: 60, inCutoff: true },
     'the re-emitted REQUEST must stay camelCase and carry all three buckets plus the displayed snapshot');
   assert.ok(!has(payload, 'gcash'), 'the client must not send a typed GCash figure any more');
@@ -1918,16 +1921,16 @@ test('MIGRATION: setupSheet appends the new columns and moves no existing cell',
 
   const counts = ss.getSheetByName('DailyCounts').getDataRange().getValues();
   assert.deepStrictEqual(counts[0],
-    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty']),
+    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty', 'free_qty']),
     'the new DailyCounts columns must be APPENDED, in schema order');
   const log = ss.getSheetByName('DailyLog').getDataRange().getValues();
   assert.deepStrictEqual(log[0],
     OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes', 'photo_url']));
-  assert.deepStrictEqual(counts[1].slice(9), ['', '', '', '', '', '', ''],
+  assert.deepStrictEqual(counts[1].slice(9), ['', '', '', '', '', '', '', ''],
     'the appended cells start blank on a historical row: "that day was all cash", ' +
     'an in_cutoff with no snapshot (which reads TRUE — the money was inside the ' +
     'totals when saved), prices that fall back to the current Prices tab, and a ' +
-    'custom_qty that reads 0 — no special order drew from a pre-column row');
+    'custom_qty and a free_qty that read 0 — nothing was drawn from, or given away on, a pre-column row');
   // PIN MOVED (v2.5.0, deliberate): the migration BACKFILLS the salary cell of
   // every non-closed historical row with the CURRENT daily_salary — resolving
   // it at read time meant a later rate change silently re-priced history.
@@ -1987,7 +1990,7 @@ test('MIGRATION: a sheet whose grid is only 9 columns wide is widened, not broke
   const counts = ss.getSheetByName('DailyCounts');
   assert.ok(counts.getMaxColumns() >= 16, 'the grid was not widened');
   assert.deepStrictEqual(counts.getDataRange().getValues()[0],
-    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty']));
+    OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty', 'free_qty']));
   assert.deepStrictEqual(counts.getDataRange().getValues()[1].slice(0, 9), OLD_COUNT_ROWS[0]);
   const boot = post(ctx, { token: OLD_TOKEN, action: 'bootstrap', payload: {} });
   assert.strictEqual(boot.ok, true, boot.error);
@@ -2056,7 +2059,7 @@ test('MIGRATION: a saveDay after migrating works and leaves the legacy rows byte
   });
   // The new columns were written in their REAL positions (10-16), not guessed.
   assert.deepStrictEqual(counts.slice(1).find(x => x[0] === '2026-07-28' && x[1] === 'box4'),
-    ['2026-07-28', 'box4', 10, 0, 10, 2, 5, 530, 'post-migration-1', 2, 1, 160, true, 50, 60, 0]);
+    ['2026-07-28', 'box4', 10, 0, 10, 2, 5, 530, 'post-migration-1', 2, 1, 160, true, 50, 60, 0, 0]);
 
   // And the phone reads the mixed-vintage sheet correctly in one bootstrap.
   const boot = post(ctx, { token: OLD_TOKEN, action: 'bootstrap', payload: {} });
@@ -4657,6 +4660,91 @@ test('normDay/normCount read the new keys snake-first, legacy camelCase second, 
   assert.strictEqual(app.normCount({ date: V27_DAY, sku: 'box4' }).custom_qty, 0);
 });
 
+test('GIVEN AWAY OR RUINED: what left the tray unpaid is not revenue (v2.10.1)', () => {
+  // Owner, 2026-08-28: takoyaki does get given away and does get ruined. `sold`
+  // is sod − eod, which is what left the TRAY — so every freebie and every
+  // dropped box was booked at full menu price. Money the app claimed and the
+  // tin never saw, and it flattered the cost per ball too.
+  const srv = loadServer();
+  const app = syncedClient(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+  const D = ymdDaysAgo(2);
+  app.loadBentaForm(D);
+  const box4 = app.benta.rows.find(r => r.sku === 'box4');
+  box4.sod = 10; box4.eod = 0;                 // ten left the tray
+  const priceOf = Number(app.computeDay(app.bentaPayload()).lines.find(l => l.sku === 'box4').price);
+  assert.ok(priceOf > 0, 'precondition: box4 has a price');
+
+  // All ten paid for: the honest baseline.
+  const allPaid = Number(app.computeDay(app.bentaPayload()).total);
+  assert.strictEqual(allPaid, 10 * priceOf);
+
+  // Two given away. The tray still emptied by ten — but only eight were paid.
+  box4.free = 2;
+  const c = app.computeDay(app.bentaPayload());
+  const line = c.lines.find(l => l.sku === 'box4');
+  assert.strictEqual(line.sold, 10, '`sold` still means what LEFT THE TRAY');
+  assert.strictEqual(line.free_qty, 2, 'and the row says how many were never paid for');
+  assert.strictEqual(line.regular_qty, 8, 'only eight are priced');
+  assert.strictEqual(Number(c.total), 8 * priceOf, 'the two given away add NO money');
+
+  // The receipt says it out loud, so the tin can be reconciled by eye.
+  const rec = app.cashRecapHTML(c);
+  assert.ok(/8 regular/.test(rec), 'the recap prices eight: ' + rec);
+
+  // THE SEAM: the server must agree to the peso, and store the snapshot.
+  const payload = app.bentaPayload();
+  assert.strictEqual(payload.counts.find(x => x.sku === 'box4').freeQty, 2,
+    'the request carries it camelCase');
+  const r = post(srv.ctx, { token: srv.token, action: 'saveDay', payload:
+    Object.assign({}, payload, { entryId: 'free-1' }) });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.data.total, 8 * priceOf, 'the SHEET agrees to the peso');
+  const sline = r.data.lines.find(l => l.sku === 'box4');
+  assert.strictEqual(sline.free_qty, 2, 'the response is snake_case and carries the snapshot');
+  assert.strictEqual(sline.sold, 10, 'and `sold` is untouched — the tray did empty');
+  assert.strictEqual(sline.regular_qty, 8);
+
+  // Reopening the day must show the give-away again, not silently drop it.
+  app.applyBootstrap(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+  app.loadBentaForm(D);
+  assert.strictEqual(Number(app.benta.rows.find(x => x.sku === 'box4').free), 2,
+    'a reopened night remembers what was given away');
+  assert.strictEqual(Number(app.computeDay(app.bentaPayload()).total), 8 * priceOf,
+    're-derived from the reopened form, to the peso');
+
+  // THE PHONE REFUSES FIRST. The server would reject an impossible figure, but
+  // a phone that stayed quiet would queue a night that can never land — and the
+  // refusal has to arrive in the server's own words, beside its own stepper.
+  const b2 = app.benta.rows.find(r => r.sku === 'box4');
+  b2.sod = 10; b2.eod = 8; b2.free = 5;
+  let errs = app.validateBenta();
+  assert.match(String(errs['free:box4']),
+    /5 given away or ruined, but only 2 left the tray/,
+    'the phone says it, in the words the sheet would have used');
+  b2.free = 1.5;
+  assert.match(String(app.validateBenta()['free:box4']), /whole number/, 'and refuses a fraction');
+  b2.free = -1;
+  assert.match(String(app.validateBenta()['free:box4']), /cannot be negative/);
+  // Its own slot, so the complaint appears under its own stepper rather than
+  // blaming the counts.
+  b2.sod = 10; b2.eod = 8; b2.free = 5;
+  const both = app.validateBenta();
+  assert.ok(!both['sku:box4'],
+    'a give-away mistake must not be reported as a counting mistake: ' + JSON.stringify(both));
+  b2.sod = 10; b2.eod = 0; b2.free = 2;
+  assert.deepStrictEqual(Object.keys(app.validateBenta()).filter(k => app.validateBenta()[k]), [],
+    'and the honest figure clears');
+
+  // THE COSTING STILL COUNTS EVERY BALL MADE: a ball given away ate its
+  // ingredients exactly like a sold one, so cost per ball must not shrink.
+  const per = app.currentPeriod(D);
+  const cost = post(srv.ctx, { token: srv.token, action: 'costing',
+    payload: { start: per.start, end: per.end } });
+  assert.strictEqual(cost.ok, true, cost.error);
+  assert.strictEqual(cost.data.balls, 10 * 4,
+    'all ten boxes of four were MADE — free ones cost the same to make');
+});
+
 test('a sku that always sells, suddenly selling none, is QUESTIONED (v2.10.0)', () => {
   // THE FAILURE THIS EXISTS FOR. nori read "nothing sold" for weeks because its
   // start count was stuck at 0 (v2.9.8), and every internal check was satisfied
@@ -5063,8 +5151,12 @@ test('"Sold with cash" is display only, and the receipt says the new lines only 
   assert.ok(/c\.gcashConverted > 0/.test(receipt),
     'the converted-cash sentence prints only when non-zero');
   assert.ok(/c\.lidBoxes > 0/.test(receipt), 'the lid count prints only when non-zero');
-  assert.ok(/less ' \+ l\.custom_qty \+ ' for the special order/.test(receipt),
-    'an affected sku says where its boxes went');
+  // v2.10.1: the "less …" clause now covers both reasons a sold unit was not
+  // priced, joined in one sentence rather than two competing ones.
+  assert.ok(/for the special order/.test(receipt) && /given away or ruined/.test(receipt),
+    'an affected sku says where its boxes went — to the order, or given away');
+  assert.ok(/aside\.length \? ', less ' \+ aside\.join\(' and '\)/.test(receipt),
+    'and both reasons read as one clause when both apply');
   assert.ok(/cashRecapHTML\(/.test(receipt),
     'the recap is rebuilt by updateReceipt — one sum, one voice');
 });
@@ -5965,7 +6057,8 @@ test('THE PREFILL: the reading fills the form and the money is the money the she
   assert.deepStrictEqual(
     p.counts.find(c => c.sku === 'box4'),
     { sku: 'box4', sod: 31, eod: 28, cheeseQty: 1, gcashQty: 0, gcashCheeseQty: 0,
-      price: 50, cheesePrice: 60, inCutoff: true });
+      freeQty: 0, price: 50, cheesePrice: 60, inCutoff: true },
+    'a reading never invents a give-away: freeQty rides along as 0');
   const c = app.computeDay(p);
   assert.strictEqual(c.total, PAPER_TOTAL);
   assert.strictEqual(c.gcash, PAPER_GCASH);
