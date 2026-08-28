@@ -459,3 +459,16 @@ The contract test walks the whole seam on one night: ten leave the tray, two giv
 Two of my own errors, both worth recording: I hard-coded a late-August date into a server test while the stub's clock is frozen in early August, so every refusal I was asserting on was really "that date has not happened yet" — the test now passes an explicit clock. And I asserted on `errs['sku:box4']` in a state where the row had already been reset, which passed for the wrong reason until I pinned it to a state that genuinely arms the guard.
 
 Suites: **208** (`run-tests.js`) + **222** (`contract.test.js`).
+
+### v2.10.2 — stock runway
+
+"Buy more at 2 packs or less" cannot know that two packs is four nights of flour and half a night of gas. Client-only, from figures bootstrap already returns.
+
+Two tests, 9 mutants, all red. Four of my own mistakes are recorded here because each one is a trap this suite will hit again:
+
+- **The helpers landed outside every lifted slab.** `stockExplain` lives in the UI region, not in `S_DOMAIN`, so putting the new functions beside it broke *every* test that constructs a client — 113 failures from one misplaced block. Moved next to `stockStatusList`, which is inside the slab.
+- **`ymdDaysAgo` is pinned to the stub's frozen clock; the phone runs on the real one.** So "tonight" landed weeks in the past and was counted as history. Both fixtures now build dates from the client's own `todayStr()` — the same lesson a v2.7.6 test taught this project once already.
+- **Two guards were unobservable** because my closed night landed exactly on the baseline date, where the `d <= base` exclusion already covered it. The window is now built so the count day, a closed night, and tonight each sit where only their own guard can exclude them.
+- **A rate was being formatted as money.** `fmt` is the peso formatter and pads to two decimals, so a fifth of a gallon read `0.20 of a gallon` — the shape of a price on a figure that is not one. The test caught it; the code now renders a rate as a count.
+
+Suites: **208** (`run-tests.js`) + **224** (`contract.test.js`).

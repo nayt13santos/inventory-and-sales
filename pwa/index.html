@@ -590,7 +590,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.10.1';
+const APP_VERSION = '2.10.2';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -2118,6 +2118,70 @@ function stockUnitOf(product){
   return txt(it && it.unit);
 }
 function lowStockList(){ return stockStatusList().filter(s => s.low); }
+
+/* ============================================================
+   HOW LONG WHAT IS ON THE SHELF WILL LAST (v2.10.2)
+   ------------------------------------------------------------
+   The reorder point is his own fixed figure: "buy more at 2 packs or less". It
+   cannot know that two packs is four nights of flour and half a night of gas.
+   He buys when things run out, so the useful sentence is not "you are low" but
+   "this runs out in about three nights" — early enough to buy on the way home
+   rather than on the night it stops him selling.
+
+   Measured from the SAME baseline the on-hand figure is measured from, so the
+   two can never disagree: `used_since` spread over the OPEN nights since that
+   count. Closed nights are left out (nothing was opened) and tonight is left
+   out (it is not finished), exactly as the costing draws that line at
+   yesterday. Silent unless there is enough to measure — a rate from two nights
+   is a guess, and this app does not guess.
+   ============================================================ */
+const RUNWAY_MIN_NIGHTS = 5;
+
+function stockRunway(s){
+  const st = asObj(s);
+  const base = txt(st.baseline_date);
+  const used = num(st.used_since);
+  const hand = num(st.on_hand);
+  // Nothing to project from: no baseline, nothing opened since it, or an
+  // on-hand figure that is already telling its own story (0 or below — the
+  // card says "below zero, count it again" and a runway would talk over it).
+  if (!isDateStr(base) || !(used > 0) || !(hand > 0)) return null;
+  const yday = addDays(todayStr(), -1);
+  let nights = 0;
+  const days = asObj(state.days);
+  for (const d in days){
+    if (!isDateStr(d) || d <= base || d > yday) continue;
+    if (truthy(asObj(days[d]).closed)) continue;
+    nights++;
+  }
+  if (nights < RUNWAY_MIN_NIGHTS) return null;
+  const perNight = used / nights;
+  if (!(perNight > 0)) return null;
+  // FLOOR, deliberately: "about 3 nights" when it is 3.8 is the safe direction
+  // to be wrong in. 0 is a real answer and means tonight may not finish.
+  return { perNight: perNight, nights: nights, left: Math.floor(hand / perNight) };
+}
+
+/** The runway as one plain sentence, or '' when there is nothing to say. */
+function stockRunwayText(s){
+  const r = stockRunway(s);
+  if (!r) return '';
+  const unit = txt(asObj(s).unit);
+  // A RATE READS AS A COUNT, NOT AS MONEY. fmt() is the peso formatter and pads
+  // to two decimals, which turned a fifth of a gallon into "0.20 of a gallon" —
+  // the shape of a price, on a figure that is not one.
+  const per = r2(r.perNight);
+  const rate = per >= 1
+    ? String(per) + (unit ? ' ' + (per === 1 ? unit : unit + 's') : '')
+    : String(per) + (unit ? ' of a ' + unit : '');
+  const spent = rate + ' a night over the last ' + r.nights +
+    (r.nights === 1 ? ' night' : ' nights');
+  if (r.left <= 0){
+    return 'At ' + spent + ', there is less than a night left. Buy before opening.';
+  }
+  return 'About ' + r.left + (r.left === 1 ? ' night' : ' nights') + ' left, at ' + spent + '.';
+}
+
 /** "2 packs" / "1 gallon" / "3" when the sheet has no unit for it. */
 function qtyWithUnit(qty, unit){
   const n = num(qty);
@@ -6117,6 +6181,9 @@ function stockOnHandHTML(){
         ? '<div class="st-sub" style="color:var(--alert);">Below zero, so the starting figure is out of date. Count what is really there and tap “Correct the count”.</div>'
         : '') +
       (s.reorder_at > 0 ? '<div class="st-sub">Buy more at ' + esc(qtyWithUnit(s.reorder_at, s.unit)) + ' or less.</div>' : '') +
+      // How long it lasts at the rate it is actually being opened (v2.10.2) —
+      // the figure the fixed reorder point cannot know.
+      (stockRunwayText(s) ? '<div class="st-sub">' + esc(stockRunwayText(s)) + '</div>' : '') +
       (isCounting
         ? '<div class="st-count">' +
             '<div><label for="stCountIn">Counted today</label>' +

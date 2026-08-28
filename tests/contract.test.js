@@ -221,6 +221,8 @@ return {
   // The stock ledger the phone computes for itself (never stored) and the two
   // figures the cutoff needs from Settings.
   stockStatusOf, stockStatusList, qtyWithUnit, daySalary, splitFor, dailySalary,
+  // v2.10.2: how long what is on the shelf will last, at the rate it is going.
+  stockRunway, stockRunwayText,
   currentPeriod, shiftPeriod, periodKey, num, fmt, fmtShort, activePrices,
   // v2.3.1: the Split field's one reading, the note guard, what may be said
   // about a refused day, the two collapsible cards, and the price rule.
@@ -4743,6 +4745,107 @@ test('GIVEN AWAY OR RUINED: what left the tray unpaid is not revenue (v2.10.1)',
   assert.strictEqual(cost.ok, true, cost.error);
   assert.strictEqual(cost.data.balls, 10 * 4,
     'all ten boxes of four were MADE — free ones cost the same to make');
+});
+
+test('STOCK RUNWAY: how long it lasts, at the rate it is actually going (v2.10.2)', () => {
+  // The reorder point is a fixed figure — "buy more at 2 packs or less" — and it
+  // cannot know that two packs is four nights of flour and half a night of gas.
+  // He buys when things run out, so the useful sentence is "about three nights
+  // left", early enough to buy on the way home.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  // Dated on the CLIENT's own clock, not ymdDaysAgo's: that helper is pinned to
+  // the stub's frozen early-August time, while the phone runs on the real one —
+  // so "tonight" would land weeks in the past and be counted as history.
+  const TODAY = app.todayStr();
+  const back = (n) => app.addDays(TODAY, -n);
+  // The window is built so EVERY exclusion is load-bearing:
+  //   back(12) = the count day itself — open, and must NOT be measured (a
+  //              stocktake is an end-of-day figure that already reflects it)
+  //   back(11) = a CLOSED night — nothing was opened, so it must not slow the
+  //              rate down and make the shelf look longer-lasting than it is
+  //   back(1..10) = the ten nights that really are the measurement
+  const BASE = back(12);
+  for (const k in app.state.days) delete app.state.days[k];
+  app.state.days[BASE] = { date: BASE, closed: false, total: 900, cash: 900, gcash: 0 };
+  const shutNight = back(11);
+  app.state.days[shutNight] = { date: shutNight, closed: true, total: 0, cash: 0, gcash: 0 };
+  // Ten open nights since the count, 20 packs opened across them = 2 a night.
+  for (let i = 1; i <= 10; i++){
+    const d = back(i);
+    app.state.days[d] = { date: d, closed: false, total: 1000, cash: 1000, gcash: 0 };
+  }
+  const item = { product: 'Takoyaki Flour', unit: 'pack', baseline_date: BASE,
+                 baseline_qty: 26, used_since: 20, on_hand: 6, reorder_at: 2, low: false };
+
+  const r = app.stockRunway(item);
+  assert.ok(r, 'ten nights is enough to measure');
+  assert.strictEqual(r.nights, 10, 'measured over the OPEN nights since the count');
+  assert.strictEqual(r.perNight, 2);
+  assert.strictEqual(r.left, 3, 'six packs at two a night is three nights — FLOORED, not rounded up');
+  assert.match(app.stockRunwayText(item), /About 3 nights left, at 2 packs a night over the last 10 nights/);
+
+  // Both exclusions are already in the window above; state them as claims.
+  assert.ok(app.state.days[shutNight].closed && shutNight > BASE,
+    'precondition: the closed night really does sit inside the measured window');
+  assert.strictEqual(app.stockRunway(item).nights, 10,
+    'the closed night and the count day are both left out');
+
+  // TONIGHT is not finished, so it is not counted — the same line the costing
+  // draws at yesterday. One system, one answer.
+  app.state.days[TODAY] = { date: TODAY, closed: false, total: 500, cash: 500, gcash: 0 };
+  assert.strictEqual(app.stockRunway(item).nights, 10, 'tonight is not a measured night yet');
+
+  // THIN HISTORY SAYS NOTHING. Four nights is a guess, and this app does not guess.
+  for (const k in app.state.days) delete app.state.days[k];
+  for (let i = 1; i <= 4; i++){
+    const d = back(i);
+    app.state.days[d] = { date: d, closed: false, total: 1000, cash: 1000, gcash: 0 };
+  }
+  assert.strictEqual(app.stockRunway(item), null, 'four nights is not a rate');
+  assert.strictEqual(app.stockRunwayText(item), '', 'and it says nothing at all');
+});
+
+test('STOCK RUNWAY: it stays quiet where it would only be noise (v2.10.2)', () => {
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const TODAY = app.todayStr();
+  const back = (n) => app.addDays(TODAY, -n);
+  const BASE = back(11);
+  for (const k in app.state.days) delete app.state.days[k];
+  for (let i = 1; i <= 10; i++){
+    const d = back(i);
+    app.state.days[d] = { date: d, closed: false, total: 1000, cash: 1000, gcash: 0 };
+  }
+  const base = { product: 'Takoyaki Flour', unit: 'pack', baseline_date: BASE,
+                 baseline_qty: 26, used_since: 20, on_hand: 6, reorder_at: 2, low: false };
+  const with_ = (over) => Object.assign({}, base, over);
+
+  // Nothing opened since the count: there is no rate, so there is no runway.
+  assert.strictEqual(app.stockRunway(with_({ used_since: 0 })), null);
+  // A negative on-hand already has its own, louder sentence on the card
+  // ("count it again") — a runway would talk over it with arithmetic built on
+  // the very figure that is wrong.
+  assert.strictEqual(app.stockRunway(with_({ on_hand: -3 })), null);
+  assert.strictEqual(app.stockRunway(with_({ on_hand: 0 })), null, 'nothing left is not a runway');
+  // No baseline date at all (a never-counted product) — nothing to measure from.
+  assert.strictEqual(app.stockRunway(with_({ baseline_date: '' })), null);
+
+  // LESS THAN A NIGHT LEFT is said as itself, not as "about 0 nights".
+  const tight = with_({ on_hand: 1 });          // 1 pack at 2 a night
+  assert.strictEqual(app.stockRunway(tight).left, 0);
+  assert.match(app.stockRunwayText(tight), /less than a night left\. Buy before opening\./);
+  assert.ok(!/About 0 nights/.test(app.stockRunwayText(tight)), 'never "about 0 nights"');
+
+  // A SLOW-MOVING product reads in fractions of a unit without pretending to
+  // be precise: 2 gallons over 10 nights is a fifth of a gallon a night.
+  const gas = with_({ product: 'Gas', unit: 'gallon', used_since: 2, on_hand: 3 });
+  assert.strictEqual(app.stockRunway(gas).left, 15);
+  assert.match(app.stockRunwayText(gas), /0\.2 of a gallon a night/);
+
+  // A product with no unit on the sheet still reads as a sentence.
+  const noUnit = with_({ unit: '' });
+  assert.match(app.stockRunwayText(noUnit), /2 a night/);
 });
 
 test('a sku that always sells, suddenly selling none, is QUESTIONED (v2.10.0)', () => {

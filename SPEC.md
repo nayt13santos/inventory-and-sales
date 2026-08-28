@@ -325,6 +325,16 @@ The four buckets describe **paid** sales, so they bound against `sold − custom
 
 On screen it is one small question on **every** sku card — nori is ruined as readily as a box is — deliberately not folded into the cheese/GCash card, because those describe how paid sales were *paid* and this is the opposite of a paid sale. The receipt says it out loud: `Box 4 ×20, less 2 given away or ruined`, so the tin can still be reconciled by eye.
 
+### v2.10.2 — how long what is on the shelf will last
+
+The reorder point is the owner's own fixed figure — *"buy more at 2 packs or less"* — and it cannot know that two packs is four nights of flour and half a night of gas. He buys when things run out, so the useful sentence is not "you are low" but **"this runs out in about three nights"**: early enough to buy on the way home rather than on the night it stops him selling.
+
+Each stock item now carries one more line: *"About 3 nights left, at 2 packs a night over the last 10 nights."* Computed on the phone, from figures `bootstrap` already returns — **no schema change, no server call**.
+
+It is measured from the **same baseline the on-hand figure is measured from**, so the two can never disagree: `used_since` spread over the OPEN nights since that count. Three exclusions, each load-bearing: the **count day itself** (a stocktake is an end-of-day figure that already reflects it), **closed nights** (nothing was opened, and counting them would make the shelf look longer-lasting than it is), and **tonight** (not finished — the same line the costing draws at yesterday, so one system gives one answer).
+
+It stays quiet where it would only be noise: fewer than `RUNWAY_MIN_NIGHTS` (5) measured nights, nothing opened since the count, or an on-hand figure of zero or below — that last case already has its own louder sentence ("count it again"), and a runway would be arithmetic built on the very figure that is wrong. The nights left are **floored**, because "about 3" when it is 3.8 is the safe direction to be wrong in, and less than one night is said as itself rather than as "about 0 nights". A rate reads as a **count**, not as money: `0.2 of a gallon`, never `0.20`.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.
