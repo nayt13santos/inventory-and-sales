@@ -590,7 +590,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.9.8';
+const APP_VERSION = '2.10.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -4069,6 +4069,7 @@ function renderBenta(){
     h += '<p class="hint" style="margin:2px 4px 12px;">The GCash total is added up from what you entered above. Check it against your GCash app.</p>';
   }
 
+  h += '<div id="nightCheck"></div>';
   h += '<button type="button" class="btn primary block" data-act="save-day" style="margin-bottom:10px;">Save day</button>';
 
   $('panel-benta').innerHTML = h;
@@ -4535,6 +4536,150 @@ function excludedRowError(sku, row){
    refuse. Error keys are NAMESPACED ('sku:', 'supply:', 'stock:') so a sku or an
    item literally named 'custom' cannot collide with a fixed slot — and a name
    like '__proto__' cannot touch the prototype (the accumulator has none). */
+/* ============================================================
+   "DOES THIS NIGHT LOOK RIGHT?" (v2.10.0)
+   ------------------------------------------------------------
+   Every other guard in this app judges tonight against ITSELF — the arithmetic
+   has to hold, a start count needs an end count, a bucket cannot exceed what
+   sold. None of them can see the one failure this week actually produced twice:
+   a figure that is perfectly consistent and simply WRONG. nori read "nothing
+   sold" for weeks because its start count was stuck at 0, and every internal
+   check was satisfied the whole time. A ten-pack delivery logged as one passed
+   every rule too.
+
+   So this judges tonight against the OTHER NIGHTS. It is the plain version of
+   what stock systems call exception reporting, and the textbook signal is
+   exactly the one we hit: an item that normally sells, suddenly selling none,
+   while the stock says it was there.
+
+   THREE RULES, chosen so it stays quiet:
+     - it never refuses anything and never changes a figure — Save day is
+       untouched, and this is a question, not a verdict;
+     - it says nothing at all until there are NIGHT_MIN_HISTORY real nights to
+       compare against, because an opinion from thin history is a guess;
+     - it only appears once the night is otherwise ready to save, so it cannot
+       nag her halfway through typing.
+   A blank is never evidence: a night is only comparable when BOTH of that
+   sku's figures were actually entered.
+   ============================================================ */
+const NIGHT_MIN_HISTORY = 6;    // nights of real history before it has an opinion
+const NIGHT_USUAL_SHARE = 0.7;  // "usually sells" = sold on this share of them
+const NIGHT_LOW_BAND = 0.4;     // flag a total under this share of the usual
+const NIGHT_HIGH_BAND = 2.5;    // ...or over this multiple of it
+
+/** Dates in local state strictly before `date`, newest first. */
+function nightsBefore(date, bag){
+  return Object.keys(asObj(bag)).filter(d => isDateStr(d) && d < txt(date)).sort().reverse();
+}
+
+/** The most recent nights that really counted `sku`, newest first. */
+function soldHistory(sku, date, want, dates){
+  const out = [];
+  for (const d of (dates || nightsBefore(date, state.counts))){
+    if (out.length >= want) break;
+    const row = asArr(asObj(state.counts)[d]).find(r => txt(asObj(r).sku) === txt(sku));
+    if (!row) continue;
+    // Neither figure may be missing: a night nobody finished counting says
+    // nothing about whether this sku normally sells.
+    if (isBlankVal(row.sod) || isBlankVal(row.eod)) continue;
+    out.push({ date: d, sold: Math.max(0, num(row.sod) - num(row.eod)) });
+  }
+  return out;
+}
+
+/** The most recent OPEN nights' totals, newest first. A closed night is not a
+ *  slow night and must not drag the usual figure down. */
+function totalHistory(date, want){
+  const out = [];
+  for (const d of nightsBefore(date, state.days)){
+    if (out.length >= want) break;
+    const day = asObj(asObj(state.days)[d]);
+    if (truthy(day.closed)) continue;
+    const t = num(day.total);
+    if (!(t > 0)) continue;
+    out.push(t);
+  }
+  return out;
+}
+
+function medianOf(list){
+  const a = asArr(list).slice().sort((x, y) => x - y);
+  if (!a.length) return 0;
+  const mid = a.length >> 1;
+  return a.length % 2 ? a[mid] : r2((a[mid - 1] + a[mid]) / 2);
+}
+
+/** Plain sentences about how tonight sits against the nights before it. Empty
+ *  when there is nothing worth saying — which should be most nights. */
+function nightChecks(){
+  const out = [];
+  if (!isObj(benta) || benta.closed) return out;
+  const date = txt(benta.date);
+  if (!isDateStr(date)) return out;
+  const countDates = nightsBefore(date, state.counts);
+  const WANT = 10;
+
+  for (const r of asArr(benta.rows)){
+    const sku = txt(r.sku);
+    const hist = soldHistory(sku, date, WANT, countDates);
+    if (hist.length < NIGHT_MIN_HISTORY) continue;
+    const soldNights = hist.filter(h => h.sold > 0).length;
+    const usually = soldNights >= Math.ceil(NIGHT_USUAL_SHARE * hist.length);
+    if (!usually) continue;
+    const label = skuLabel(sku);
+
+    // (1) NOT COUNTED AT ALL tonight, though it is normally counted. Both
+    // figures blank is a legitimate "we did not sell it" — so this asks.
+    if (isBlankVal(r.sod) && isBlankVal(r.eod)){
+      out.push(label + ' has no counts tonight, though it was counted on ' + hist.length +
+        ' of the last nights and sold on ' + soldNights + ' of them. If it really was not out tonight, leave it.');
+      continue;
+    }
+
+    // (2) THE nori SIGNATURE: the stock was there, and none of it moved.
+    const sod = num(r.sod), eod = num(r.eod);
+    if (!isBlankVal(r.sod) && !isBlankVal(r.eod) && sod > 0 && sod - eod === 0){
+      out.push(label + ': nothing sold tonight, though it sold on ' + soldNights + ' of the last ' +
+        hist.length + ' nights. The end count says all ' + fmt(sod) +
+        ' are still there — if that is right, leave it; if not, the end count is the figure to check.');
+    }
+  }
+
+  // (3) A NIGHT'S TAKE far from the usual. Wide bands on purpose: this should
+  // speak for a night that is genuinely unlike the others, not a quiet one.
+  const totals = totalHistory(date, WANT);
+  if (totals.length >= NIGHT_MIN_HISTORY){
+    const usual = medianOf(totals);
+    const c = computeDay(bentaPayload());
+    const tonight = num(asObj(c).total);
+    if (usual > 0 && tonight > 0){
+      if (tonight < NIGHT_LOW_BAND * usual){
+        out.push('Tonight comes to ' + peso(tonight) + ', where your last ' + totals.length +
+          ' nights ran about ' + peso(usual) + '. That can simply be a slow night — but it is also what a ' +
+          'missed count looks like.');
+      } else if (tonight > NIGHT_HIGH_BAND * usual){
+        out.push('Tonight comes to ' + peso(tonight) + ', well above the ' + peso(usual) +
+          ' your last ' + totals.length + ' nights ran. Worth one look at the counts before saving.');
+      }
+    }
+  }
+  return out;
+}
+
+/** The card. Rendered ONLY when the night is otherwise ready to save, so it is
+ *  the last thing read before Save day rather than a nag during entry. */
+function nightCheckHTML(){
+  const errs = validateBenta();
+  if (Object.keys(errs).some(k => txt(errs[k]) !== '')) return '';
+  const said = nightChecks();
+  if (!said.length) return '';
+  let h = '<div class="card attn-card"><p class="attn-head">' +
+    (said.length === 1 ? 'One thing to check' : 'A few things to check') + '</p>';
+  for (const line of said) h += '<p style="margin-top:8px;">' + esc(line) + '</p>';
+  h += '<p class="hint" style="margin-top:10px;">Nothing here stops you saving — if the night really went like this, tap Save day.</p></div>';
+  return h;
+}
+
 function validateBenta(){
   const errs = Object.create(null);
   // The DATE first, and before the closed-day return: the server refuses a
@@ -4738,6 +4883,13 @@ function validateBentaLive(){
   setErr('err-lidBoxes', errs.lidBoxes);
   setErr('err-salary', errs.salary);
   for (const s of asArr(benta.stock)) setErr('err-stock-' + s.product, errs['stock:' + s.product]);
+  // "Does this night look right?" (v2.10.0) — recomputed as she types, and it
+  // draws nothing at all while any complaint above is still outstanding.
+  const nc = $('nightCheck');
+  if (nc){
+    try{ nc.innerHTML = nightCheckHTML(); }
+    catch(err){ console.error(err); nc.innerHTML = ''; }
+  }
   // THE CROSS-CHECK follows the figures (v2.9.0). It compares what the form now
   // adds up to against the total in Mama's own hand, so it has to be recomputed
   // on every edit — a gap he has just closed must stop saying it is open.

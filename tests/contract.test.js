@@ -250,6 +250,8 @@ return {
   // state so a test can put it in any of its rendering states.
   costingHTML, costFiguresHTML, costTargetOutHTML, costInvalidate,
   isNone, costPeso, costNum, costWhyNone, skuLabel,
+  // v2.10.0: "does this night look right?" — tonight judged against the others.
+  nightChecks, nightCheckHTML, soldHistory, totalHistory, medianOf,
   costState(v){
     if (v && 'open' in v) costOpen = v.open;
     if (v && 'per' in v) costPer = v.per;
@@ -3608,6 +3610,8 @@ return {
   paperReviewHTML, paperFormFigures, paperSuspects, paperLink, paperInt, paperMoney,
   paperClear, paperShowingFor, bentaSkuList,
   isBlankVal, stepVal, uiVal, soldVal,
+  // v2.10.0: tonight judged against the other nights.
+  nightChecks, nightCheckHTML, soldHistory, totalHistory, medianOf,
   get paper(){ return paper; },
   set paper(v){ paper = v; },
   get paperErr(){ return paperErr; },
@@ -4651,6 +4655,196 @@ test('normDay/normCount read the new keys snake-first, legacy camelCase second, 
   assert.strictEqual(app.normCount({ date: V27_DAY, sku: 'box4', custom_qty: 3 }).custom_qty, 3);
   assert.strictEqual(app.normCount({ date: V27_DAY, sku: 'box4', customQty: 3 }).custom_qty, 3);
   assert.strictEqual(app.normCount({ date: V27_DAY, sku: 'box4' }).custom_qty, 0);
+});
+
+test('a sku that always sells, suddenly selling none, is QUESTIONED (v2.10.0)', () => {
+  // THE FAILURE THIS EXISTS FOR. nori read "nothing sold" for weeks because its
+  // start count was stuck at 0 (v2.9.8), and every internal check was satisfied
+  // the whole time: the arithmetic held, the counts were present, the buckets
+  // balanced. Only the OTHER NIGHTS could have told anyone. This is the textbook
+  // exception-report signal — an item that normally sells showing zero while the
+  // stock says it was there.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const c = (sku, sod, eod) => ({ sku, sod, eod, cheese_qty:0, gcash_qty:0,
+                                  gcash_cheese_qty:0, custom_qty:0 });
+  const counts = {};
+  // Ten counted nights: nori sold on nine of them.
+  for (let i = 1; i <= 10; i++){
+    const d = ymdDaysAgo(i);
+    counts[d] = [c('box4', 30, 10), c('nori', 20, i === 5 ? 20 : 14)];
+  }
+  for (const k in app.state.counts) delete app.state.counts[k];
+  Object.assign(app.state.counts, counts);
+
+  app.loadBentaForm(ymdDaysAgo(0));
+  const row = sku => app.benta.rows.find(r => r.sku === sku);
+  // Tonight: the shelf was full and nothing moved — the nori signature exactly.
+  row('nori').sod = 20; row('nori').eod = 20;
+  row('box4').sod = 30; row('box4').eod = 10;
+
+  const said = app.nightChecks().join('\n');
+  assert.match(said, /nothing sold tonight/, 'the night must be questioned');
+  assert.match(said, /sold on 9 of the last 10 nights/,
+    'and the claim must be AUDITABLE — countable against her own paper');
+  assert.match(said, /all 20 are still there/, 'naming the figure that says so');
+  assert.match(said, /the end count is the figure to check/, 'and what to look at');
+  // box4 sold normally, so it must not be dragged in.
+  assert.ok(!/Box 4/.test(said), 'a sku that behaved is not mentioned');
+
+  // AN EMPTY SHELF IS NOT AN ANOMALY. If there was no nori to sell, not selling
+  // any is the only possible outcome — saying "nothing sold, all 0 are still
+  // there" would be noise, and noise is what makes a warning stop being read.
+  row('nori').sod = 0; row('nori').eod = 0;
+  assert.ok(!/nothing sold tonight/.test(app.nightChecks().join('\n')),
+    'no stock to sell means nothing to question');
+  row('nori').sod = 20; row('nori').eod = 20;      // back to the real signature
+  assert.match(app.nightChecks().join('\n'), /nothing sold tonight/);
+
+  // IT NEVER REFUSES. The night stays savable — this is a question, not a rule.
+  const errs = app.validateBenta();
+  assert.deepStrictEqual(Object.keys(errs).filter(k => errs[k]), [],
+    'a plausibility question must never block Save day');
+
+  // If the shelf really did empty on those nights too — i.e. nori does NOT
+  // usually sell — it says nothing.
+  const quiet = loadClient();
+  quiet.applyBootstrap(F.boot);
+  const rare = {};
+  for (let i = 1; i <= 10; i++) rare[ymdDaysAgo(i)] = [c('nori', 20, 20)];
+  for (const k in quiet.state.counts) delete quiet.state.counts[k];
+  Object.assign(quiet.state.counts, rare);
+  quiet.loadBentaForm(ymdDaysAgo(0));
+  const qr = quiet.benta.rows.find(r => r.sku === 'nori');
+  qr.sod = 20; qr.eod = 20;
+  assert.ok(!/nothing sold tonight/.test(quiet.nightChecks().join('\n')),
+    'a sku that rarely sells must not be questioned for not selling');
+});
+
+test('it says NOTHING from thin history, and blanks are never evidence (v2.10.0)', () => {
+  // An opinion drawn from three nights is a guess, and this app does not guess.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const c = (sku, sod, eod) => ({ sku, sod, eod, cheese_qty:0, gcash_qty:0,
+                                  gcash_cheese_qty:0, custom_qty:0 });
+  const put = (obj) => { for (const k in app.state.counts) delete app.state.counts[k];
+                         Object.assign(app.state.counts, obj); };
+
+  const five = {};
+  for (let i = 1; i <= 5; i++) five[ymdDaysAgo(i)] = [c('nori', 20, 14)];
+  put(five);
+  app.loadBentaForm(ymdDaysAgo(0));
+  let r = app.benta.rows.find(x => x.sku === 'nori');
+  r.sod = 20; r.eod = 20;
+  assert.strictEqual(app.nightChecks().length, 0, 'five nights is not enough to have a view');
+
+  // Six nights IS enough — the boundary is real, not decorative.
+  const six = {};
+  for (let i = 1; i <= 6; i++) six[ymdDaysAgo(i)] = [c('nori', 20, 14)];
+  put(six);
+  app.loadBentaForm(ymdDaysAgo(0));
+  r = app.benta.rows.find(x => x.sku === 'nori');
+  r.sod = 20; r.eod = 20;
+  assert.match(app.nightChecks().join('\n'), /nothing sold tonight/, 'six nights is');
+
+  // Ten nights that were never finished counting are not ten nights of
+  // evidence: a blank figure says nothing, here as everywhere in this app.
+  const blanks = {};
+  for (let i = 1; i <= 10; i++) blanks[ymdDaysAgo(i)] = [c('nori', 20, '')];
+  put(blanks);
+  app.loadBentaForm(ymdDaysAgo(0));
+  r = app.benta.rows.find(x => x.sku === 'nori');
+  r.sod = 20; r.eod = 20;
+  assert.strictEqual(app.soldHistory('nori', ymdDaysAgo(0), 10).length, 0,
+    'a night with an unread close is not comparable');
+  assert.strictEqual(app.nightChecks().length, 0, 'so it holds its tongue');
+});
+
+test('a night far from the usual take is flagged, and the card waits its turn (v2.10.0)', () => {
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const c = (sku, sod, eod) => ({ sku, sod, eod, cheese_qty:0, gcash_qty:0,
+                                  gcash_cheese_qty:0, custom_qty:0 });
+  // Ten ordinary nights at about ₱4,600, plus one CLOSED night — which must not
+  // drag the usual figure down, because a closed night is not a slow night.
+  for (const k in app.state.counts) delete app.state.counts[k];
+  for (const k in app.state.days) delete app.state.days[k];
+  for (let i = 1; i <= 10; i++) app.state.counts[ymdDaysAgo(i)] = [c('box4', 40, 10)];
+
+  // The usual take is derived from the very counts above, so the fixture cannot
+  // quietly disagree with itself: 30 box4 a night, priced by the real client.
+  app.loadBentaForm(ymdDaysAgo(0));
+  const row = sku => app.benta.rows.find(r => r.sku === sku);
+  row('box4').sod = 40; row('box4').eod = 10;
+  const usual = Number(app.computeDay(app.bentaPayload()).total);
+  assert.ok(usual > 0, 'precondition: an ordinary night takes something');
+  for (let i = 1; i <= 10; i++){
+    const d = ymdDaysAgo(i);
+    app.state.days[d] = { date: d, closed: false, total: usual, cash: usual, gcash: 0 };
+  }
+  const shut = ymdDaysAgo(11);
+  app.state.days[shut] = { date: shut, closed: true, total: 0, cash: 0, gcash: 0 };
+  assert.strictEqual(app.medianOf(app.totalHistory(ymdDaysAgo(0), 10)), usual);
+  assert.ok(!app.totalHistory(ymdDaysAgo(0), 20).includes(0),
+    'a closed night contributes no zero to the usual figure');
+
+  // An ordinary night says nothing at all — this must be quiet most nights.
+  assert.strictEqual(app.nightChecks().length, 0, 'a normal night draws no card');
+
+  // Two sold instead of thirty: said plainly, and said as a POSSIBILITY — a
+  // slow night is a real thing and this must not accuse.
+  row('box4').sod = 40; row('box4').eod = 38;
+  let said = app.nightChecks().join('\n');
+  assert.match(said, /where your last 10 nights ran about/, 'the comparison is named');
+  assert.match(said, /can simply be a slow night/, 'and it does not accuse');
+  assert.match(said, /what a missed count looks like/, 'while naming the other reading');
+
+  // A night well ABOVE the usual is worth one look too (a fat-fingered count
+  // reads high just as easily as low).
+  row('box4').sod = 400; row('box4').eod = 10;
+  assert.match(app.nightChecks().join('\n'), /well above the/, 'both directions are checked');
+
+  // A CLOSED night is never judged. Set up so a check WOULD fire if it were —
+  // the stall was shut, so "nothing sold" is the whole point, not an anomaly.
+  for (let i = 1; i <= 10; i++) app.state.counts[ymdDaysAgo(i)] = [c('box4', 40, 10), c('nori', 20, 14)];
+  app.loadBentaForm(ymdDaysAgo(0));
+  row('box4').sod = 40; row('box4').eod = 10;
+  row('nori').sod = 20; row('nori').eod = 20;      // the zero signature, armed
+  assert.match(app.nightChecks().join('\n'), /nothing sold tonight/,
+    'precondition: open, this night WOULD be questioned');
+  app.benta.closed = true;
+  assert.strictEqual(app.nightChecks().length, 0,
+    'shut for the night is not an anomaly — nothing sold is the point');
+  app.benta.closed = false;
+
+  // A CLOSED night in HISTORY must not drag the usual take down. The sheet is
+  // edited by hand, so a closed row carrying a figure is not impossible — and
+  // counting it would make every ordinary night afterwards look suspicious.
+  const oddShut = ymdDaysAgo(12);
+  app.state.days[oddShut] = { date: oddShut, closed: true, total: 1, cash: 1, gcash: 0 };
+  assert.ok(!app.totalHistory(ymdDaysAgo(0), 20).includes(1),
+    'a night marked closed is left out of the usual figure whatever it carries');
+
+  // THE CARD WAITS ITS TURN. While any ordinary complaint stands, it draws
+  // nothing — one thing to fix at a time, and the specific complaint first.
+  // Armed so a check WOULD fire (nori's zero signature) AND a real complaint
+  // stands (box4's start count with no end count, the v2.9.0 refusal). Without
+  // the gate the two would talk over each other.
+  row('nori').sod = 20; row('nori').eod = 20;
+  row('box4').sod = 40; row('box4').eod = '';
+  assert.match(app.nightChecks().join('\n'), /nothing sold tonight/,
+    'precondition: there IS something this card would say');
+  assert.ok(Object.keys(app.validateBenta()).some(k => app.validateBenta()[k]),
+    'precondition: and the night is not savable');
+  assert.strictEqual(app.nightCheckHTML(), '',
+    'the specific complaint speaks first — one thing to fix at a time');
+
+  // Once the night is savable, it appears — and it says it is not a blocker.
+  row('box4').sod = 40; row('box4').eod = 38;
+  const html = app.nightCheckHTML();
+  assert.match(html, /One thing to check|A few things to check/);
+  assert.match(html, /Nothing here stops you saving/,
+    'it must say out loud that it is not a refusal');
 });
 
 test('the START COUNT carries for EVERY sku, nori included (v2.9.8)', () => {
@@ -6005,6 +6199,42 @@ test('no total on the paper claims nothing — it says there is nothing to check
 });
 
 // --- BLANK IS NOT ZERO -----------------------------------------------------
+
+test('a row the paper left WHOLLY unread is questioned, not passed over (v2.10.0)', () => {
+  // The one way a count row genuinely goes blank on both sides: the photo reader
+  // returns the sku with neither figure read (the schema requires only `sku`, so
+  // an omitted field IS how the model says "could not read this"). Both blank is
+  // a legitimate "we did not sell it tonight", so this asks rather than refuses —
+  // but it must not pass over a product that normally sells.
+  const t = readVia({ counts: [
+    { sku: 'box4', sod: 40, eod: 10 },
+    { sku: 'nori' }                        // named, and nothing read for it
+  ], custom_amount: 0, custom_gcash: 0, total_on_paper: 0, notes: '', unread: [] });
+  const app = t.app;
+  app.applyReadingToForm(t.reading);
+  const nori = app.benta.rows.find(r => r.sku === 'nori');
+  assert.strictEqual(nori.sod, '', 'precondition: the start really is blank');
+  assert.strictEqual(nori.eod, '', 'precondition: and so is the close');
+
+  // Give nori a history in which it is counted and sells.
+  const c = (sku, sod, eod) => ({ sku, sod, eod, cheese_qty:0, gcash_qty:0,
+                                  gcash_cheese_qty:0, custom_qty:0 });
+  // Dated relative to the FORM's own night, not to today — these paper tests
+  // run on a fixed DAY, and history has to sit before it to count.
+  const before = (n) => {
+    const [y, m, d] = String(app.benta.date).split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d - n));
+    return dt.toISOString().slice(0, 10);
+  };
+  for (const k in app.state.counts) delete app.state.counts[k];
+  for (let i = 1; i <= 10; i++) app.state.counts[before(i)] = [c('nori', 20, 14)];
+
+  const said = app.nightChecks().join('\n');
+  assert.match(said, /has no counts tonight/, 'a normally-counted product must not slip through blank');
+  assert.match(said, /sold on 10 of them/, 'with the auditable claim attached');
+  assert.match(said, /If it really was not out tonight, leave it/,
+    'and permission to leave it, because blank is a real answer');
+});
 
 test('BLANK STAYS BLANK: a figure the paper did not give is EMPTY on the form, never 0', () => {
   // "one cheese, could not tell how it was paid", and no end count at all. The

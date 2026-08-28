@@ -431,3 +431,19 @@ Six cases: the reported carry-over (and that the corrected start is what gets **
 One mutant survived first: restoring `num(eod)` for a blank close still passed, because a fresh row's SOD default is already 0 — so "prefilled 0" and "not prefilled" are indistinguishable through the form. Moved to assert on the lookup, where the distinction actually lives. Six mutants now red, including a reversed date comparison that would take the oldest close instead of the latest.
 
 Suites: **207** (`run-tests.js`) + **217** (`contract.test.js`).
+
+### v2.10.0 — "Does this night look right?"
+
+The first feature in a while that is not a bug fix, and it exists **because** of the bug fixes: two of this week's four defects (nori's stuck start count, the delivery logging as one) were perfectly self-consistent and invisible to every guard in the app. The owner found them by eye. Nothing compared tonight to the other nights, so nothing could.
+
+Four tests, 13 mutants, all red. The interesting part was how many guards my first tests could not **see**:
+
+- `closed_night_judged` survived because a closed night's payload totals 0 anyway, so the band check was already silent — rearmed with a closed night whose rows carry the zero signature.
+- `closed_drags_the_usual` survived because the `total > 0` filter already excluded my zero-total closed night — rearmed with a closed night carrying a figure, which a hand-edited sheet can genuinely produce.
+- `card_ignores_complaints` survived because in that state there was nothing to say anyway — rearmed with a night where a check WOULD fire *and* a real complaint stands, so the gate is load-bearing.
+- `uncounted_row_silent` survived because the blank-row branch was never exercised. Chasing it turned up something worth knowing: a count row can only go blank on both sides through the **photo reader** (the schema requires only `sku`, so an omitted field is how the model says "unread"), so the test now goes through `applyReadingToForm` rather than hand-setting `''`.
+- `zero_ignores_empty_shelf` survived because I had not tested a night with no stock to sell — where "nothing sold" is the only possible outcome and flagging it would be pure noise.
+
+One fixture bug of my own: I set the historical totals to ₱4,600 while the counts behind them produced ~₱1,500, so the band check fired on a night I had called "normal" — the check was right and my numbers were not. The usual take is now derived from the very counts the fixture builds.
+
+Suites: **207** (`run-tests.js`) + **221** (`contract.test.js`).

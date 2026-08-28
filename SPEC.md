@@ -289,6 +289,26 @@ Owner, 2026-08-27, after v2.9.6 went live: *"still .5"*.
 
 What the gate is actually for is not yanking the screen out from under her fingers, and not losing typing. Neither needs a permanent hold. The draft store round-trips every field on the form — `closed`, `staff`, the custom pair, the conversion and its direction, lids, wage, notes, the photo link, every count row and every stock line — so the update now **stashes the night first and then reloads**, and the restored draft announces itself on screen exactly as it always has. The hold that remains is narrow and honest: `isTypingNow()` (a focused field), a request in flight, or a photograph being read. `reloadingForUpdate` still bounds it to one reload per page load, which matters because `location.reload()` does not stop the world — a second worker can claim the page before it unloads.
 
+### v2.10.0 — "Does this night look right?": tonight judged against the other nights
+
+Every other guard in this app judges tonight against **itself** — the arithmetic must hold, a start count needs an end count, a bucket cannot exceed what sold. None of them can see the failure that actually happened twice in one week: a figure that is perfectly self-consistent and simply **wrong**. nori read "nothing sold" for weeks (v2.9.8) with every internal check satisfied throughout; a ten-pack delivery logged as one (v2.9.6) passed every rule too. Neither was caught by the app — the owner caught them by eye.
+
+So this compares tonight with the **nights before it**. It is the plain-language form of what stock systems call exception reporting, and the textbook signal is precisely the one that bit: *an item that normally sells, suddenly selling none, while the stock says it was there.*
+
+**Three observations**, computed on the phone from history it already holds — no schema change, no new permission, no server call:
+1. a sku with **no counts at all** tonight that is normally counted (reachable via a photo reading that returns a sku with neither figure read);
+2. the **nori signature** — the shelf had stock and none of it moved, for a sku that sold on most recent nights;
+3. the night's **take far outside** the usual: below `NIGHT_LOW_BAND` (0.4×) or above `NIGHT_HIGH_BAND` (2.5×) of the median of the last ten open nights.
+
+**It is built to stay quiet**, because the one failure mode of this kind of feature is becoming noise nobody reads:
+- it **never refuses and never changes a figure** — `Save day` is untouched, and the card says out loud that it is not a blocker;
+- it says nothing until there are `NIGHT_MIN_HISTORY` (6) genuinely comparable nights — an opinion from thin history is a guess;
+- **a blank is never evidence**: a night counts as comparable only when *both* of that sku's figures were entered;
+- it appears **only once the night is otherwise savable**, so the specific complaint always speaks first and it cannot nag mid-entry;
+- an **empty shelf is not an anomaly** (`sod > 0` is required), and a **closed night is never judged** — nor does a closed night drag the usual take down.
+
+Every claim it makes is **auditable against her own paper** ("sold on 9 of the last 10 nights", "all 20 are still there"), because a warning she cannot check is a warning she has to take on faith.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.
