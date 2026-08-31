@@ -470,6 +470,18 @@ Beneath it, the app says exactly where the value will land and what that does:
 
 The chosen night is cleared afterwards, so a fortnight that has ended never becomes the silent default for the next catch-up.
 
+### v2.14.2 — three things his live sheet exposed
+
+Read directly from the owner's sheet on 2026-09-01, at his invitation (*"cant you get it on your own? we have a sheet right?"*). Reading it found more than any amount of asking would have.
+
+**1. The catch-up doubled what it filled — my bug.** `StockUsage` for 2026-08-31 held Flour **34**, Sauce **6**, Mayo **4**: exactly double the 17 / 3 / 2 his counts work out to. It is also what produced the negative on-hand he reported — before his Aug 31 count, flour read `10 + 10 − 35 = −15`.
+
+The mechanism was not the obvious one. `catchUpFill` ADDED to whatever the row held; `loadBentaForm` reloads that row from the night's **saved** usage, which would have been safe — but it then re-applies the **draft**, and the first fill had been stashed as one. So the second fill found 17 sitting there and added another 17. Adding was simply the wrong shape: the row is now **SET** to that night's saved history plus what the counts say is missing. Idempotent by construction, nothing remembered between taps, and a figure already saved on the night still survives as the base.
+
+**2. Two counts on one day that disagree are now named.** His sheet has Bonito counted **2** and then **0** on 2026-08-31, five seconds apart. The app takes the later one — deterministic and right — but said nothing, so any figure built on the 0 looked unexplained. The product card now says both figures, which one is being used, and what to do if that is wrong. The same figure twice is not a disagreement and stays quiet.
+
+**3. "No cost on file" no longer reads as "nothing was used".** Every product in his `StockItems` has a blank `unit_cost`, so the Cutoff card headlined **Value opened ₱0** — which reads as a fortnight that consumed nothing of value. When *nothing* can be priced it now says so instead: the quantities are real, the money is not worked out at all, and here is where to set it.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.

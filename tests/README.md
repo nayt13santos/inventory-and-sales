@@ -600,3 +600,13 @@ Worth recording that the guard being relaxed was mine, added a few hours earlier
 `catchLandsText` also landed outside every lifted slab on the first attempt, which broke 128 tests at once. That is the third time this session; the rule is simply that a new client function belongs beside the ones it works with, not beside the markup that calls it.
 
 Suites: **208** (`run-tests.js`) + **247** (`contract.test.js`).
+
+### v2.14.2 — what reading the real sheet found
+
+Three tests, **8 mutants, all red** — and every one of the three defects came from reading the owner's live sheet rather than reasoning about the code. That is the lesson worth keeping: a fixture is a guess about reality, and reality had a figure in it (34) that no test of mine would ever have produced.
+
+Chasing the doubling took two wrong theories before the right one. First I assumed the row simply persisted between taps and wrote bookkeeping to subtract the previous contribution — which then over-subtracted, because `loadBentaForm` reloads the row from saved usage. Reading `bentaStockRows` showed the real path: the reload is clean, but `applyBentaDraft` runs after it and restores the stashed fill. So the test that matters is the one that **stashes a draft between the two fills** — the actual sequence on his phone — and the fix became "set, don't add", which needs no state at all.
+
+Two mutants also pointed at things worth changing rather than testing around: a `q +=` that no test could distinguish from `q =` (now covered by two usage rows for one product on one night, which a rewritten block really can produce), and a length guard in the clash check that was **genuinely redundant** — the distinct-values test already answered it, so it was deleted rather than given a fictional test.
+
+Suites: **208** (`run-tests.js`) + **250** (`contract.test.js`).

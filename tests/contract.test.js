@@ -238,7 +238,9 @@ return {
   // v2.14.0: what was used between two counts — measured, not remembered.
   countsFor, usedBetweenCounts, usedBetweenText,
   // v2.14.1: the night the catch-up lands on, including a cutoff that has ended.
-  catchUpTarget, catchLandsText,
+  catchUpTarget, catchLandsText, sameDayCountClash,
+  stashBentaDraft,
+  get drafts(){ return drafts; },
   get catchNightPick(){ return catchNightPick; },
   set catchNightPick(v){ catchNightPick = v; },
   get moved(){ return moved; },
@@ -5110,7 +5112,7 @@ test('SOURCE PIN: the Cutoff card separates opened from paid, and a negative exp
   const src = fs.readFileSync(INDEX_HTML, 'utf8');
   const at = src.indexOf('Supplies used this cutoff');
   assert.ok(at > 0, 'the card must exist on the Cutoff tab');
-  const card = src.slice(at - 400, at + 1600);
+  const card = src.slice(at - 1200, at + 2400);
   assert.match(card, /if \(num\(f\.suppliesUsed\) > 0 \|\| asArr\(f\.suppliesUsedRows\)\.length\)/,
     'it stays away when nothing has been opened');
   assert.match(card, /money you <b>paid<\/b>/, 'it says what the OTHER line is');
@@ -5200,6 +5202,201 @@ test('CATCH UP can target a cutoff that has ENDED (v2.14.1)', () => {
   for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
   assert.strictEqual(noteWith, app.buildNote(app.computeCutoff(lastPer), lastPer),
     'logging usage into a finished cutoff cannot change what his partner received');
+});
+
+test("HIS SHEET, 2026-09-01: the catch-up must not double what it filled (v2.14.2)", () => {
+  // Read out of his live sheet. StockUsage for 2026-08-31 held Flour 34, Sauce 6,
+  // Mayo 4 — EXACTLY DOUBLE the 17/3/2 the catch-up works out from his counts.
+  // The cause: catchUpFill ADDS to the row, and on-hand only moves when the day
+  // is SAVED, so filling twice before saving computes the same figure twice and
+  // stacks it. It also produced the negative on-hand he reported: before his
+  // Aug 31 count, flour read 10 + 10 − 35 = −15.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const P = 'Takoyaki Flour';
+  const it = app.state.stockItems.find(x => x.product === P);
+  it.unit = 'kg'; it.unit_cost = '';
+  it.baseline_date = ''; it.baseline_qty = 19;    // 10 counted + 10 arrived − 1 opened
+  it.delivered_before = 0; it.used_before = 0;
+  for (const k in app.state.days) delete app.state.days[k];
+  for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
+  for (const k in app.state.stockDeliveries) delete app.state.stockDeliveries[k];
+  const N = app.catchUpNight();
+  app.state.days[N] = { date: N, closed: false, total: 2000, cash: 2000, gcash: 0 };
+
+  const qty = () => Number(app.benta.stock.find(r => r.product === P).qty);
+
+  // One fill: 19 believed, 2 counted => 17.
+  app.catchDraft[P] = 2;
+  app.catchUpFill();
+  assert.strictEqual(qty(), 17, 'the first fill puts 17 on the night');
+
+  // A SECOND fill, before saving, must REPLACE its own work — not stack it.
+  app.catchDraft[P] = 2;
+  app.catchUpFill();
+  assert.strictEqual(qty(), 17, 'a second tap must not make it 34');
+  app.catchDraft[P] = 2;
+  app.catchUpFill();
+  assert.strictEqual(qty(), 17, 'nor a third');
+
+  // A figure that was ALREADY on the night, before the catch-up touched it,
+  // still survives — that is why it adds rather than assigns.
+  const app2 = loadClient();
+  app2.applyBootstrap(F.boot);
+  const it2 = app2.state.stockItems.find(x => x.product === P);
+  it2.baseline_date = ''; it2.baseline_qty = 19;
+  it2.delivered_before = 0; it2.used_before = 0;
+  for (const k in app2.state.days) delete app2.state.days[k];
+  for (const k in app2.state.stockUsage) delete app2.state.stockUsage[k];
+  for (const k in app2.state.stockDeliveries) delete app2.state.stockDeliveries[k];
+  const N2 = app2.catchUpNight();
+  app2.state.days[N2] = { date: N2, closed: false, total: 2000, cash: 2000, gcash: 0 };
+  app2.state.stockUsage[N2] = [{ date: N2, product: P, qty: 3, entry_id: 'pre' }];
+  app2.catchDraft[P] = 2;
+  app2.catchUpFill();
+  const withPrior = Number(app2.benta.stock.find(r => r.product === P).qty);
+  // 17 again — and that is the arithmetic being SELF-CONSISTENT, not a bug: the
+  // 3 already logged has already pulled on-hand down to 16, so the catch-up
+  // works out 14, and 3 + 14 = 17. However the total is split between what was
+  // logged and what is caught up, it reconciles to "counted 2 out of 19".
+  assert.strictEqual(withPrior, 17,
+    'the total always reconciles to the count, however it is split: ' + withPrior);
+  const contributed = withPrior - 3;
+  assert.strictEqual(contributed, 14, 'the catch-up added 14, not 17 — the 3 was already there');
+  app2.catchDraft[P] = 2;
+  app2.catchUpFill();
+  assert.strictEqual(Number(app2.benta.stock.find(r => r.product === P).qty), withPrior,
+    'and a repeat fill still only replaces the CATCH-UP part, never the figure that was there');
+
+  // TWO usage rows for ONE product on ONE night (a rewritten block can produce
+  // them) must be SUMMED as the base, not the last one taken.
+  const app4 = loadClient();
+  app4.applyBootstrap(F.boot);
+  const it4 = app4.state.stockItems.find(x => x.product === P);
+  it4.baseline_date = ''; it4.baseline_qty = 19;
+  it4.delivered_before = 0; it4.used_before = 0;
+  for (const k in app4.state.days) delete app4.state.days[k];
+  for (const k in app4.state.stockUsage) delete app4.state.stockUsage[k];
+  for (const k in app4.state.stockDeliveries) delete app4.state.stockDeliveries[k];
+  const N4 = app4.catchUpNight();
+  app4.state.days[N4] = { date: N4, closed: false, total: 2000, cash: 2000, gcash: 0 };
+  app4.state.stockUsage[N4] = [
+    { date: N4, product: P, qty: 2, entry_id: 'x1' },
+    { date: N4, product: P, qty: 3, entry_id: 'x2' }
+  ];
+  app4.catchDraft[P] = 2;
+  app4.catchUpFill();
+  // on_hand = 19 − 5 = 14, counted 2 => 12 missing; base is 2 + 3 = 5 => 17.
+  assert.strictEqual(Number(app4.benta.stock.find(r => r.product === P).qty), 17,
+    'both saved rows are summed as the base, so the total still reconciles to the count');
+
+  // THE ACTUAL MECHANISM THAT DOUBLED HIS SHEET: the first fill is stashed as a
+  // DRAFT (backgrounding the app does that), loadBentaForm re-applies it, and the
+  // old code added on top of it. This is the case to pin.
+  const app3 = loadClient();
+  app3.applyBootstrap(F.boot);
+  const it3 = app3.state.stockItems.find(x => x.product === P);
+  it3.baseline_date = ''; it3.baseline_qty = 19;
+  it3.delivered_before = 0; it3.used_before = 0;
+  for (const k in app3.state.days) delete app3.state.days[k];
+  for (const k in app3.state.stockUsage) delete app3.state.stockUsage[k];
+  for (const k in app3.state.stockDeliveries) delete app3.state.stockDeliveries[k];
+  const N3 = app3.catchUpNight();
+  app3.state.days[N3] = { date: N3, closed: false, total: 2000, cash: 2000, gcash: 0 };
+  app3.catchDraft[P] = 2;
+  app3.catchUpFill();
+  assert.strictEqual(Number(app3.benta.stock.find(r => r.product === P).qty), 17);
+  // Backgrounding the app stashes the form — including the 17 just filled in.
+  app3.stashBentaDraft();
+  assert.ok(app3.drafts[N3], 'precondition: the fill really was stashed as a draft');
+  app3.catchDraft[P] = 2;
+  app3.catchUpFill();
+  assert.strictEqual(Number(app3.benta.stock.find(r => r.product === P).qty), 17,
+    'the draft restored the first fill, and the second must NOT add to it — this is the 34');
+
+  // ONCE SAVED, the contribution is real history: a later catch-up adds to it.
+  app.applyLocalDay(app.bentaPayload());
+  app.catchDraft[P] = 1;
+  app.catchUpFill();
+  assert.ok(Number(app.benta.stock.find(r => r.product === P).qty) >= 17,
+    'a saved fill is history and is not taken back off');
+});
+
+test("HIS SHEET: two counts on one day that disagree are NAMED (v2.14.2)", () => {
+  // Also from his sheet: Bonito counted 2 and then 0 on 2026-08-31, five seconds
+  // apart. The app takes the later — deterministic and right — but said nothing,
+  // so any figure built on the 0 looked unexplained.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const P = 'Bonito';
+  const it = app.state.stockItems.find(x => x.product === P) ||
+    (app.state.stockItems.push({ product: P, unit: 'Bag', active: true, sort: 9 }),
+     app.state.stockItems[app.state.stockItems.length - 1]);
+  it.unit = 'Bag';
+  for (const k in app.state.stockCounts) delete app.state.stockCounts[k];
+
+  // One count: nothing to say.
+  app.state.stockCounts['2026-08-31'] = [
+    { date: '2026-08-31', product: P, counted_qty: 2, entry_id: 'b1', updated_at: '2026-08-31 23:57:33' }
+  ];
+  assert.strictEqual(app.sameDayCountClash(P), '', 'a single count is not a disagreement');
+
+  // His exact pair.
+  app.state.stockCounts['2026-08-31'].push(
+    { date: '2026-08-31', product: P, counted_qty: 0, entry_id: 'b2', updated_at: '2026-08-31 23:57:38' });
+  const said = app.sameDayCountClash(P);
+  assert.match(said, /2 counts for August 31 .* that do not agree/);
+  // Both figures appear; the order follows newest-first, which is not something
+  // worth pinning — that they are BOTH shown is.
+  assert.ok(/2 Bags/.test(said) && /0 Bags/.test(said),
+    'both figures, so he can see which is which: ' + said);
+  assert.match(said, /entered LAST is the one used — 0 Bags/, 'and which one the app is using');
+  assert.match(said, /count it again/, 'with what to do if that is wrong');
+
+  // THE SAME figure twice is not a disagreement — a replayed save must not nag.
+  for (const k in app.state.stockCounts) delete app.state.stockCounts[k];
+  app.state.stockCounts['2026-08-31'] = [
+    { date: '2026-08-31', product: P, counted_qty: 2, entry_id: 'b1', updated_at: '2026-08-31 23:57:33' },
+    { date: '2026-08-31', product: P, counted_qty: 2, entry_id: 'b2', updated_at: '2026-08-31 23:57:38' }
+  ];
+  assert.strictEqual(app.sameDayCountClash(P), '', 'the same figure twice says nothing');
+
+  // Counts on DIFFERENT days are the ordinary case and say nothing either.
+  for (const k in app.state.stockCounts) delete app.state.stockCounts[k];
+  app.state.stockCounts['2026-08-15'] = [
+    { date: '2026-08-15', product: P, counted_qty: 1, entry_id: 'a', updated_at: '' }];
+  app.state.stockCounts['2026-08-31'] = [
+    { date: '2026-08-31', product: P, counted_qty: 0, entry_id: 'b', updated_at: '' }];
+  assert.strictEqual(app.sameDayCountClash(P), '');
+});
+
+test("HIS SHEET: no unit cost anywhere is not 'nothing was used' (v2.14.2)", () => {
+  // Every product in his StockItems has a BLANK unit_cost, so the Cutoff card
+  // headlined "Value opened ₱0" — which reads as a fortnight that consumed
+  // nothing of value. The quantities are real; the money is simply not known.
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+  const at = src.indexOf('Supplies used this cutoff');
+  const card = src.slice(at - 1200, at + 2400);
+  assert.match(card, /const anyPriced = asArr\(f\.suppliesUsedRows\)\.some\(r => r\.cost !== null\)/,
+    'the card asks whether ANYTHING could be priced');
+  assert.match(card, /cannot be valued/, 'and says so rather than showing a zero');
+  assert.match(card, /the quantities below are real, the money is not worked out at all/,
+    'separating what is known from what is not');
+  assert.match(card, /More → Maintenance/, 'and where to fix it');
+
+  // And the figure itself stays 0 with every row unpriced — it must not guess.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  app.state.stockItems.forEach(x => { x.unit_cost = ''; });
+  const per = app.currentPeriod('2026-08-20');
+  for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
+  app.state.stockUsage['2026-08-20'] = [
+    { date: '2026-08-20', product: 'Takoyaki Flour', qty: 18, entry_id: 'u1' }];
+  const f = app.computeCutoff(per);
+  assert.strictEqual(f.suppliesUsed, 0, 'no cost on file means no money is invented');
+  assert.strictEqual(f.suppliesUsedRows[0].qty, 18, 'but the quantity is still there');
+  assert.strictEqual(f.suppliesUsedRows[0].cost, null);
+  assert.deepStrictEqual(f.suppliesUsedUnpriced, ['Takoyaki Flour']);
 });
 
 test('USED BETWEEN TWO COUNTS: measured, not remembered (v2.14.0)', () => {

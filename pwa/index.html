@@ -590,7 +590,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.14.1';
+const APP_VERSION = '2.14.2';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -2323,6 +2323,27 @@ function countsFor(product){
   return out;
 }
 
+/** Two counts on the SAME DAY that disagree (v2.14.2). His live sheet has
+ *  Bonito counted 2 and then 0 on 2026-08-31, seconds apart. The app takes the
+ *  later one — deterministic and correct — but it said nothing, so a figure
+ *  built on the 0 looked unexplained. A disagreement this app resolves by rule
+ *  is a disagreement it should name. '' when there is none. */
+function sameDayCountClash(product){
+  const counts = countsFor(product);
+  if (counts.length < 2) return '';
+  const newest = counts[0];
+  const alsoToday = counts.filter(c => c.date === newest.date);
+  // No length guard: a single count yields one distinct value, and the check
+  // below already answers that. An untested guard is worse than no guard.
+  const values = [];
+  for (const c of alsoToday){ if (values.indexOf(c.qty) === -1) values.push(c.qty); }
+  if (values.length < 2) return '';   // the same figure twice is not a disagreement
+  const unit = txt((asArr(state.stockItems).find(x => isObj(x) && txt(x.product) === txt(product)) || {}).unit);
+  return 'There are ' + alsoToday.length + ' counts for ' + fmtShort(newest.date) + ' that do not agree (' +
+    values.map(v => qtyWithUnit(v, unit)).join(' and ') + '). The one entered LAST is the one used — ' +
+    qtyWithUnit(newest.qty, unit) + '. If that is wrong, count it again.';
+}
+
 /** What was used between a product's two most recent counts. null when there
  *  are not two, or when the span is outside what this phone holds. */
 function usedBetweenCounts(product){
@@ -2410,6 +2431,7 @@ const catchDraft = Object.create(null);   // product -> what is really there, as
    apiSaveDay reuses that date's own stored price snapshots. So the auto-pick
    stays the DEFAULT and stops being a prohibition. */
 let catchNightPick = '';
+
 
 /** What to log, per product, given a map of product -> counted-now. Returns the
  *  rows to fill in, the peso cost they come to, and anything it refuses to
@@ -2506,14 +2528,31 @@ function catchUpFill(){
     toast('That night is marked closed, so nothing can be logged as opened on it.');
     return;
   }
+  /* IDEMPOTENT BY CONSTRUCTION (v2.14.2). His live sheet had Flour 34, Sauce 6,
+     Mayo 4 on 2026-08-31 — exactly DOUBLE the 17/3/2 these counts work out to,
+     and the cause of the negative on-hand he reported (10 + 10 − 35 = −15).
+
+     The mechanism: this used to ADD to whatever the row held. loadBentaForm
+     above reloads the row from that night's SAVED usage — but it then re-applies
+     the DRAFT, and the first fill's own figure had been stashed as one. So the
+     second fill found 17 sitting there and added another 17.
+
+     Adding was the wrong shape. The row is now SET to that night's real history
+     plus what the counts say is missing, which cannot double however many times
+     it is tapped, and needs nothing remembered between taps. A figure already
+     SAVED on the night still survives — it is the base being added to. */
+  const savedFor = (name) => {
+    let q = 0;
+    for (const r of asArr(asObj(state.stockUsage)[night])){
+      if (txt(asObj(r).product) === txt(name)) q += num(asObj(r).qty);
+    }
+    return r2(q);
+  };
   let put = 0;
   for (const r of plan.rows){
     const row = asArr(benta.stock).find(x => txt(x.product) === txt(r.product));
     if (!row) continue;
-    // ADDED to whatever that night already holds, never replacing it: saving the
-    // day rewrites the whole night's usage, so a figure already there has to
-    // survive this.
-    row.qty = r2(num(row.qty) + r.used);
+    row.qty = r2(savedFor(r.product) + r.used);
     put++;
   }
   benta.stockOpen = true;
@@ -6182,9 +6221,18 @@ function renderCutoff(){
      fortnight may be opened across the next two, and conflating them is exactly
      the mistake this card exists to prevent. It is not in any total. */
   if (num(f.suppliesUsed) > 0 || asArr(f.suppliesUsedRows).length){
+    // NOTHING PRICED AT ALL is not "nothing was used" (v2.14.2). His live sheet
+    // has unit_cost blank on every product, so this card headlined ₱0 — which
+    // reads as a fortnight that consumed nothing of value. Say what is actually
+    // true: the quantities are known, the money is not, and where to fix it.
+    const anyPriced = asArr(f.suppliesUsedRows).some(r => r.cost !== null);
     h += '<div class="card">' +
       '<div class="pay-intro">Supplies used this cutoff</div>' +
-      '<div class="co-row big"><span>Value opened</span><span class="v">' + peso(f.suppliesUsed) + '</span></div>';
+      (anyPriced
+        ? '<div class="co-row big"><span>Value opened</span><span class="v">' + peso(f.suppliesUsed) + '</span></div>'
+        : '<p class="err" style="margin-top:0;">No product has a cost on file, so what was opened cannot be valued — ' +
+          'the quantities below are real, the money is not worked out at all. Set the cost of one unit of each ' +
+          'under More → Maintenance and this fills in by itself.</p>');
     for (const r of asArr(f.suppliesUsedRows)){
       h += '<div class="co-row"><span>' + esc(r.product) +
         ' <span class="hint">(' + esc(qtyWithUnit(r.qty, r.unit)) + ')</span></span>' +
@@ -7020,6 +7068,10 @@ function stockOnHandHTML(){
         ? '<div class="st-sub" style="color:var(--alert);">Below zero: more is logged as opened than the count and the deliveries can account for. ' +
           'A delivery dated ON the count day is left out on purpose — a count is an end-of-day figure — so check those dates first. ' +
           'Correcting the count hides the difference rather than explaining it.</div>'
+        : '') +
+      // Two counts on one day that disagree — named, not silently resolved.
+      (sameDayCountClash(s.product)
+        ? '<div class="st-sub" style="color:var(--alert);">' + esc(sameDayCountClash(s.product)) + '</div>'
         : '') +
       // What was used between the last two counts — measured, not remembered.
       (usedBetweenText(s.product)
