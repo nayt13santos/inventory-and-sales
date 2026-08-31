@@ -512,3 +512,19 @@ Building it surfaced a bug I would otherwise have shipped: `applyLocalCutoffSpli
 One test expectation of my own was wrong: I asserted `tinUnknown === 500` when the shared fixture already carries unknown-source expenses in that period, so the figure was 1,700. Measured as a **delta** now — an absolute figure there was pinning the fixture, not the behaviour.
 
 Suites: **208** (`run-tests.js`) + **232** (`contract.test.js`).
+
+### v2.13.0 — asking whether the supplies were logged
+
+The first change this project has made in response to data being *lost* rather than computed wrongly. Four tests, **11 mutants, no survivors.**
+
+`saveBenta` is not lifted into the harness (three existing tests already pin it at the source), so the work is split: `logsNoSupplies` is tested behaviourally — logged, not logged, a logged zero, a closed night, nothing active — and the wiring is pinned at the source **on its conditions**, including that the question is the `else` of the no-sales one and that it can never become a validation error.
+
+Three of my own mistakes, each a lesson about the harness rather than the feature:
+
+- **An assertion that used the word "hidden" as a proxy** for "the card is collapsed" — every error slot in that card's body carries that word, so it was measuring nothing. Now asserted on `aria-expanded` and the actual `hidden` body variant.
+- **A premise that could not be reached:** I tested "no products on the list" by emptying `state.stockItems`, but an empty list falls back to the seeds **by design** ("the stock card is never blank"). Switched to every product marked inactive, which is reachable from Maintenance and exercises the same guard.
+- **A guard invisible through the payload.** `bentaPayload` already drops zero-quantity stock rows, so the `> 0` test inside `logsNoSupplies` could not be observed through it and its mutant survived. Now asserted by calling the function directly with a zero row — an untested guard is the kind that quietly rots.
+
+And one assertion I had simply reasoned wrongly: I expected logging tonight to clear the run. It does not, and should not — those nights are still empty and the drift is still real. The test now pins that, and pins that filling the nights in *is* what clears it.
+
+Suites: **208** (`run-tests.js`) + **236** (`contract.test.js`).

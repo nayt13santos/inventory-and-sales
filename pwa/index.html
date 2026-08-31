@@ -590,7 +590,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.12.1';
+const APP_VERSION = '2.13.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -2173,6 +2173,67 @@ function stockUnitOf(product){
   return txt(it && it.unit);
 }
 function lowStockList(){ return stockStatusList().filter(s => s.low); }
+
+/* ============================================================
+   "NOTHING HAS BEEN LOGGED AS OPENED" (v2.13.0)
+   ------------------------------------------------------------
+   Owner, 2026-08-28: "my moother forgot to log used supplies." A night saves
+   perfectly well with the stock card left untouched, and nothing ever asked —
+   so the shelf figures drifted for a fortnight and the costing had no supplies
+   to price. He found out by looking in the tray.
+
+   This is the missing question. It counts BACKWARDS from yesterday over OPEN
+   nights only — a closed night opens nothing, and saying so about it would be
+   nonsense — and speaks once the run is long enough to be a habit rather than a
+   quiet night. Tonight is never counted: it is not finished, and nagging about
+   a night she is still entering is how a warning gets ignored.
+
+   It never refuses and never fills anything in. Every other guard in this app
+   judges figures that are THERE; this one is about a figure that is missing,
+   which is why nothing else could see it.
+   ============================================================ */
+const OPENED_RUN_MIN = 5;   // open nights in a row before it is worth saying
+
+/** How many of the most recent OPEN nights, ending yesterday, logged nothing as
+ *  opened — and the first date in that run. Stops at the first night that did
+ *  log something, because the question is about the RUN, not the total. */
+function openedGap(){
+  const days = asObj(state.days);
+  const usage = asObj(state.stockUsage);
+  const yday = addDays(todayStr(), -1);
+  const dates = Object.keys(days).filter(d => isDateStr(d) && d <= yday).sort().reverse();
+  let run = 0, since = '';
+  for (const d of dates){
+    if (truthy(asObj(days[d]).closed)) continue;          // opened nothing, by definition
+    const rows = asArr(usage[d]);
+    const logged = rows.some(r => num(asObj(r).qty) > 0);
+    if (logged) break;                                     // the run ends here
+    run++; since = d;
+  }
+  return { nights: run, since: since };
+}
+
+/** Does THIS payload log nothing at all as opened? (v2.13.0, owner's design:
+ *  "check if she logs used supplies, if yes then no need for nudging".)
+ *  A closed night is not asked — it opened nothing by definition — and neither
+ *  is a phone with no products on its list, where the question is meaningless. */
+function logsNoSupplies(p){
+  const pay = asObj(p);
+  if (truthy(pay.closed)) return false;
+  if (!asArr(state.stockItems).some(x => isObj(x) && truthy(x.active))) return false;
+  return !asArr(pay.stock).some(r => num(asObj(r).qty) > 0);
+}
+
+/** The one sentence, or '' when there is nothing to say. */
+function openedGapText(){
+  const g = openedGap();
+  if (g.nights < OPENED_RUN_MIN) return '';
+  return 'Nothing has been logged as opened for ' + g.nights + ' nights running, since ' +
+    fmtShort(g.since) + '. What is on the shelf under Stock on hand is drifting from what is ' +
+    'really there, and the costing has no supplies to price. If flour and sauce were opened on ' +
+    'those nights, they are worth entering before this cutoff is settled.';
+}
+
 
 /* ============================================================
    "HOW THE NIGHTS COMPARE" (v2.11.0)
@@ -4561,7 +4622,13 @@ function stockCardHTML(){
   // Whole units OPENED, counted like the boxes: if a gallon of sauce is opened it
   // counts as used that day. Never a weight, never a running estimate — that is
   // what makes it countable with +/− buttons at all.
-  let body = '<p class="hint">Count whole units you OPENED today — one gallon of sauce, one pack of flour. ' +
+  // THE RUN OF NIGHTS NOBODY LOGGED (v2.13.0) goes FIRST, above the instruction:
+  // by the time she is reading this card she is already willing to fill it in,
+  // and the thing she cannot know is that the last several nights are empty.
+  let body = '';
+  const gap = openedGapText();
+  if (gap) body += '<p class="err" style="margin-top:0;">' + esc(gap) + '</p>';
+  body += '<p class="hint">Count whole units you OPENED today — one gallon of sauce, one pack of flour. ' +
     'This is not money: it never changes the day’s total. It is what keeps the ' +
     '“Stock on hand” figures under More right.</p>';
   const rows = asArr(benta.stock);
@@ -4579,7 +4646,11 @@ function stockCardHTML(){
       '<p class="err" id="err-stock-' + nm + '" hidden></p>';
   });
   const n = stockUsedCount();
-  return collapseCardHTML('stock', 'Stock used today', n ? n + (n === 1 ? ' product' : ' products') : '', benta.stockOpen, body);
+  // A warning behind a collapsed header is not a warning. A run of empty nights
+  // opens the card by itself — once — the same way a held GCash figure does.
+  const open = benta.stockOpen || !!gap;
+  return collapseCardHTML('stock', 'Stock used today',
+    n ? n + (n === 1 ? ' product' : ' products') : (gap ? 'needs a look' : ''), open, body);
 }
 
 /** Whole-unit stepper for one stock row. Addressed by ROW INDEX, never by name:
@@ -5242,6 +5313,23 @@ function saveBenta(){
         ? 'No sales are entered for ' + fmtShort(p.date) + ' yet, but saving it still adds the ' +
           peso(wage) + ' wage for the day. Save it anyway? If the stall did not open, use “Closed today” instead.'
         : 'No sales are entered for ' + fmtShort(p.date) + ' yet. Save it anyway?';
+      if (!confirm(ask)) return;
+    }
+    /* NOTHING LOGGED AS OPENED (v2.13.0). Owner's own design, after a fortnight
+       of it: ask at the SAVE, every night, and only when the stock card is
+       actually empty. Asked ONLY when the night has money on it — a night with
+       no sales has already been questioned above, and two dialogs in a row is
+       how both stop being read.
+
+       One plain question, then her word is final: a night where genuinely
+       nothing was opened is a real night, and this must never refuse it. */
+    else if (logsNoSupplies(p)){
+      const run = openedGap().nights;
+      const ask = 'Nothing is logged under “Stock used today” for ' + fmtShort(p.date) +
+        '. If flour, sauce or mayo was opened tonight, add it first — what is on the shelf ' +
+        'and the cost per ball both come from it.' +
+        (run >= 1 ? ' That would make ' + (run + 1) + ' nights in a row with nothing logged.' : '') +
+        ' Save without it?';
       if (!confirm(ask)) return;
     }
   }

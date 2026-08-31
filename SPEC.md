@@ -369,6 +369,18 @@ New action **`saveTinCount`** `{start, end, counted, entryId}`. It lives on the 
 
 The verdict is one sentence with the peso figure, the direction, and where to look — *short*: "a wrong change given, a purchase nobody wrote down, or a count that slipped"; *over*: "usually a sale that never got written down, or a purchase entered twice". A shortage is shown in the alert colour. When unknown-source money exists in the cutoff, the verdict **says so and refuses to blame a difference it cannot account for**.
 
+### v2.13.0 — asking whether the supplies were logged
+
+Owner, 2026-08-28: *"my moother forgot to log used supplies"* — a fortnight of it. A night saved perfectly well with the stock card untouched, and **nothing ever asked**. The shelf figures drifted from what was really there, and the costing had no supplies to price. He found out by looking in the tray.
+
+Two surfaces, from the owner's own design (*"make the nudge every time she saves the logging for the day, check if she logs used supplies, if yes then no need for nudging, if no logs for the supplies, only then we need the nudge"*):
+
+**1. At the save, every night.** `saveBenta` asks one plain question when the night logs nothing as opened — the same shape and the same rule as the no-sales question directly above it: *one plain question, then her word is final.* It is the **`else`** of that question, so a night with nothing on it gets one dialog rather than two in a row. It **never refuses**: a night where genuinely nothing was opened is a real night. Not asked on a closed night (which opens nothing by definition), nor when no product on the stock list is active (the question would be unanswerable). A logged **zero is not a figure** — a stepper left at 0 is the absence of an answer, here as everywhere. When a run already exists the question counts it, so a habit reads as a habit.
+
+**2. On the card, for the drift already there.** The "Stock used today" card names a run of `OPENED_RUN_MIN` (5) or more consecutive open nights with nothing logged, from the oldest such night, and **opens itself** — a warning behind a collapsed header is not a warning. The run counts backwards from **yesterday** (tonight is not finished), skips closed nights without breaking the run, and stops at the first night that did log something: the question is whether the habit has lapsed, not how many nights are empty in total.
+
+**Logging tonight does not erase the nights behind it.** Six nights of flour really were opened and never written down; the shelf is still drifting by that much and the costing still has nothing to price for them. The banner clears the way a real backlog clears — when those nights get their figures.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.

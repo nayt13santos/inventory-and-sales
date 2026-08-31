@@ -225,6 +225,8 @@ return {
   stockRunway, stockRunwayText,
   // v2.12.1: the tin count and what the difference means.
   tinCountFor, tinVerdict, applyLocalTinCount, applyLocalCutoffSplit,
+  // v2.13.0: the run of nights nobody logged anything as opened.
+  openedGap, openedGapText, stockCardHTML, logsNoSupplies,
   // v2.11.0: how the nights compare.
   trendNights, trendByWeekday, trendBySku, trendCutoffs, trendHTML, weekdayName,
   trendState(v){ if (v && 'open' in v) trendOpen = v.open; },
@@ -4750,6 +4752,203 @@ test('GIVEN AWAY OR RUINED: what left the tray unpaid is not revenue (v2.10.1)',
   assert.strictEqual(cost.ok, true, cost.error);
   assert.strictEqual(cost.data.balls, 10 * 4,
     'all ten boxes of four were MADE — free ones cost the same to make');
+});
+
+test('ASKED AT THE SAVE, every night, and only when it is empty (v2.13.0)', () => {
+  // Owner's own design, after losing a fortnight to it: "check if she logs used
+  // supplies, if yes then no need for nudging, if no logs for the supplies, only
+  // then we need the nudge." So the question is asked at the SAVE, on the night
+  // being saved — not five nights later.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const D = ymdDaysAgo(1);
+  app.loadBentaForm(D);
+  const pay = () => app.bentaPayload();
+
+  // Nothing logged: it asks.
+  assert.strictEqual(app.logsNoSupplies(pay()), true, 'an empty stock card is asked about');
+
+  // SHE LOGGED SOMETHING: no question at all. This is the whole point — the
+  // nudge must cost nothing on a night she did the job.
+  const row = app.benta.stock[0];
+  assert.ok(row, 'precondition: there is a product to log');
+  row.qty = 1;
+  assert.strictEqual(app.logsNoSupplies(pay()), false, 'a logged figure ends the matter');
+
+  // A logged ZERO is not a figure. A stepper left at 0 is the absence of an
+  // answer, exactly as it is everywhere else in this app.
+  row.qty = 0;
+  assert.strictEqual(app.logsNoSupplies(pay()), true, 'zero is not "she logged it"');
+  // ...and asserted DIRECTLY too, because bentaPayload already drops zero rows
+  // before they travel — so through the payload alone the `> 0` test is
+  // unobservable, and an untested guard is the kind that quietly rots.
+  assert.strictEqual(app.logsNoSupplies({ closed: false, stock: [{ product: 'Takoyaki Flour', qty: 0 }] }),
+    true, 'a zero row reaching this function directly is still "nothing logged"');
+  assert.strictEqual(app.logsNoSupplies({ closed: false, stock: [{ product: 'Takoyaki Flour', qty: 2 }] }),
+    false, 'and a real figure is still a figure');
+
+  // A CLOSED night opened nothing, so asking would be nonsense.
+  app.benta.closed = true;
+  assert.strictEqual(app.logsNoSupplies(pay()), false, 'a closed night is never asked');
+  app.benta.closed = false;
+
+  // A phone with NOTHING ACTIVE on its stock list cannot answer the question, so
+  // it is not put. Reached by switching every product off under Maintenance —
+  // emptying the list outright is NOT reachable, because an empty list falls
+  // back to the seeds by design ("the stock card is never blank").
+  const bare = loadClient();
+  bare.applyBootstrap(F.boot);
+  bare.state.stockItems.forEach(x => { x.active = false; });
+  bare.loadBentaForm(D);
+  assert.strictEqual(bare.logsNoSupplies(bare.bentaPayload()), false,
+    'nothing active means no question');
+});
+
+test('SOURCE PIN: the save asks about supplies, once, and never refuses (v2.13.0)', () => {
+  const save = slab('function saveBenta(){', 'function prefersReduced(){');
+
+  // Wired into the SAVE path, gated on the payload actually being empty.
+  assert.match(save, /else if \(logsNoSupplies\(p\)\)\{/,
+    'the question is asked at the save, on the payload being saved');
+  // ...as an ELSE of the no-sales question, so a night with nothing on it gets
+  // ONE dialog rather than two in a row.
+  const noSales = save.indexOf('No sales are entered for');
+  const supplies = save.indexOf('logsNoSupplies(p)');
+  assert.ok(noSales > 0 && supplies > noSales,
+    'it comes after the no-sales question, as its else — two dialogs in a row is how both stop being read');
+
+  // HER WORD IS FINAL: one confirm, and a no simply returns.
+  assert.match(save, /if \(!confirm\(ask\)\) return;[\s\S]{0,80}\}\n  \}/,
+    'a refusal returns without saving; there is no second ask and no override');
+  assert.ok(!/logsNoSupplies[\s\S]{0,400}errs\[/.test(save),
+    'it must never become a validation error — a night that opened nothing is a real night');
+
+  // It says what it costs, in her terms, and counts the run when there is one.
+  assert.match(save, /what is on the shelf ' \+\n *'and the cost per ball both come from it/,
+    'both consequences are named');
+  assert.match(save, /nights in a row with nothing logged/,
+    'and a run is counted, so a habit reads as a habit');
+});
+
+test('NOTHING LOGGED AS OPENED: the run of nights is named (v2.13.0)', () => {
+  // Owner, 2026-08-28: "my moother forgot to log used supplies." A night saves
+  // perfectly well with the stock card untouched and nothing ever asked, so the
+  // shelf figures drifted for a fortnight and the costing had no supplies to
+  // price. He found out by looking in the tray. This is the missing question.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const TODAY = app.todayStr();
+  const back = (n) => app.addDays(TODAY, -n);
+  const reset = () => {
+    for (const k in app.state.days) delete app.state.days[k];
+    for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
+  };
+  const night = (d, opts) => {
+    app.state.days[d] = { date: d, closed: !!(opts && opts.closed), total: 1000, cash: 1000, gcash: 0 };
+    if (opts && opts.used) app.state.stockUsage[d] = [{ date: d, product: 'Takoyaki Flour', qty: opts.used }];
+  };
+
+  // Four empty nights is a quiet stretch, not a habit — it says nothing.
+  reset();
+  for (let i = 1; i <= 4; i++) night(back(i));
+  assert.strictEqual(app.openedGap().nights, 4);
+  assert.strictEqual(app.openedGapText(), '', 'four nights is not yet worth saying');
+
+  // Five is. And it names the COUNT and the date the run began, so he can check
+  // it against the paper rather than take it on faith.
+  reset();
+  for (let i = 1; i <= 5; i++) night(back(i));
+  const g = app.openedGap();
+  assert.strictEqual(g.nights, 5);
+  assert.strictEqual(g.since, back(5), 'the run began on the OLDEST empty night');
+  const said = app.openedGapText();
+  assert.match(said, /Nothing has been logged as opened for 5 nights running/);
+  assert.match(said, /drifting from what is really there/, 'and what it costs him');
+  assert.match(said, /the costing has no supplies to price/, 'both consequences, plainly');
+
+  // THE RUN ENDS AT THE FIRST NIGHT THAT DID LOG SOMETHING. The question is
+  // "has she stopped doing this", not "how many nights are empty overall".
+  reset();
+  for (let i = 1; i <= 3; i++) night(back(i));
+  night(back(4), { used: 2 });
+  for (let i = 5; i <= 12; i++) night(back(i));
+  assert.strictEqual(app.openedGap().nights, 3,
+    'eight older empty nights are behind a night that DID log — the run is three');
+  assert.strictEqual(app.openedGapText(), '', 'so it stays quiet');
+
+  // A CLOSED night opens nothing, so it neither breaks the run nor lengthens it.
+  reset();
+  for (let i = 1; i <= 3; i++) night(back(i));
+  night(back(4), { closed: true });
+  for (let i = 5; i <= 6; i++) night(back(i));
+  assert.strictEqual(app.openedGap().nights, 5,
+    'the closed night is skipped, and the run continues through it');
+
+  // A night that logged a ZERO is still an empty night — a stepper left at 0 is
+  // not a figure, it is the absence of one.
+  reset();
+  for (let i = 1; i <= 5; i++) night(back(i));
+  app.state.stockUsage[back(2)] = [{ date: back(2), product: 'Takoyaki Flour', qty: 0 }];
+  assert.strictEqual(app.openedGap().nights, 5, 'a logged zero does not end the run');
+
+  // TONIGHT IS NEVER COUNTED: it is not finished, and nagging about a night she
+  // is still entering is how a warning stops being read.
+  reset();
+  for (let i = 1; i <= 4; i++) night(back(i));
+  night(TODAY);
+  assert.strictEqual(app.openedGap().nights, 4, 'tonight is not one of the empty nights');
+  assert.strictEqual(app.openedGapText(), '');
+});
+
+test('NOTHING LOGGED AS OPENED: the card opens itself, and never refuses (v2.13.0)', () => {
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const TODAY = app.todayStr();
+  const back = (n) => app.addDays(TODAY, -n);
+  for (const k in app.state.days) delete app.state.days[k];
+  for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
+  for (let i = 1; i <= 6; i++){
+    const d = back(i);
+    app.state.days[d] = { date: d, closed: false, total: 1000, cash: 1000, gcash: 0 };
+  }
+  app.loadBentaForm(TODAY);
+
+  // A WARNING BEHIND A COLLAPSED HEADER IS NOT A WARNING.
+  const html = app.stockCardHTML();
+  assert.match(html, /Nothing has been logged as opened for 6 nights running/);
+  assert.match(html, /needs a look/, 'the header says so too');
+  // Asserted on the real collapse state, not on the word "hidden" appearing
+  // somewhere in the markup — every error slot in the body carries that word.
+  assert.match(html, /aria-expanded="true"/, 'the card is open, so the warning is visible');
+  assert.ok(!/<div class="collapse-body" id="stockBody" hidden>/.test(html),
+    'and its body is not the hidden variant');
+
+  // It NEVER refuses: the night is still perfectly savable, because a night
+  // where genuinely nothing was opened is a real night.
+  assert.deepStrictEqual(Object.keys(app.validateBenta()).filter(k => app.validateBenta()[k]), [],
+    'a run of empty nights must not block Save day');
+
+  // LOGGING TONIGHT DOES NOT ERASE THE NIGHTS BEHIND IT. Six nights of flour
+  // really were opened and never written down; the shelf figures are still
+  // drifting by that much, and the costing still has nothing to price for them.
+  // A banner that vanished on one good night would be telling him the backlog
+  // had been dealt with when it had not.
+  const row = app.benta.stock[0];
+  assert.ok(row, 'precondition: there is a product to log');
+  row.qty = 1;
+  app.applyLocalDay(app.bentaPayload());
+  assert.strictEqual(app.openedGap().nights, 6,
+    'the six empty nights are still empty — one good night does not fill them');
+  assert.match(app.openedGapText(), /6 nights running/);
+
+  // It clears the way a real backlog clears: by those nights getting their
+  // figures. Filling the most recent one shortens the run to nothing.
+  for (let i = 1; i <= 6; i++){
+    const d = back(i);
+    app.state.stockUsage[d] = [{ date: d, product: 'Takoyaki Flour', qty: 1 }];
+  }
+  assert.strictEqual(app.openedGap().nights, 0, 'filled in, so nothing left to say');
+  assert.strictEqual(app.openedGapText(), '');
 });
 
 test('THE TIN COUNT: over, short, exact — and never a zero nobody entered (v2.12.1)', () => {
