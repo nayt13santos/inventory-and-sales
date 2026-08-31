@@ -590,7 +590,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.13.2';
+const APP_VERSION = '2.13.3';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -6583,10 +6583,28 @@ function renderIbapa(){
   h += '<div class="section-title">About</div><div class="card">' +
     '<div class="kv"><span class="k">App</span><span class="v">Octogo Tracker v' + APP_VERSION + '</span></div>' +
     '<div class="kv"><span class="k">Branch</span><span class="v">' + esc(asObj(state.settings).branch || '—') + '</span></div>' +
+    /* THE ESCAPE HATCH (v2.13.3). This app updates itself: a new version is
+       downloaded in the background and swapped in at a safe moment. When that
+       gets stuck — a phone that resumes instead of reopening, an update held
+       back for an unsaved night on a build too old to know better, a service
+       worker that never finished installing — there was NO WAY OUT from the
+       phone, and the only advice left was "clear the site data", which throws
+       away every unsent night with it. So: a button.
+
+       It clears the CACHED PAGE ONLY. localStorage — the queue, the drafts, the
+       config, the needs-attention list — is never touched, which is the whole
+       reason this is safe to hand her. It refuses while anything is unsent, so
+       it can never be the reason work went missing. */
+    '<div class="kv"><span class="k">Page came from</span><span class="v" id="swState">…</span></div>' +
+    '<button type="button" class="btn block" data-act="force-update" style="margin-top:10px;">Get the latest version</button>' +
+    '<p class="hint" id="forceHint" style="margin-top:6px;">Only clears the saved copy of the app itself. Your numbers, drafts and anything waiting to send are kept.</p>' +
     (config.sheetUrl ? '<a class="btn block" style="margin-top:10px; text-decoration:none;" href="' + esc(config.sheetUrl) + '" target="_blank" rel="noopener">Open the Google Sheet</a>' : '') +
   '</div>';
 
   $('panel-ibapa').innerHTML = h;
+  // Painted after the markup lands, because it reads the live worker state.
+  const sw = $('swState');
+  if (sw) sw.textContent = swStateText();
 }
 
 /* ---- Stock on hand. Every figure here is COMPUTED (see stockStatusOf) and the
@@ -8710,6 +8728,7 @@ document.addEventListener('click', (ev) => {
     loadCosting();
   }
   else if (act === 'tin-save') saveTinCount();
+  else if (act === 'force-update') forceUpdate();
   else if (act === 'catch-open'){ catchOpen = true; renderIbapa(); }
   else if (act === 'catch-close'){
     catchOpen = false;
@@ -9047,6 +9066,58 @@ function isTypingNow(){
   if (!el) return false;
   const tag = String(el.tagName || '').toLowerCase();
   return tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable === true;
+}
+
+/** What is actually serving this page, in her words — so a version that will
+ *  not move can be SEEN rather than guessed at (v2.13.3). */
+function swStateText(){
+  if (!('serviceWorker' in navigator)) return 'straight from the internet (no saved copy)';
+  if (!navigator.serviceWorker.controller) return 'straight from the internet — no saved copy yet';
+  return updateWaiting ? 'a saved copy — a newer one is downloaded and waiting'
+                       : 'a saved copy on this phone';
+}
+
+/** Throw away the saved copy of the app and load it fresh (v2.13.3).
+ *
+ *  Caches and the service-worker registration ONLY. localStorage is deliberately
+ *  untouched: the queue, the drafts, the config and the attention list all live
+ *  there, and this button exists precisely so nobody has to reach for "clear
+ *  site data" — which takes those with it.
+ *
+ *  Refused while anything is unsent. A reload is safe for a DRAFT (it is
+ *  restored) but a queued mutation that has not reached the sheet is work this
+ *  phone is the only copy of, and no convenience is worth risking it. */
+async function forceUpdate(){
+  const say = (msg) => { const el = $('forceHint'); if (el) el.textContent = msg; };
+  if (asArr(queue).length){
+    say('There are ' + queue.length + (queue.length === 1 ? ' entry' : ' entries') +
+      ' still waiting to reach the sheet. Tap “Sync now” above first — this would reload the app, ' +
+      'and nothing unsent should be anywhere near that.');
+    return;
+  }
+  if (typeof syncing !== 'undefined' && syncing){
+    say('Something is being sent right now. Try again in a moment.');
+    return;
+  }
+  say('Fetching the latest version…');
+  try{
+    // The page itself first, so a reload cannot be served the old copy again.
+    if (window.caches && caches.keys){
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+    }
+    if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations){
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r => r.unregister()));
+    }
+  }catch(err){
+    console.error(err);
+    say('This phone would not let go of the saved copy. Close the app fully — swipe it away, ' +
+      'not just Home — and open it again.');
+    return;
+  }
+  reloadingForUpdate = true;    // the update path must not fire a second reload
+  location.reload();
 }
 
 // Never reload while work could be lost; hold the update until it is safe

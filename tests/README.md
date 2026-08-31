@@ -554,3 +554,15 @@ Verified in the browser rather than by reasoning: same element after the keystro
 The test is deliberately **general**: it extracts the whole `input` listener and asserts that *no* branch calls any panel render. The specific fix is pinned too — `textContent`, not `innerHTML`, since `innerHTML` on the container holding the inputs is the identical bug. 4 mutants, all red.
 
 Suites: **208** (`run-tests.js`) + **239** (`contract.test.js`).
+
+### v2.13.3 — the escape hatch
+
+"its not updating" — and no way to act on it from the phone. Three tests, **9 mutants, all red.**
+
+The interesting one is `wipes_localstorage`: it inserts a single `store.set` into `forceUpdate` and the suite goes red, because the sandbox **counts store writes** and the test asserts zero. That is the whole safety claim of the button — it clears the cached page, never the work — and it is now impossible to break silently.
+
+`runs_with_queue` and `runs_while_syncing` cover the other half: the button must refuse while anything is unsent, and say how many entries so the refusal is checkable rather than a flat no.
+
+Before building anything I checked all six service-worker shell files for HTTP 200. A single failing file makes `cache.addAll` reject, the install fail, and the phone stay on its old version forever — worth ruling out first, and it is the kind of cause no amount of reasoning would have found.
+
+Suites: **208** (`run-tests.js`) + **242** (`contract.test.js`).

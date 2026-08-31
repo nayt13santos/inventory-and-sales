@@ -3650,19 +3650,40 @@ return {
 function loadUpdateGate(world) {
   const src = `
 'use strict';
-const log = { reloads: 0, stashes: 0 };
+const log = { reloads: 0, stashes: 0, cachesDeleted: [], unregistered: 0, storeWrites: 0, hint: '' };
 let benta = ${JSON.stringify(world.benta || null)};
 let syncing = ${world.syncing ? 'true' : 'false'};
 let paperBusy = ${JSON.stringify(world.paperBusy || '')};
 const focused = ${JSON.stringify(world.focusedTag || '')};
+const queue = ${JSON.stringify(world.queue || [])};
 const document = {
   activeElement: focused ? { tagName: focused, isContentEditable: false } : null
 };
 const location = { reload(){ log.reloads++; } };
 function stashBentaDraft(){ log.stashes++; }
+// v2.13.3: what forceUpdate touches, and what it must NOT. store.set is counted
+// so the test can prove localStorage was never written — the queue and the
+// drafts live there, and that is the whole reason the button is safe to offer.
+const store = { set(){ log.storeWrites++; return true; }, read(){ return null; } };
+const caches = {
+  async keys(){ return ['octogo-shell-v1.0.0', 'octogo-fonts-v1']; },
+  async delete(k){ log.cachesDeleted.push(k); return true; }
+};
+const window = { caches: caches };
+const navigator = {
+  onLine: true,
+  serviceWorker: {
+    controller: ${world.controlled === false ? 'null' : '{}'},
+    async getRegistrations(){ return [{ async unregister(){ log.unregistered++; return true; } }]; },
+    addEventListener(){}
+  }
+};
+function $(id){ return id === 'forceHint' ? { set textContent(v){ log.hint = String(v); } } : null; }
+function asArr(v){ return Array.isArray(v) ? v : []; }
 ${S_UPDATE}
 return {
-  log, applyUpdateIfSafe, isTypingNow,
+  log, applyUpdateIfSafe, isTypingNow, forceUpdate, swStateText,
+  get reloadingForUpdate(){ return reloadingForUpdate; },
   get updateWaiting(){ return updateWaiting; },
   set updateWaiting(v){ updateWaiting = v; },
   get benta(){ return benta; }
@@ -7696,6 +7717,65 @@ test('the selected tab says so with more than colour, and the theme is declared 
   assert.ok(/<meta name="color-scheme" content="light">/.test(src),
     'the page must declare its scheme so forced-dark does not reinvent it');
   assert.ok(/color-scheme:light;/.test(src), 'and declare it in CSS as well');
+});
+
+// ---------------------------------------------------------------------------
+// v2.13.3 — THE ESCAPE HATCH.
+// ---------------------------------------------------------------------------
+
+atest('GET THE LATEST VERSION: clears the saved PAGE, never the work (v2.13.3)', async () => {
+  // Owner, 2026-08-28: "its not updating." This app updates itself, and when
+  // that gets stuck there was no way out from the phone — the only advice left
+  // was "clear the site data", which throws away every unsent night with it.
+  const g = loadUpdateGate({ benta: { dirty: false } });
+  await g.forceUpdate();
+
+  // The saved copy of the app goes — BOTH caches, so a reload cannot be served
+  // the old page again.
+  assert.deepStrictEqual(g.log.cachesDeleted, ['octogo-shell-v1.0.0', 'octogo-fonts-v1'],
+    'every cached copy of the app is dropped');
+  assert.strictEqual(g.log.unregistered, 1, 'and the worker holding them is unregistered');
+  assert.strictEqual(g.log.reloads, 1, 'then it loads fresh, once');
+  // THE POINT OF THE WHOLE THING: localStorage is never written or cleared.
+  // The queue, the drafts, the config and the attention list all live there.
+  assert.strictEqual(g.log.storeWrites, 0, 'her work is not touched at all');
+  // And the ordinary update path must not fire a SECOND reload behind it.
+  assert.strictEqual(g.reloadingForUpdate, true, 'one reload, not two');
+});
+
+atest('GET THE LATEST VERSION: refuses while anything is unsent (v2.13.3)', async () => {
+  // A reload is safe for a DRAFT — it comes back. A queued mutation that has
+  // not reached the sheet is work this phone is the only copy of, and no
+  // convenience is worth going near it.
+  const g = loadUpdateGate({ benta: { dirty: false },
+    queue: [{ action: 'saveDay', payload: {} }, { action: 'saveExpense', payload: {} }] });
+  await g.forceUpdate();
+  assert.deepStrictEqual(g.log.cachesDeleted, [], 'nothing is cleared');
+  assert.strictEqual(g.log.unregistered, 0, 'nothing is unregistered');
+  assert.strictEqual(g.log.reloads, 0, 'and nothing is reloaded');
+  assert.match(g.log.hint, /2 entries still waiting to reach the sheet/,
+    'it says how many, so the refusal is checkable');
+  assert.match(g.log.hint, /Sync now/, 'and what to do instead');
+
+  // A send in flight is the same answer for the same reason.
+  const mid = loadUpdateGate({ benta: { dirty: false }, syncing: true });
+  await mid.forceUpdate();
+  assert.strictEqual(mid.log.reloads, 0, 'never mid-send');
+  assert.match(mid.log.hint, /being sent right now/);
+});
+
+atest('GET THE LATEST VERSION: the page says where it came from (v2.13.3)', async () => {
+  // A version that will not move has to be SEEABLE, or the only tool left is
+  // guessing at someone else's phone.
+  const cached = loadUpdateGate({ benta: { dirty: false } });
+  assert.match(cached.swStateText(), /a saved copy on this phone/);
+  cached.updateWaiting = true;
+  assert.match(cached.swStateText(), /a newer one is downloaded and waiting/,
+    'an update sitting unapplied is exactly the state that needs naming');
+
+  const fresh = loadUpdateGate({ benta: { dirty: false }, controlled: false });
+  assert.match(fresh.swStateText(), /no saved copy yet/,
+    'and a page with no worker says so rather than implying one');
 });
 
 // ---------------------------------------------------------------------------

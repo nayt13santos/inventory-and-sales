@@ -412,6 +412,22 @@ Fixed the way every other typed field in this app already works: the derived tex
 
 Pinned across the **whole input listener**, not just this field: no typed field may call `renderIbapa` / `renderGastos` / `renderCutoff` / `renderBenta` / `renderPanel`. This is a shape of mistake, not a single bug.
 
+### v2.13.3 — an escape hatch when the app will not update itself
+
+Owner, 2026-08-28: *"its not updating."*
+
+This app updates itself: a new version is downloaded in the background and swapped in at a moment where nothing can be lost. When that gets stuck there was **no way out from the phone** — a phone that resumes instead of reopening, an update held back for an unsaved night on a build too old to know better (pre-v2.9.7), a worker that never finished installing. The only advice left was "clear the site data", which throws away every unsent night with it.
+
+**More → About** now shows **where the page came from** — straight from the internet, a saved copy, or a saved copy with a newer one downloaded and waiting — so a version that will not move can be *seen* rather than guessed at from another room. Beneath it, **"Get the latest version"**:
+
+- clears **every cache** and unregisters the worker, then reloads once;
+- **never touches `localStorage`** — the queue, the drafts, the config and the needs-attention list all live there, and that is precisely why this is safe to put in front of Mama instead of "clear site data";
+- **refuses while anything is unsent**, naming how many entries and pointing at *Sync now*. A reload is safe for a draft (it comes back); a queued mutation that has not reached the sheet is work this phone is the only copy of;
+- refuses mid-send;
+- sets `reloadingForUpdate` so the ordinary update path cannot fire a second reload behind it.
+
+Verified beforehand that all six shell files serve HTTP 200 — a single failing file makes `cache.addAll` reject, the install fail, and a phone stay pinned to its old version indefinitely. They were fine, which is what ruled that cause out.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.

@@ -176,13 +176,13 @@ Nothing to do — the app updates itself. When a new version is published, the n
 
 It deliberately **waits** if Mama is mid-entry: a half-typed day is never interrupted, and the update applies after she saves or the next time the app is opened. Nothing queued is ever lost across an update.
 
-To confirm which version a phone is on: **More → About**. Current release: **app 2.13.2**, **script 2.13.2**.
+To confirm which version a phone is on: **More → About**. Current release: **app 2.13.3**, **script 2.13.3**.
 
 ## Updating by hand (if you skip the automation)
 
 The app has **two halves that must be updated separately** — the script in the sheet, and the files on the web host. A change to one usually needs the other, so do both. Takes about 5 minutes.
 
-Current versions: **script 2.13.2**, **app 2.13.2**. You can check what each phone is actually running under **More → About**.
+Current versions: **script 2.13.3**, **app 2.13.3**. You can check what each phone is actually running under **More → About**.
 
 ### 1. Update the script (in the sheet)
 
