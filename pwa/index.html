@@ -590,7 +590,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.13.4';
+const APP_VERSION = '2.14.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -1875,6 +1875,48 @@ function computeCutoff(per){
      rows that SAY they came from the tin are subtracted; rows that say nothing
      — every row written before the column, and the Cutoff screen's own one-tap
      doors — are counted apart and NAMED, never assumed either way. */
+  /* SUPPLIES USED, IN MONEY (v2.14.0). Owner, 2026-09-01: "I want to see the
+     supplies cost thats been used in the cutoff tab, I want to see it in
+     realtime, or every time the used supplies has been logged."
+
+     DISPLAY ONLY, and deliberately so. The note's `supplies` line is money
+     PAID (Expenses → Supplies) and settles the fortnight with his partner;
+     this is the value of stock OPENED, which is a different number — a sack
+     paid for in this cutoff may be opened across the next two. Nothing here
+     touches `total`, `remaining` or any allocation, so no figure that has
+     already been sent can move.
+
+     Priced from each product's own unit_cost, and a product with no cost on
+     file is LISTED rather than costed at nothing — the same rule the costing
+     screen follows. It recomputes on every render, so it is current the moment
+     a night with stock on it is saved. */
+  let usedCost = 0;
+  const usedRows = Object.create(null);
+  const usedUnpriced = [];
+  const usageByDate = asObj(state.stockUsage);
+  for (const d in usageByDate){
+    if (!inPeriod(d, per)) continue;
+    for (const r of asArr(usageByDate[d])){
+      const row = asObj(r);
+      const name = txt(row.product);
+      const qty = num(row.qty);
+      if (!name || !(qty > 0)) continue;
+      usedRows[name] = (usedRows[name] || 0) + qty;
+    }
+  }
+  const usedList = [];
+  for (const name in usedRows){
+    const it = asArr(state.stockItems).find(x => isObj(x) && txt(x.product) === name);
+    const uc = isObj(it) ? it.unit_cost : '';
+    const priced = !(uc === '' || uc == null) && num(uc) > 0;
+    const qty = r2(usedRows[name]);
+    if (priced) usedCost += qty * num(uc);
+    else usedUnpriced.push(name);
+    usedList.push({ product: name, qty: qty, unit: txt(isObj(it) ? it.unit : ''),
+                    cost: priced ? r2(qty * num(uc)) : null });
+  }
+  usedList.sort((a, b) => (b.cost || 0) - (a.cost || 0) || b.qty - a.qty);
+
   let tinOut = 0, unknownOut = 0;
   for (const id in exps){
     const e = asObj(exps[id]);
@@ -1904,6 +1946,8 @@ function computeCutoff(per){
     mama, supplies, octopus, electric, other, salary,
     split, perPartner: r2(split / 2), splitEntered: sp.entered,
     remaining,
+    // Supplies OPENED, in money (v2.14.0) — display only, never an allocation.
+    suppliesUsed: r2(usedCost), suppliesUsedRows: usedList, suppliesUsedUnpriced: usedUnpriced,
     // The tin (v2.12.0): what went in as cash, what she took back out of it,
     // and what this app cannot say either way.
     tinOut: r2(tinOut), tinUnknown: r2(unknownOut), tinExpected: r2(cash - tinOut),
@@ -2238,6 +2282,120 @@ function openedGap(){
    is a delivery nobody logged. Said as itself, and left out of the total.
    ============================================================ */
 
+/* ============================================================
+   WHAT WAS USED BETWEEN TWO COUNTS (v2.14.0)
+   ------------------------------------------------------------
+   Owner, 2026-08-28, having already corrected the count: "now how to know how
+   much stocks ive used".
+
+   Nothing is lost when a count re-baselines. The earlier count, the deliveries
+   after it and the new count are all still on the sheet, and between two counts
+   consumption is a HARD FACT rather than an estimate:
+
+       used = earlier count + what arrived after it − the new count
+
+   That is more reliable than nightly logging, because it is measured rather
+   than remembered. The one thing it cannot do is say WHICH NIGHT each unit was
+   opened on — so it reports the span, in dates, and lets the owner decide.
+
+   `logged` is what was already written down inside that span, so `unlogged` is
+   what the costing is missing. Recording the unlogged part is what puts the
+   supplies cost back where he wanted it.
+
+   IT REFUSES TO ANSWER when the span reaches back before `window_start`: this
+   phone does not hold those rows, and a figure built on rows it cannot see
+   would be a guess wearing a fact's clothes.
+   ============================================================ */
+
+/** Every count for a product, newest first. */
+function countsFor(product){
+  const out = [];
+  const byDate = asObj(state.stockCounts);
+  for (const d in byDate){
+    for (const r of asArr(byDate[d])){
+      const c = asObj(r);
+      if (txt(c.product) !== txt(product) || !isDateStr(c.date)) continue;
+      out.push({ date: txt(c.date), qty: num(c.counted_qty), updated_at: txt(c.updated_at) });
+    }
+  }
+  out.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 :
+    (txt(a.updated_at) < txt(b.updated_at) ? 1 : -1)));
+  return out;
+}
+
+/** What was used between a product's two most recent counts. null when there
+ *  are not two, or when the span is outside what this phone holds. */
+function usedBetweenCounts(product){
+  const counts = countsFor(product);
+  if (counts.length < 2) return null;
+  const later = counts[0], earlier = counts[1];
+  if (later.date === earlier.date) return null;   // two counts on one day say nothing about a span
+  // The phone's own rows only reach back to window_start. A span that starts
+  // before that cannot be measured here, and saying so is the only honest answer.
+  const win = txt(asObj(state).window_start);
+  if (win && earlier.date < win) return { from: earlier.date, to: later.date, sure: false };
+
+  let delivered = 0, logged = 0;
+  const inSpan = (d) => isDateStr(d) && d > earlier.date && d <= later.date;
+  const dels = asObj(state.stockDeliveries);
+  for (const d in dels){
+    if (!inSpan(d)) continue;
+    for (const r of asArr(dels[d])){
+      if (txt(asObj(r).product) === txt(product)) delivered += num(asObj(r).qty);
+    }
+  }
+  // Deliveries also ride on an expense row from before v2.6.0.
+  const exps = asObj(state.expenses);
+  for (const id in exps){
+    const e = asObj(exps[id]);
+    if (txt(e.stock_product) === txt(product) && inSpan(txt(e.date))) delivered += num(e.stock_qty);
+  }
+  const usage = asObj(state.stockUsage);
+  for (const d in usage){
+    if (!inSpan(d)) continue;
+    for (const r of asArr(usage[d])){
+      if (txt(asObj(r).product) === txt(product)) logged += num(asObj(r).qty);
+    }
+  }
+  const used = r2(earlier.qty + delivered - later.qty);
+  const it = asArr(state.stockItems).find(x => isObj(x) && txt(x.product) === txt(product));
+  const uc = isObj(it) ? it.unit_cost : '';
+  const priced = !(uc === '' || uc == null) && num(uc) > 0;
+  return {
+    from: earlier.date, to: later.date, sure: true,
+    earlier: r2(earlier.qty), later: r2(later.qty), delivered: r2(delivered),
+    used: used, logged: r2(logged), unlogged: r2(Math.max(0, used - logged)),
+    cost: priced ? r2(Math.max(0, used - logged) * num(uc)) : null,
+    unit: txt(isObj(it) ? it.unit : '')
+  };
+}
+
+/** The one line under a product, or '' when there is nothing to say. */
+function usedBetweenText(product){
+  const u = usedBetweenCounts(product);
+  if (!u) return '';
+  if (!u.sure){
+    return 'Between your counts on ' + fmtShort(u.from) + ' and ' + fmtShort(u.to) +
+      ', this phone does not hold all the rows, so it cannot work out what was used. The Google Sheet does.';
+  }
+  if (u.used <= 0){
+    return 'Between your counts on ' + fmtShort(u.from) + ' and ' + fmtShort(u.to) +
+      ', nothing was used — the shelf ended up with as much as it started with, or more.';
+  }
+  let t = 'Used between your counts on ' + fmtShort(u.from) + ' and ' + fmtShort(u.to) + ': ' +
+    qtyWithUnit(u.used, u.unit) +
+    ' (' + qtyWithUnit(u.earlier, u.unit) + ' counted, ' + qtyWithUnit(u.delivered, u.unit) +
+    ' arrived, ' + qtyWithUnit(u.later, u.unit) + ' left).';
+  if (u.logged > 0){
+    t += ' ' + qtyWithUnit(u.logged, u.unit) + ' of that is already logged as opened' +
+      (u.unlogged > 0 ? ', so ' + qtyWithUnit(u.unlogged, u.unit) + ' is not' : '') + '.';
+  } else {
+    t += ' None of it is logged as opened yet, so the costing prices none of it.';
+  }
+  if (u.cost !== null && u.unlogged > 0) t += ' That missing part is ' + peso(u.cost) + '.';
+  return t;
+}
+
 let catchOpen = false;                    // whether the catch-up form is open
 const catchDraft = Object.create(null);   // product -> what is really there, as typed
 
@@ -2281,10 +2439,14 @@ function catchUpPlan(counted){
  *  very likely already been settled — restating money that has moved, which
  *  this app never does. Falls back to today, which is always in this cutoff and
  *  always a night she can save. */
-function catchUpNight(){
+function catchUpNight(todayArg){
   const days = asObj(state.days);
   const usage = asObj(state.stockUsage);
-  const today = todayStr();
+  // The clock is injectable for the same reason the server's is (makeContext
+  // takes a `now`): otherwise this cannot be tested on the 1st or the 16th,
+  // when today IS the start of the cutoff and there is no earlier night in it
+  // to choose. Production never passes it.
+  const today = isDateStr(todayArg) ? txt(todayArg) : todayStr();
   const per = currentPeriod(today);
   const dates = Object.keys(days)
     .filter(d => isDateStr(d) && d <= today && d >= per.start && d <= per.end)
@@ -5979,6 +6141,32 @@ function renderCutoff(){
   const splitVal = typed == null ? f.split : typed;
   const live = liveCutoff(per);
 
+  /* SUPPLIES USED, IN MONEY (v2.14.0). Owner's ask: see the cost of what was
+     opened, on this tab, kept current. Its own card, ABOVE the settlement
+     figures and clearly separated from them, because the "Supplies" line below
+     is money PAID and this is the value of stock OPENED — a sack paid for this
+     fortnight may be opened across the next two, and conflating them is exactly
+     the mistake this card exists to prevent. It is not in any total. */
+  if (num(f.suppliesUsed) > 0 || asArr(f.suppliesUsedRows).length){
+    h += '<div class="card">' +
+      '<div class="pay-intro">Supplies used this cutoff</div>' +
+      '<div class="co-row big"><span>Value opened</span><span class="v">' + peso(f.suppliesUsed) + '</span></div>';
+    for (const r of asArr(f.suppliesUsedRows)){
+      h += '<div class="co-row"><span>' + esc(r.product) +
+        ' <span class="hint">(' + esc(qtyWithUnit(r.qty, r.unit)) + ')</span></span>' +
+        '<span class="v">' + (r.cost === null ? '—' : peso(r.cost)) + '</span></div>';
+    }
+    if (asArr(f.suppliesUsedUnpriced).length){
+      h += '<p class="hint" style="margin-top:8px;">' +
+        esc(listPhrase(asArr(f.suppliesUsedUnpriced))) +
+        ' has no cost on file, so the quantity is counted but the money is not. Set it under More → Maintenance.</p>';
+    }
+    h += '<p class="hint" style="margin-top:8px;">This is what was <b>opened</b>, priced at what each unit costs you. ' +
+      'It is not the “Supplies” line below — that one is money you <b>paid</b>, and the two are different figures: ' +
+      'a sack bought this fortnight may be opened across the next two. Nothing here is added to any total.</p>' +
+    '</div>';
+  }
+
   /* WHAT SHOULD BE IN THE TIN (v2.12.0). Its own card, below the settlement
      figures, because it answers a different question: not "how do we divide
      this" but "is the cash actually there before we divide it". Shown only once
@@ -6786,8 +6974,18 @@ function stockOnHandHTML(){
       '<div class="st-sub">' + esc(stockExplain(s)) + '</div>' +
       // A negative figure is honest information, not an error to hide: it means
       // more has been opened than the count and the deliveries account for.
+      // A NEGATIVE FIGURE EXPLAINS ITSELF (v2.14.0). It used to say only that the
+      // starting figure was out of date and point at "Correct the count" — which
+      // is the door that ABSORBS the difference and takes the supplies cost with
+      // it. It now names the rule that most often causes this instead.
       (s.on_hand < 0
-        ? '<div class="st-sub" style="color:var(--alert);">Below zero, so the starting figure is out of date. Count what is really there and tap “Correct the count”.</div>'
+        ? '<div class="st-sub" style="color:var(--alert);">Below zero: more is logged as opened than the count and the deliveries can account for. ' +
+          'A delivery dated ON the count day is left out on purpose — a count is an end-of-day figure — so check those dates first. ' +
+          'Correcting the count hides the difference rather than explaining it.</div>'
+        : '') +
+      // What was used between the last two counts — measured, not remembered.
+      (usedBetweenText(s.product)
+        ? '<div class="st-sub">' + esc(usedBetweenText(s.product)) + '</div>'
         : '') +
       (s.reorder_at > 0 ? '<div class="st-sub">Buy more at ' + esc(qtyWithUnit(s.reorder_at, s.unit)) + ' or less.</div>' : '') +
       // How long it lasts at the rate it is actually being opened (v2.10.2) —

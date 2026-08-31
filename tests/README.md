@@ -580,3 +580,13 @@ Three things this exposed, all in my own test rather than the worker:
 The routing is now driven through the **real fetch listener** (handlers are captured from the fake `self`), because calling the two strategies directly proves they work without proving the worker picks the right one — which was the actual bug. 7 mutants, all red, including both routing mutants that survived while the test bypassed dispatch.
 
 Suites: **208** (`run-tests.js`) + **243** (`contract.test.js`).
+
+### v2.14.0 — supplies used: between counts, and on the Cutoff tab
+
+Four tests, **20 mutants, all red.**
+
+The one worth reading is the change to an OLD guardrail: *"stock never reaches the cutoff figures or the note"* compared the whole `computeCutoff` object, and v2.14.0 adds display keys that stock usage is **supposed** to move. Rather than delete the guardrail or weaken it to a shrug, it now names the figures that must never move — every allocation, every total, the residual — key by key, asserts the display keys **do** move, and keeps comparing the note byte for byte. That last line is the one that actually protects what his partner receives.
+
+A clock dependency also fired for real, on the day the date rolled to **2026-09-01**: the catch-up night test built its fixture from `today − n` and needed room inside the current cutoff, and on the 1st there is none. The guard I had added caught it loudly instead of silently testing nothing. Fixed properly by making `catchUpNight` take an optional date — dependency injection for the clock, exactly as the server's `makeContext(ss, now)` already does — and pinning the test to a fixed day. Working around a clock is how a test becomes a liability; injecting it is how it stops being one.
+
+Suites: **208** (`run-tests.js`) + **246** (`contract.test.js`).

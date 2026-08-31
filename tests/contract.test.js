@@ -235,6 +235,8 @@ return {
   openedGap, openedGapText, stockCardHTML, logsNoSupplies,
   // v2.13.1: what was opened, worked out from what is left on the shelf.
   catchUpPlan, catchUpNight, catchUpFill,
+  // v2.14.0: what was used between two counts — measured, not remembered.
+  countsFor, usedBetweenCounts, usedBetweenText,
   get moved(){ return moved; },
   get catchDraft(){ return catchDraft; },
   // v2.11.0: how the nights compare.
@@ -1847,8 +1849,25 @@ test('stock never reaches the cutoff figures or the note, on either side', () =>
     { date: '2025-07-03', product: 'Takoyaki Flour', qty: 99999, entry_id: 'x', updated_at: '' }
   ];
   const after = app.computeCutoff(SPEC_PERIOD);
-  assert.deepStrictEqual(after, before, 'stock usage moved a cutoff figure');
-  assert.strictEqual(app.buildNote(after, SPEC_PERIOD), note);
+  // v2.14.0 adds DISPLAY-ONLY keys that stock usage is SUPPOSED to move — the
+  // owner asked to see the value of what was opened on the Cutoff tab. So the
+  // comparison now names the figures that must never move: every allocation,
+  // every total, and the residual. The display keys are asserted separately,
+  // and the note is still compared byte for byte below, which is the line that
+  // actually protects what his partner receives.
+  const MONEY = ['total', 'cash', 'gcash', 'mama', 'supplies', 'octopus', 'electric',
+    'other', 'salary', 'split', 'perPartner', 'remaining', 'excluded',
+    'daysWithSales', 'openDays', 'tinOut', 'tinUnknown', 'tinExpected'];
+  for (const k of MONEY){
+    assert.deepStrictEqual(after[k], before[k], 'stock usage moved ' + k);
+  }
+  assert.ok(!has(after, 'stock') && !has(after, 'stock_total'),
+    'and it still adds no stock line to the figures the note is built from');
+  // The display keys DO move, which is the point of them.
+  assert.ok(after.suppliesUsed > before.suppliesUsed,
+    'the supplies-used figure is exactly what should follow the usage');
+  assert.strictEqual(app.buildNote(after, SPEC_PERIOD), note,
+    'and the NOTE is byte-identical — what his partner receives cannot move');
   // ...and the SERVER note the phone actually shows is unchanged too.
   const again = post(SP.ctx, { token: SP.token, action: 'cutoff',
     payload: { start: SPEC_PERIOD.start, end: SPEC_PERIOD.end, dryRun: true } });
@@ -5017,6 +5036,214 @@ test('TYPING NEVER REBUILDS THE SCREEN UNDER HER (v2.13.2)', () => {
   assert.match(upd, /set\('catch-total'/, 'and the total');
 });
 
+test('SUPPLIES USED shows on the Cutoff tab, and moves nothing (v2.14.0)', () => {
+  // Owner, 2026-09-01: "I want to see the supplies cost thats been used in the
+  // cutoff tab, I want to see it in realtime, or every time the used supplies
+  // has been logged." Display only — the "Supplies" line below it is money PAID
+  // and settles the fortnight with his partner; this is stock OPENED.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const flour = app.state.stockItems.find(x => x.product === 'Takoyaki Flour');
+  const sauce = app.state.stockItems.find(x => x.product === 'Takoyaki Sauce');
+  flour.unit_cost = 120; flour.unit = 'pack';
+  sauce.unit_cost = 490; sauce.unit = 'gallon';
+  for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
+  const per = app.currentPeriod('2026-08-20');
+
+  // Nothing logged: nothing to show.
+  let f = app.computeCutoff(per);
+  assert.strictEqual(f.suppliesUsed, 0);
+  assert.deepStrictEqual(f.suppliesUsedRows, []);
+
+  // Six packs and two gallons opened inside the cutoff.
+  app.state.stockUsage['2026-08-20'] = [
+    { date: '2026-08-20', product: 'Takoyaki Flour', qty: 4, entry_id: 'u1' },
+    { date: '2026-08-20', product: 'Takoyaki Sauce', qty: 2, entry_id: 'u2' }
+  ];
+  app.state.stockUsage['2026-08-22'] = [
+    { date: '2026-08-22', product: 'Takoyaki Flour', qty: 2, entry_id: 'u3' }
+  ];
+  f = app.computeCutoff(per);
+  assert.strictEqual(f.suppliesUsed, 6 * 120 + 2 * 490,
+    'every night in the cutoff, priced at what each unit costs');
+  // Sorted by money, so the biggest line is first.
+  assert.strictEqual(f.suppliesUsedRows[0].product, 'Takoyaki Sauce');
+  assert.strictEqual(f.suppliesUsedRows[0].cost, 980);
+  const fl = f.suppliesUsedRows.find(r => r.product === 'Takoyaki Flour');
+  assert.strictEqual(fl.qty, 6, 'nights are summed per product');
+  assert.strictEqual(fl.cost, 720);
+
+  // A night OUTSIDE the cutoff contributes nothing.
+  app.state.stockUsage['2026-09-02'] = [
+    { date: '2026-09-02', product: 'Takoyaki Flour', qty: 50, entry_id: 'u4' }
+  ];
+  assert.strictEqual(app.computeCutoff(per).suppliesUsed, 6 * 120 + 2 * 490,
+    'only this cutoff');
+
+  // NO COST ON FILE: the quantity is counted, the money is NOT invented, and the
+  // product is named so he can go and set it.
+  sauce.unit_cost = '';
+  f = app.computeCutoff(per);
+  assert.strictEqual(f.suppliesUsed, 720, 'the priced part only');
+  assert.deepStrictEqual(f.suppliesUsedUnpriced, ['Takoyaki Sauce']);
+  assert.strictEqual(f.suppliesUsedRows.find(r => r.product === 'Takoyaki Sauce').cost, null,
+    'never costed at nothing');
+
+  // AND IT MOVES NO MONEY. This is the guarantee that lets it sit on the tab
+  // that settles the fortnight.
+  sauce.unit_cost = 490;
+  const withUsage = app.computeCutoff(per);
+  for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
+  const without = app.computeCutoff(per);
+  for (const k of ['total', 'cash', 'gcash', 'supplies', 'octopus', 'remaining', 'split']){
+    assert.deepStrictEqual(withUsage[k], without[k], 'usage moved ' + k);
+  }
+  assert.strictEqual(app.buildNote(withUsage, per), app.buildNote(without, per),
+    'and the note his partner receives is byte-identical either way');
+});
+
+test('SOURCE PIN: the Cutoff card separates opened from paid, and a negative explains itself (v2.14.0)', () => {
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+  const at = src.indexOf('Supplies used this cutoff');
+  assert.ok(at > 0, 'the card must exist on the Cutoff tab');
+  const card = src.slice(at - 400, at + 1600);
+  assert.match(card, /if \(num\(f\.suppliesUsed\) > 0 \|\| asArr\(f\.suppliesUsedRows\)\.length\)/,
+    'it stays away when nothing has been opened');
+  assert.match(card, /money you <b>paid<\/b>/, 'it says what the OTHER line is');
+  assert.match(card, /may be opened across the next two/, 'and why they differ');
+  assert.match(card, /Nothing here is added to any total/, 'and that it is not an allocation');
+
+  // The below-zero message must no longer send him at the door that hides the
+  // difference — that advice predates the catch-up entirely.
+  const neg = src.slice(src.indexOf('Below zero'), src.indexOf('Below zero') + 500);
+  assert.match(neg, /more is logged as opened than the count and the deliveries can account for/,
+    'a negative figure explains itself');
+  assert.match(neg, /dated ON the count day is left out on purpose/,
+    'and names the rule that most often causes it');
+  assert.ok(!/Count what is really there and tap/.test(neg),
+    'and it no longer tells him to correct the count, which hides the difference');
+});
+
+test('USED BETWEEN TWO COUNTS: measured, not remembered (v2.14.0)', () => {
+  // Owner, 2026-08-28, having already corrected the count: "now how to know how
+  // much stocks ive used". Nothing is lost — the earlier count, the deliveries
+  // after it and the new count are all still there, and between two counts
+  // consumption is a FACT: earlier + delivered − later.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const P = 'Takoyaki Flour';
+  const it = app.state.stockItems.find(x => x.product === P);
+  it.unit_cost = 120; it.unit = 'pack';
+  const clear = () => {
+    for (const k in app.state.stockCounts) delete app.state.stockCounts[k];
+    for (const k in app.state.stockDeliveries) delete app.state.stockDeliveries[k];
+    for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
+    for (const k in app.state.expenses) delete app.state.expenses[k];
+    app.state.window_start = '';
+  };
+  const count = (date, qty) => {
+    (app.state.stockCounts[date] = app.state.stockCounts[date] || [])
+      .push({ date, product: P, counted_qty: qty, entry_id: 'c-' + date + '-' + qty, updated_at: date });
+  };
+  const arrived = (date, qty) => {
+    (app.state.stockDeliveries[date] = app.state.stockDeliveries[date] || [])
+      .push({ date, product: P, qty, entry_id: 'd-' + date });
+  };
+  const opened = (date, qty) => {
+    (app.state.stockUsage[date] = app.state.stockUsage[date] || [])
+      .push({ date, product: P, qty, entry_id: 'u-' + date });
+  };
+
+  // HIS CASE: counted 8 on Aug 15, 12 arrived last week, counted 2 today.
+  // 8 + 12 − 2 = 18 used, none of it logged.
+  clear();
+  count('2026-08-15', 8);
+  arrived('2026-08-22', 12);
+  count('2026-08-28', 2);
+  let u = app.usedBetweenCounts(P);
+  assert.ok(u && u.sure, 'two counts and rows in range: it can answer');
+  assert.strictEqual(u.from, '2026-08-15');
+  assert.strictEqual(u.to, '2026-08-28');
+  assert.strictEqual(u.delivered, 12);
+  assert.strictEqual(u.used, 18, 'earlier + delivered − later');
+  assert.strictEqual(u.logged, 0);
+  assert.strictEqual(u.unlogged, 18, 'and none of it has reached the costing');
+  assert.strictEqual(u.cost, 18 * 120, 'which is what it cost');
+
+  const said = app.usedBetweenText(P);
+  assert.match(said, /Used between your counts on August 15 .* and August 28/);
+  assert.match(said, /18 packs/, 'the figure');
+  assert.match(said, /8 packs counted, 12 packs arrived, 2 packs left/,
+    'and the whole working, so it can be checked against the paper');
+  assert.match(said, /None of it is logged as opened yet/);
+  assert.match(said, /₱2,160/, 'with the money it represents');
+
+  // PART ALREADY LOGGED: only the remainder is missing from the costing.
+  opened('2026-08-24', 5);
+  u = app.usedBetweenCounts(P);
+  assert.strictEqual(u.used, 18, 'what was used does not change');
+  assert.strictEqual(u.logged, 5);
+  assert.strictEqual(u.unlogged, 13, 'but what the costing is MISSING does');
+  assert.strictEqual(u.cost, 13 * 120);
+  assert.match(app.usedBetweenText(P), /5 packs of that is already logged as opened, so 13 packs is not/);
+
+  // THE DATE WINDOW IS STRICT, the same rule the on-hand figure follows: a
+  // delivery ON the earlier count day is excluded (a count is end-of-day), and
+  // one ON the later count day is included.
+  clear();
+  count('2026-08-15', 8);
+  arrived('2026-08-15', 100);          // same day as the count — excluded
+  arrived('2026-08-28', 4);            // same day as the new count — counted
+  count('2026-08-28', 2);
+  u = app.usedBetweenCounts(P);
+  assert.strictEqual(u.delivered, 4,
+    'a delivery dated ON the count day is left out, exactly as on-hand leaves it out');
+  assert.strictEqual(u.used, 10, '8 + 4 − 2');
+
+  // A DELIVERY THAT RODE ON AN EXPENSE (pre-v2.6.0 rows) still counts.
+  clear();
+  count('2026-08-15', 8);
+  app.state.expenses['e1'] = { date: '2026-08-20', category: 'Supplies', item: 'Flour',
+    amount: 600, stock_product: P, stock_qty: 5, entry_id: 'e1', paid_from: '' };
+  count('2026-08-28', 3);
+  assert.strictEqual(app.usedBetweenCounts(P).used, 10, '8 + 5 − 3');
+
+  // FEWER THAN TWO COUNTS: there is no span, so it says nothing at all.
+  clear();
+  count('2026-08-28', 2);
+  assert.strictEqual(app.usedBetweenCounts(P), null, 'one count is not a span');
+  assert.strictEqual(app.usedBetweenText(P), '');
+
+  // TWO COUNTS ON THE SAME DAY say nothing about a span either.
+  clear();
+  count('2026-08-28', 8);
+  count('2026-08-28', 2);
+  assert.strictEqual(app.usedBetweenCounts(P), null);
+
+  // IT REFUSES when the span reaches back past what this phone holds — a figure
+  // built on rows it cannot see would be a guess dressed as a fact.
+  clear();
+  count('2026-07-01', 8);
+  arrived('2026-07-10', 12);
+  count('2026-08-28', 2);
+  app.state.window_start = '2026-08-01';
+  u = app.usedBetweenCounts(P);
+  assert.strictEqual(u.sure, false, 'it does not answer from rows it does not have');
+  assert.strictEqual(u.used, undefined, 'and it does not invent a figure');
+  assert.match(app.usedBetweenText(P), /does not hold all the rows/);
+  assert.match(app.usedBetweenText(P), /The Google Sheet does/, 'pointing at where the answer is');
+
+  // MORE ON THE SHELF THAN IT STARTED WITH is not negative usage.
+  clear();
+  count('2026-08-15', 2);
+  arrived('2026-08-20', 10);
+  count('2026-08-28', 20);
+  u = app.usedBetweenCounts(P);
+  assert.strictEqual(u.used, -8);
+  assert.strictEqual(u.unlogged, 0, 'never a negative amount to log');
+  assert.match(app.usedBetweenText(P), /nothing was used/);
+});
+
 test('CATCH UP: what is missing from the shelf IS what was opened (v2.13.1)', () => {
   // Owner, 2026-08-28: nobody logged supplies for a fortnight, he counted what
   // was left, and "with the remaining supplies, we should see the supplies cost
@@ -5084,17 +5311,18 @@ test('CATCH UP: what is missing from the shelf IS what was opened (v2.13.1)', ()
 test('CATCH UP: it fills ONE night, adds to what is there, and saves nothing (v2.13.1)', () => {
   const app = loadClient();
   app.applyBootstrap(F.boot);
-  const TODAY = app.todayStr();
+  // A FIXED date, injected. Building this from the real clock made it unrunnable
+  // on the 1st and the 16th, when today IS the start of the cutoff and there is
+  // no earlier night inside it to pick — the guard that caught that fired for
+  // real on 2026-09-01. A date the test chooses removes the dependency instead
+  // of working around it.
+  const TODAY = '2026-08-28';
   const per = app.currentPeriod(TODAY);
-  // Nights are taken from INSIDE the current cutoff, walking back from today
-  // but never past its start — otherwise this test breaks on the 1st and the
-  // 16th of a month, when yesterday belongs to the cutoff before.
   const nights = [];
-  for (let d = TODAY; d >= per.start && nights.length < 6; d = app.addDays(d, -1)){
-    if (d !== TODAY) nights.push(d);
+  for (let d = app.addDays(TODAY, -1); d >= per.start && nights.length < 6; d = app.addDays(d, -1)){
+    nights.push(d);
   }
-  assert.ok(nights.length >= 3,
-    'this needs a few nights of room inside the cutoff; today is ' + TODAY);
+  assert.strictEqual(nights.length, 6, 'six nights of room inside Aug 16-31 before the 28th');
   const back = (n) => nights[n - 1];
   for (const k in app.state.days) delete app.state.days[k];
   for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
@@ -5104,12 +5332,12 @@ test('CATCH UP: it fills ONE night, adds to what is there, and saves nothing (v2
 
   // The night chosen is the most recent one that logged NOTHING — the last night
   // it could have gone unrecorded.
-  assert.strictEqual(app.catchUpNight(), back(1));
+  assert.strictEqual(app.catchUpNight(TODAY), back(1));
 
   // A night that logged something is skipped, and the search CONTINUES to the
   // next empty one rather than giving up and defaulting to today.
   app.state.stockUsage[back(1)] = [{ date: back(1), product: 'Takoyaki Flour', qty: 2 }];
-  assert.strictEqual(app.catchUpNight(), back(2),
+  assert.strictEqual(app.catchUpNight(TODAY), back(2),
     'the next empty night down, not today');
 
   // Every night in the cutoff logged: it falls back to tonight rather than
@@ -5117,14 +5345,14 @@ test('CATCH UP: it fills ONE night, adds to what is there, and saves nothing (v2
   for (const d of nights){
     app.state.stockUsage[d] = [{ date: d, product: 'Takoyaki Flour', qty: 1 }];
   }
-  assert.strictEqual(app.catchUpNight(), TODAY,
+  assert.strictEqual(app.catchUpNight(TODAY), TODAY,
     'never an earlier cutoff — that would restate money that has moved');
 
   // A CLOSED night is skipped: nothing can be opened on a night the stall shut.
   const shut = nights[0];
   delete app.state.stockUsage[shut];
   app.state.days[shut].closed = true;
-  assert.notStrictEqual(app.catchUpNight(), shut, 'a closed night is never the answer');
+  assert.notStrictEqual(app.catchUpNight(TODAY), shut, 'a closed night is never the answer');
   app.state.days[shut].closed = false;
 
   // AN EMPTY NIGHT IN AN EARLIER CUTOFF IS NEVER REACHED. That fortnight has
@@ -5135,7 +5363,7 @@ test('CATCH UP: it fills ONE night, adds to what is there, and saves nothing (v2
   }
   const older = app.addDays(per.start, -3);
   app.state.days[older] = { date: older, closed: false, total: 900, cash: 900, gcash: 0 };
-  assert.strictEqual(app.catchUpNight(), TODAY,
+  assert.strictEqual(app.catchUpNight(TODAY), TODAY,
     'it falls back to tonight rather than reaching into a settled cutoff');
 
   // --- WHAT catchUpFill ACTUALLY DOES ---------------------------------------

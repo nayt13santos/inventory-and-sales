@@ -436,6 +436,26 @@ A **navigation** is now network-first: it asks the network, waits at most `NAV_T
 
 Offline is unchanged and was verified as a real navigation with the server stopped: the whole app booted from cache. That mattered more than version freshness — this app lives at a stall with poor signal.
 
+### v2.14.0 — the supplies cost, on the Cutoff tab, and what two counts prove
+
+Owner, 2026-08-28/09-01, after correcting the count: *"now how to know how much stocks ive used"*, then *"I want to see the supplies cost thats been used in the cutoff tab, I want to see it in realtime."*
+
+**Nothing is lost when a count re-baselines.** The earlier count, the deliveries after it and the new count are all still on the sheet, and between two counts consumption is a **fact**, not an estimate:
+
+```
+used = earlier count + what arrived after it − the new count
+```
+
+That is more reliable than nightly logging, because it is measured rather than remembered. Each product now carries that line — with the whole working, so it can be checked against the paper — plus how much of it is **already logged** and therefore how much the costing is still missing, in pesos. It **refuses to answer** when the span reaches back before `window_start`: this phone does not hold those rows, and a figure built on rows it cannot see would be a guess wearing a fact's clothes. It points at the sheet instead.
+
+The date window is the same strict rule the on-hand figure follows: a delivery dated **on** the earlier count day is excluded (a count is an end-of-day figure), one dated on the later count day is included.
+
+**A below-zero figure now explains itself.** It used to say only that the starting figure was out of date and point at *"Correct the count"* — the door that **absorbs** the difference and takes the supplies cost with it. It now names the arithmetic and the rule that most often causes it.
+
+**And the Cutoff tab shows the money.** A card above the settlement figures: *Value opened*, per product, priced at each unit's own cost, recomputed on every render so it is current the moment a night with stock on it is saved. A product with no cost on file is **listed, not costed at nothing**.
+
+It is **display only, and says so**: the "Supplies" line below it is money **paid**, this is the value of stock **opened**, and a sack bought this fortnight may be opened across the next two. Nothing here enters any total, and the guardrail test now proves it explicitly — every allocation compared key by key, and the note his partner receives asserted byte-identical either way.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.
