@@ -590,7 +590,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.13.0';
+const APP_VERSION = '2.13.1';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -2211,6 +2211,124 @@ function openedGap(){
     run++; since = d;
   }
   return { nights: run, since: since };
+}
+
+/* ============================================================
+   CATCH UP WHAT WAS OPENED (v2.13.1)
+   ------------------------------------------------------------
+   Owner, 2026-08-28: nobody logged the supplies for a fortnight, he counted
+   what was left in the tray, and — "with the remaining supplies, we should see
+   the supplies cost for this cutoff".
+
+   A stocktake is the wrong tool for that and he was right to refuse it: a count
+   RE-BASELINES, so the consumption it absorbs never reaches the costing and the
+   supplies cost stays at nothing. What the costing prices is what was logged as
+   OPENED, so that is what has to be written.
+
+   The arithmetic is not a guess. What the app believes is on the shelf minus
+   what is really there IS what was opened and never written down:
+
+       used = on_hand (baseline + delivered − logged usage) − counted now
+
+   The one thing this cannot know is WHICH NIGHT each unit was opened on, and it
+   does not pretend to: it fills ONE night's stock card, names that night, and
+   leaves the saving to her. Nothing here writes anything.
+
+   If the count is HIGHER than the app expects, that is not negative usage — it
+   is a delivery nobody logged. Said as itself, and left out of the total.
+   ============================================================ */
+
+let catchOpen = false;                    // whether the catch-up form is open
+const catchDraft = Object.create(null);   // product -> what is really there, as typed
+
+/** What to log, per product, given a map of product -> counted-now. Returns the
+ *  rows to fill in, the peso cost they come to, and anything it refuses to
+ *  guess at. `cost` is null for a product with no unit cost on file — reported,
+ *  never costed at nothing, exactly as the costing screen treats it. */
+function catchUpPlan(counted){
+  const rows = [], overs = [], unpriced = [];
+  let cost = 0;
+  for (const s of stockStatusList()){
+    const raw = asObj(counted)[s.product];
+    if (raw === undefined || raw === null || txt(raw).trim() === '') continue;
+    const now = num(raw);
+    if (now < 0) continue;
+    const used = r2(num(s.on_hand) - now);
+    if (used === 0) continue;
+    if (used < 0){
+      // More on the shelf than the app can account for: a delivery that was
+      // never logged. Naming it is useful; inventing usage from it is not.
+      overs.push({ product: s.product, unit: s.unit, extra: -used });
+      continue;
+    }
+    const it = asArr(state.stockItems).find(x => isObj(x) && x.product === s.product);
+    const uc = isObj(it) ? it.unit_cost : '';
+    const priced = !(uc === '' || uc == null) && num(uc) > 0;
+    if (priced) cost += used * num(uc);
+    else unpriced.push({ product: s.product, unit: s.unit, used: used });
+    rows.push({ product: s.product, unit: s.unit, used: used,
+                cost: priced ? r2(used * num(uc)) : null });
+  }
+  return { rows: rows, cost: r2(cost), overs: overs, unpriced: unpriced };
+}
+
+/** The night to file it under: the most recent OPEN night IN THIS CUTOFF that
+ *  logged nothing — the last night it could have gone unrecorded.
+ *
+ *  Confined to the current cutoff on purpose. The whole point of this is to put
+ *  the supplies cost in the fortnight it belongs to, so reaching back to an
+ *  empty night in an EARLIER cutoff would land the money in a period that has
+ *  very likely already been settled — restating money that has moved, which
+ *  this app never does. Falls back to today, which is always in this cutoff and
+ *  always a night she can save. */
+function catchUpNight(){
+  const days = asObj(state.days);
+  const usage = asObj(state.stockUsage);
+  const today = todayStr();
+  const per = currentPeriod(today);
+  const dates = Object.keys(days)
+    .filter(d => isDateStr(d) && d <= today && d >= per.start && d <= per.end)
+    .sort().reverse();
+  for (const d of dates){
+    if (truthy(asObj(days[d]).closed)) continue;       // nothing can be opened on it
+    if (asArr(usage[d]).some(r => num(asObj(r).qty) > 0)) continue;   // that night is done
+    return d;
+  }
+  return today;
+}
+
+/** Put the worked-out quantities onto one night's form. It does NOT save: it
+ *  fills the card, moves her to the Sales screen for that night, and leaves the
+ *  last word where every other figure's last word is — on Save day. */
+function catchUpFill(){
+  const plan = catchUpPlan(catchDraft);
+  if (!plan.rows.length){ toast('Type what is on the shelf first.'); return; }
+  const night = catchUpNight();
+  // The night is loaded the ordinary way, so its counts, prices and snapshots
+  // are exactly what any other edit of that night would carry.
+  loadBentaForm(night);
+  if (benta.closed){
+    toast('That night is marked closed, so nothing can be logged as opened on it.');
+    return;
+  }
+  let put = 0;
+  for (const r of plan.rows){
+    const row = asArr(benta.stock).find(x => txt(x.product) === txt(r.product));
+    if (!row) continue;
+    // ADDED to whatever that night already holds, never replacing it: saving the
+    // day rewrites the whole night's usage, so a figure already there has to
+    // survive this.
+    row.qty = r2(num(row.qty) + r.used);
+    put++;
+  }
+  benta.stockOpen = true;
+  benta.dirty = true;
+  for (const k in catchDraft) delete catchDraft[k];
+  catchOpen = false;
+  showTab('benta');
+  renderPanel('benta');
+  toast(put + (put === 1 ? ' product' : ' products') + ' filled in on ' + fmtShort(night) +
+    ' — ' + peso(plan.cost) + ' of supplies. Check it, then tap Save day.');
 }
 
 /** Does THIS payload log nothing at all as opened? (v2.13.0, owner's design:
@@ -6492,6 +6610,63 @@ let arriving = false;       // whether the "Stock came in" form is open
 // let me choose, just present all the stocks with + button".)
 let arrival = { rows: [], date: todayStr() };
 
+/** "Catch up what was opened": type what is really on the shelf, and it works
+ *  out what was opened and never written down — with the peso cost, before
+ *  anything is saved. It fills ONE night's stock card; she saves it. */
+function catchUpHTML(list){
+  if (!asArr(list).length) return '';
+  let h = '';
+  if (!catchOpen){
+    return '<div style="margin:6px 0 14px;">' +
+      '<button type="button" class="btn block" data-act="catch-open">Catch up what was opened</button>' +
+      '<p class="hint" style="margin-top:6px;">If nobody logged the supplies for a while, count what is left and this works out what was used — and what it cost.</p>' +
+    '</div>';
+  }
+  const plan = catchUpPlan(catchDraft);
+  const night = catchUpNight();
+  h += '<div style="margin:6px 0 14px;">' +
+    '<div class="pay-intro">Catch up what was opened</div>' +
+    '<p class="hint" style="margin:-4px 0 10px;">Type what is REALLY on the shelf now. What is missing is what was opened and never written down. Nothing is saved here — it fills in one night for you to check.</p>';
+  for (const s of asArr(list)){
+    const nm = esc(s.product);
+    const typed = Object.prototype.hasOwnProperty.call(catchDraft, s.product) ? catchDraft[s.product] : '';
+    const row = plan.rows.find(r => r.product === s.product);
+    const over = plan.overs.find(r => r.product === s.product);
+    h += '<div class="stk-row">' +
+        '<div class="stk-what"><span class="stk-name">' + nm + '</span>' +
+          '<span class="stk-unit">app says ' + esc(qtyWithUnit(s.on_hand, s.unit)) + '</span></div>' +
+        '<input class="input money" style="width:110px;text-align:right;" data-catch="' + nm + '" ' +
+          'inputmode="numeric" autocomplete="off" placeholder="0" value="' + esc(txt(typed)) + '">' +
+      '</div>';
+    if (row){
+      h += '<p class="ln-note">' + esc(qtyWithUnit(row.used, s.unit)) + ' opened' +
+        (row.cost === null ? ' — no cost on file for it, so it is not priced' : ' · ' + peso(row.cost)) + '</p>';
+    } else if (over){
+      h += '<p class="ln-note">' + esc(qtyWithUnit(over.extra, s.unit)) +
+        ' MORE than the app can account for. That is a delivery nobody logged, not something opened — ' +
+        'add it under “Stock came in” instead. It is left out below.</p>';
+    }
+  }
+  if (plan.rows.length){
+    h += '<div class="r-sep" role="presentation"></div>' +
+      '<div class="co-row big"><span>Supplies used</span><span class="v">' + peso(plan.cost) + '</span></div>';
+    if (plan.unpriced.length){
+      h += '<p class="hint">' + esc(listPhrase(plan.unpriced.map(u => u.product))) +
+        ' has no cost on file, so its quantity is counted but its money is not. Set it under Maintenance.</p>';
+    }
+    h += '<p class="hint" style="margin-top:8px;">This will be filled in on <b>' + esc(fmtShort(night)) +
+      '</b> — the last night nothing was logged. Which night each one was actually opened on is not something ' +
+      'this can know, so it puts them all on that night: the cutoff total is right, the night-by-night is not.</p>' +
+      '<div class="btn-row"><button type="button" class="btn" data-act="catch-close">Close</button>' +
+        '<button type="button" class="btn primary" data-act="catch-fill">Fill in ' + esc(fmtShort(night)) + '</button></div>';
+  } else {
+    h += '<p class="hint">Nothing to catch up yet — type what is on the shelf above.</p>' +
+      '<div class="btn-row"><button type="button" class="btn" data-act="catch-close">Close</button></div>';
+  }
+  h += '</div>';
+  return h;
+}
+
 function stockOnHandHTML(){
   let list = [];
   try{ list = stockStatusList(); }catch(err){ console.error(err); }
@@ -6538,6 +6713,9 @@ function stockOnHandHTML(){
         '<button type="button" class="btn primary" data-act="arrive-save">Add to stock</button></div>' +
     '</div>';
   }
+
+  // CATCH UP WHAT WAS OPENED (v2.13.1) — from what is really on the shelf.
+  h += catchUpHTML(list);
 
   for (const s of list){
     const nm = esc(s.product);
@@ -8493,6 +8671,13 @@ document.addEventListener('click', (ev) => {
     loadCosting();
   }
   else if (act === 'tin-save') saveTinCount();
+  else if (act === 'catch-open'){ catchOpen = true; renderIbapa(); }
+  else if (act === 'catch-close'){
+    catchOpen = false;
+    for (const k in catchDraft) delete catchDraft[k];
+    renderIbapa();
+  }
+  else if (act === 'catch-fill') catchUpFill();
   else if (act === 'trend-open'){ trendOpen = true; renderIbapa(); }
   else if (act === 'trend-close'){ trendOpen = false; renderIbapa(); }
   else if (act === 'cost-close'){ costOpen = false; renderIbapa(); }
@@ -8550,6 +8735,12 @@ document.addEventListener('input', (ev) => {
      was unreachable from the day it was written, so typing a delivery did
      nothing at all: 10 packs typed stayed 0, and one tap of + then read 1
      rather than 11. Only the +/- buttons ever moved the figure. */
+  // "Catch up what was opened" (v2.13.1) — by product name, on the input itself.
+  if (ds.catch != null){
+    catchDraft[txt(ds.catch)] = ev.target.value;
+    renderIbapa();
+    return;
+  }
   if (ds.arr != null){
     const r = asArr(arrival.rows)[num(ds.arr)];
     if (r) r.qty = ev.target.value;

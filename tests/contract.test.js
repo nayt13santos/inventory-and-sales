@@ -202,6 +202,12 @@ let lastErr = {};
 function $(){ return null; }
 function setErr(id, msg){ lastErr[id] = msg; }
 function renderIbapa(){}
+// v2.13.1: catchUpFill moves her to the Sales screen. No DOM here, so the two
+// calls are RECORDED — being taken to the night it filled in is part of what
+// the action promises, not incidental.
+const moved = [];
+function showTab(t){ moved.push(String(t)); }
+function renderPanel(t){ moved.push('render:' + String(t)); }
 function friendlyError(err, nextStep){ return String((err && err.message) || err) + ' ' + nextStep; }
 async function api(){ throw new Error('no wire in this harness'); }
 return {
@@ -227,6 +233,10 @@ return {
   tinCountFor, tinVerdict, applyLocalTinCount, applyLocalCutoffSplit,
   // v2.13.0: the run of nights nobody logged anything as opened.
   openedGap, openedGapText, stockCardHTML, logsNoSupplies,
+  // v2.13.1: what was opened, worked out from what is left on the shelf.
+  catchUpPlan, catchUpNight, catchUpFill,
+  get moved(){ return moved; },
+  get catchDraft(){ return catchDraft; },
   // v2.11.0: how the nights compare.
   trendNights, trendByWeekday, trendBySku, trendCutoffs, trendHTML, weekdayName,
   trendState(v){ if (v && 'open' in v) trendOpen = v.open; },
@@ -4828,6 +4838,218 @@ test('SOURCE PIN: the save asks about supplies, once, and never refuses (v2.13.0
     'both consequences are named');
   assert.match(save, /nights in a row with nothing logged/,
     'and a run is counted, so a habit reads as a habit');
+});
+
+test('CATCH UP: what is missing from the shelf IS what was opened (v2.13.1)', () => {
+  // Owner, 2026-08-28: nobody logged supplies for a fortnight, he counted what
+  // was left, and "with the remaining supplies, we should see the supplies cost
+  // for this cutoff". A stocktake cannot answer that — it re-baselines, so the
+  // consumption never reaches the costing. The usage has to be written, and the
+  // arithmetic for it is not a guess:
+  //     used = what the app believes is there − what is really there
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+
+  // Put the shelf in a known state: 8 packs of flour believed on hand, at 120.
+  const items = app.state.stockItems;
+  const flour = items.find(x => x.product === 'Takoyaki Flour');
+  assert.ok(flour, 'precondition: the seeded flour row exists');
+  flour.unit_cost = 120;
+  // stockStatusOf measures from the SERVER's baseline (baseline_date/qty), not
+  // from opening_qty — that is what bootstrap fills in and what the on-hand
+  // figure on screen is built from.
+  flour.baseline_date = ''; flour.baseline_qty = 8;
+  flour.delivered_before = 0; flour.used_before = 0;
+  for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
+  for (const k in app.state.stockDeliveries) delete app.state.stockDeliveries[k];
+  app.state.stockCounts = app.state.stockCounts || {};
+  for (const k in app.state.stockCounts) delete app.state.stockCounts[k];
+
+  const onHand = app.stockStatusList().find(s => s.product === 'Takoyaki Flour').on_hand;
+  assert.strictEqual(onHand, 8, 'precondition: the app believes 8 packs are there');
+
+  // He counts 2. Six were opened and never written down — 6 x 120 = 720.
+  let plan = app.catchUpPlan({ 'Takoyaki Flour': 2 });
+  const row = plan.rows.find(r => r.product === 'Takoyaki Flour');
+  assert.ok(row, 'it must have something to log');
+  assert.strictEqual(row.used, 6, 'eight believed minus two really there');
+  assert.strictEqual(row.cost, 720, 'and the peso cost he asked to see');
+  assert.strictEqual(plan.cost, 720, 'totalled');
+
+  // A product he did not count is not touched — silence is not a count of zero.
+  assert.ok(!plan.rows.some(r => r.product === 'Bonito'),
+    'an uncounted product is left alone, not assumed empty');
+  plan = app.catchUpPlan({ 'Takoyaki Flour': '' });
+  assert.strictEqual(plan.rows.length, 0, 'a blank field is not a count');
+
+  // COUNTING WHAT IT EXPECTED means nothing was missed.
+  assert.strictEqual(app.catchUpPlan({ 'Takoyaki Flour': 8 }).rows.length, 0,
+    'the shelf agrees, so there is nothing to catch up');
+
+  // MORE than expected is NOT negative usage — it is a delivery nobody logged,
+  // and inventing usage from it would be inventing the opposite of the truth.
+  plan = app.catchUpPlan({ 'Takoyaki Flour': 11 });
+  assert.strictEqual(plan.rows.length, 0, 'nothing is logged as opened');
+  assert.strictEqual(plan.overs.length, 1);
+  assert.strictEqual(plan.overs[0].extra, 3, 'the surplus is named as a surplus');
+  assert.strictEqual(plan.cost, 0, 'and it adds no cost');
+
+  // NO COST ON FILE: the quantity is still caught up, the money is NOT invented.
+  flour.unit_cost = '';
+  plan = app.catchUpPlan({ 'Takoyaki Flour': 2 });
+  assert.strictEqual(plan.rows[0].used, 6, 'the quantity is still right');
+  assert.strictEqual(plan.rows[0].cost, null, 'but it is not costed at nothing');
+  assert.strictEqual(plan.cost, 0);
+  assert.deepStrictEqual(plan.unpriced.map(u => u.product), ['Takoyaki Flour'],
+    'it is listed instead, the way the costing screen lists an unpriced item');
+});
+
+test('CATCH UP: it fills ONE night, adds to what is there, and saves nothing (v2.13.1)', () => {
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const TODAY = app.todayStr();
+  const per = app.currentPeriod(TODAY);
+  // Nights are taken from INSIDE the current cutoff, walking back from today
+  // but never past its start — otherwise this test breaks on the 1st and the
+  // 16th of a month, when yesterday belongs to the cutoff before.
+  const nights = [];
+  for (let d = TODAY; d >= per.start && nights.length < 6; d = app.addDays(d, -1)){
+    if (d !== TODAY) nights.push(d);
+  }
+  assert.ok(nights.length >= 3,
+    'this needs a few nights of room inside the cutoff; today is ' + TODAY);
+  const back = (n) => nights[n - 1];
+  for (const k in app.state.days) delete app.state.days[k];
+  for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
+  for (const d of nights){
+    app.state.days[d] = { date: d, closed: false, total: 1000, cash: 1000, gcash: 0 };
+  }
+
+  // The night chosen is the most recent one that logged NOTHING — the last night
+  // it could have gone unrecorded.
+  assert.strictEqual(app.catchUpNight(), back(1));
+
+  // A night that logged something is skipped, and the search CONTINUES to the
+  // next empty one rather than giving up and defaulting to today.
+  app.state.stockUsage[back(1)] = [{ date: back(1), product: 'Takoyaki Flour', qty: 2 }];
+  assert.strictEqual(app.catchUpNight(), back(2),
+    'the next empty night down, not today');
+
+  // Every night in the cutoff logged: it falls back to tonight rather than
+  // reaching into an earlier cutoff, which may already have been settled.
+  for (const d of nights){
+    app.state.stockUsage[d] = [{ date: d, product: 'Takoyaki Flour', qty: 1 }];
+  }
+  assert.strictEqual(app.catchUpNight(), TODAY,
+    'never an earlier cutoff — that would restate money that has moved');
+
+  // A CLOSED night is skipped: nothing can be opened on a night the stall shut.
+  const shut = nights[0];
+  delete app.state.stockUsage[shut];
+  app.state.days[shut].closed = true;
+  assert.notStrictEqual(app.catchUpNight(), shut, 'a closed night is never the answer');
+  app.state.days[shut].closed = false;
+
+  // AN EMPTY NIGHT IN AN EARLIER CUTOFF IS NEVER REACHED. That fortnight has
+  // very likely been settled, and putting supplies into it would restate money
+  // that has already moved — which this app never does.
+  for (const d of nights){
+    app.state.stockUsage[d] = [{ date: d, product: 'Takoyaki Flour', qty: 1 }];
+  }
+  const older = app.addDays(per.start, -3);
+  app.state.days[older] = { date: older, closed: false, total: 900, cash: 900, gcash: 0 };
+  assert.strictEqual(app.catchUpNight(), TODAY,
+    'it falls back to tonight rather than reaching into a settled cutoff');
+
+  // --- WHAT catchUpFill ACTUALLY DOES ---------------------------------------
+  const app2 = loadClient();
+  app2.applyBootstrap(F.boot);
+  const flour = app2.state.stockItems.find(x => x.product === 'Takoyaki Flour');
+  flour.unit_cost = 120; flour.baseline_date = ''; flour.baseline_qty = 8;
+  flour.delivered_before = 0; flour.used_before = 0;
+  for (const k in app2.state.days) delete app2.state.days[k];
+  for (const k in app2.state.stockUsage) delete app2.state.stockUsage[k];
+  const night = app2.catchUpNight();
+  app2.loadBentaForm(night);
+  // That night ALREADY has a pack logged. It must survive: saving the day
+  // rewrites the whole night's usage, so the catch-up has to ADD to it.
+  const existing = app2.benta.stock.find(r => r.product === 'Takoyaki Flour');
+  assert.ok(existing, 'precondition: the night has a flour row');
+  existing.qty = 1;
+  app2.applyLocalDay(app2.bentaPayload());
+  app2.loadBentaForm(night);
+
+  // Shut the card first, or "it opens the card" cannot be observed: reloading a
+  // night that already holds a figure opens it by itself.
+  app2.benta.stockOpen = false;
+  const before2 = app2.queue.length;
+  app2.catchDraft['Takoyaki Flour'] = 2;      // 8 believed... 1 already logged
+  const plan = app2.catchUpPlan(app2.catchDraft);
+  const want = plan.rows.find(r => r.product === 'Takoyaki Flour').used;
+  app2.catchUpFill();
+
+  const filled = app2.benta.stock.find(r => r.product === 'Takoyaki Flour');
+  assert.strictEqual(Number(filled.qty), 1 + want,
+    'ADDED to the figure already on that night, never replacing it');
+  // IT SAVES NOTHING. The last word belongs on Save day, like every other
+  // figure in this app.
+  assert.strictEqual(app2.queue.length, before2, 'catchUpFill must queue nothing');
+  assert.strictEqual(app2.benta.dirty, true, 'it is unsent work, and says so');
+  // ...and it takes her to the night it filled in, or she would never find it.
+  assert.ok(app2.moved.includes('benta'), 'she is moved to the Sales screen: ' +
+    JSON.stringify(app2.moved));
+  assert.strictEqual(app2.benta.date, night, 'and the form is on that night');
+  assert.strictEqual(app2.benta.stockOpen, true, 'with the stock card open, so it is visible');
+
+  // ...and that is asserted again on a night with NOTHING already logged, where
+  // loading the form does not open the card by itself — otherwise "it opens the
+  // card" is being proved by the loader rather than by the catch-up.
+  const app3 = loadClient();
+  app3.applyBootstrap(F.boot);
+  const f3 = app3.state.stockItems.find(x => x.product === 'Takoyaki Flour');
+  f3.unit_cost = 120; f3.baseline_date = ''; f3.baseline_qty = 8;
+  f3.delivered_before = 0; f3.used_before = 0;
+  for (const k in app3.state.days) delete app3.state.days[k];
+  for (const k in app3.state.stockUsage) delete app3.state.stockUsage[k];
+  // Deliveries too: the fixture carries some, and they raise on-hand — the
+  // expectation below is derived from on-hand rather than assumed, but the
+  // precondition still has to be a shelf nobody has added to.
+  for (const k in app3.state.stockDeliveries) delete app3.state.stockDeliveries[k];
+  const believed = app3.stockStatusList().find(x => x.product === 'Takoyaki Flour').on_hand;
+  assert.strictEqual(believed, 8, 'precondition: eight packs believed on the shelf');
+  app3.loadBentaForm(app3.catchUpNight());
+  assert.strictEqual(app3.benta.stockOpen, false,
+    'precondition: an empty night loads with the card shut');
+  app3.catchDraft['Takoyaki Flour'] = 2;
+  app3.catchUpFill();
+  assert.strictEqual(app3.benta.stockOpen, true, 'the catch-up itself opens it');
+
+  // A CLOSED night cannot take it. Reachable: tonight marked "Closed today"
+  // while every other night in the cutoff has logged something, so the picker
+  // falls back to tonight — and nothing can be opened on a night the stall shut.
+  const app4 = loadClient();
+  app4.applyBootstrap(F.boot);
+  const f4 = app4.state.stockItems.find(x => x.product === 'Takoyaki Flour');
+  f4.unit_cost = 120; f4.baseline_date = ''; f4.baseline_qty = 8;
+  f4.delivered_before = 0; f4.used_before = 0;
+  for (const k in app4.state.days) delete app4.state.days[k];
+  for (const k in app4.state.stockUsage) delete app4.state.stockUsage[k];
+  for (const k in app4.state.stockDeliveries) delete app4.state.stockDeliveries[k];
+  const T4 = app4.todayStr();
+  app4.state.days[T4] = { date: T4, closed: true, total: 0, cash: 0, gcash: 0 };
+  assert.strictEqual(app4.catchUpNight(), T4, 'precondition: it falls back to tonight');
+  app4.loadBentaForm(T4);
+  assert.strictEqual(app4.benta.closed, true, 'precondition: and tonight is closed');
+  app4.catchDraft['Takoyaki Flour'] = 2;
+  app4.catchUpFill();
+  assert.strictEqual(Number(app4.benta.stock.find(r => r.product === 'Takoyaki Flour').qty), 0,
+    'nothing is filled onto a closed night');
+  assert.deepStrictEqual(Object.keys(app4.catchDraft), ['Takoyaki Flour'],
+    'and the typed count is KEPT, so she can pick another night rather than retype it');
+  assert.strictEqual(Number(app3.benta.stock.find(r => r.product === 'Takoyaki Flour').qty),
+    believed - 2, 'and fills in exactly what is missing from the shelf');
+  assert.deepStrictEqual(Object.keys(app2.catchDraft), [],
+    'and the typed counts are cleared, so a second tap cannot double it');
 });
 
 test('NOTHING LOGGED AS OPENED: the run of nights is named (v2.13.0)', () => {

@@ -381,6 +381,29 @@ Two surfaces, from the owner's own design (*"make the nudge every time she saves
 
 **Logging tonight does not erase the nights behind it.** Six nights of flour really were opened and never written down; the shelf is still drifting by that much and the costing still has nothing to price for them. The banner clears the way a real backlog clears — when those nights get their figures.
 
+### v2.13.1 — catch up what was opened, from what is left on the shelf
+
+Owner, 2026-08-28, after a fortnight nobody logged: he counted the tray — batter 2, mayo 1, sauce 1 — and *"with the remaining supplies, we should see the supplies cost for this cutoff."*
+
+He was right to refuse a stocktake for this. A count **re-baselines**: the consumption it absorbs never reaches `StockUsage`, so the costing prices nothing and the supplies cost stays at zero. What the costing prices is what was logged as **opened**, so that is what has to be written.
+
+The arithmetic is not a guess:
+
+```
+used = on_hand (baseline + delivered − logged usage) − what is really there now
+```
+
+**More → Stock on hand → "Catch up what was opened"** takes the count per product and shows, live, the units opened and the peso cost — his figures came to **₱2,600** — before anything is saved.
+
+What it deliberately does **not** do:
+
+- **It does not know which night each unit was opened on, and does not pretend to.** It fills ONE night's stock card, names that night on the button, and says plainly that *the cutoff total is right, the night-by-night is not.*
+- **It saves nothing.** It fills the card, opens it, moves her to that night's Sales screen, and leaves the last word on `Save day` — where every other figure's last word is.
+- **It adds to what that night already holds**, never replacing it: `saveDay` rewrites a night's whole usage block, so an existing figure has to survive.
+- **A count HIGHER than expected is not negative usage** — it is a delivery nobody logged. Said as itself, pointed at "Stock came in", and left out of the total.
+- **A product with no unit cost is counted but not costed**, and listed — the same rule the costing screen follows for an unpriced item.
+- The night is chosen as the most recent open night **in the current cutoff** that logged nothing, falling back to tonight. It never reaches into an earlier cutoff: that fortnight has very likely been settled, and putting supplies into it would restate money that has already moved.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.

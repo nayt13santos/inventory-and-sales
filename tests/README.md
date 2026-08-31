@@ -528,3 +528,19 @@ Three of my own mistakes, each a lesson about the harness rather than the featur
 And one assertion I had simply reasoned wrongly: I expected logging tonight to clear the run. It does not, and should not — those nights are still empty and the drift is still real. The test now pins that, and pins that filling the nights in *is* what clears it.
 
 Suites: **208** (`run-tests.js`) + **236** (`contract.test.js`).
+
+### v2.13.1 — catch up what was opened
+
+Two tests, **13 mutants, all red.** Six survived the first pass, and every one was a fixture that never reached the guard — this release is a good record of how many ways that happens:
+
+- **`night_leaves_the_cutoff`** — my nights were all inside the current cutoff, so the period filter was unobservable. Needed an empty night in an *earlier* cutoff with the current one full.
+- **`night_ignores_closed`** — no closed night in the fixture at all.
+- **`closed_night_filled`** — `catchUpNight` skips closed nights, so the guard inside `catchUpFill` looked unreachable. It is reachable: tonight marked "Closed today" with every other night logged, so the picker falls back to tonight.
+- **`fill_leaves_card_shut`** — asserted twice and still masked, because `loadBentaForm` *inside* `catchUpFill` opens the card by itself on a night that already holds a figure. Proved on a night with nothing logged, where only the catch-up can open it.
+- **`fill_replaces_existing` / `fill_saves_it`** — `catchUpFill` was not tested at all. It needed `showTab`/`renderPanel` recorders in the harness, and the function moved into a lifted slab (it was defined outside every one).
+
+Two fixture bugs of my own, both the same shape: **preconditions asserted rather than assumed.** `stockStatusOf` measures from the server's `baseline_date`/`baseline_qty`, not from `opening_qty`, so setting the latter left on-hand at 0; and the fixture's own stock **deliveries** raised on-hand to 12 when I expected 8, which made a hard-coded "6 packs" wrong. Both now assert the believed figure first and derive the expectation from it.
+
+And one clock-dependency caught before it could bite: a fixture built from `today − n` would have failed on the 1st and the 16th of a month, when yesterday belongs to the previous cutoff. The nights are now taken from inside the current period.
+
+Suites: **208** (`run-tests.js`) + **238** (`contract.test.js`).
