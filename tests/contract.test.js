@@ -4840,6 +4840,37 @@ test('SOURCE PIN: the save asks about supplies, once, and never refuses (v2.13.0
     'and a run is counted, so a habit reads as a habit');
 });
 
+test('TYPING NEVER REBUILDS THE SCREEN UNDER HER (v2.13.2)', () => {
+  // Owner, 2026-08-28: "whenever I type the page goes up." A field whose input
+  // handler re-renders its whole panel replaces the very input being typed into
+  // — the caret is lost, the keyboard may close, and the page jumps back to
+  // wherever the rebuilt panel puts it. v2.13.1's catch-up field did exactly
+  // that, on every keystroke.
+  //
+  // Pinned across the WHOLE input listener rather than for that one field,
+  // because this is a shape of mistake and not a single bug: every typed field
+  // must patch what it derives, the way updateSplitLive and updateStockCard do.
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+  const start = src.indexOf("document.addEventListener('input'");
+  const end = src.indexOf("document.addEventListener('change'");
+  assert.ok(start > 0 && end > start, 'the input listener must still be findable');
+  const body = src.slice(start, end);
+
+  for (const rebuild of ['renderIbapa(', 'renderGastos(', 'renderCutoff(', 'renderBenta(', 'renderPanel(']) {
+    assert.ok(body.indexOf(rebuild) < 0,
+      'no typed field may call ' + rebuild + ' — it replaces the input being typed into. ' +
+      'Patch the derived text instead (see updateCatchUp / updateSplitLive).');
+  }
+
+  // And the catch-up specifically patches, with the inputs left alone.
+  assert.match(body, /updateCatchUp\(\);/, 'the catch-up field patches its derived text');
+  const upd = src.slice(src.indexOf('function updateCatchUp()'), src.indexOf('function updateCatchUp()') + 900);
+  assert.ok(!/innerHTML/.test(upd),
+    'and it does it with textContent — innerHTML on a container holding the inputs is the same bug again');
+  assert.match(upd, /el\.textContent = catchNoteText/, 'the per-product line is patched');
+  assert.match(upd, /set\('catch-total'/, 'and the total');
+});
+
 test('CATCH UP: what is missing from the shelf IS what was opened (v2.13.1)', () => {
   // Owner, 2026-08-28: nobody logged supplies for a fortnight, he counted what
   // was left, and "with the remaining supplies, we should see the supplies cost

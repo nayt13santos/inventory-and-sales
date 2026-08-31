@@ -544,3 +544,13 @@ Two fixture bugs of my own, both the same shape: **preconditions asserted rather
 And one clock-dependency caught before it could bite: a fixture built from `today − n` would have failed on the 1st and the 16th of a month, when yesterday belongs to the previous cutoff. The nights are now taken from inside the current period.
 
 Suites: **208** (`run-tests.js`) + **238** (`contract.test.js`).
+
+### v2.13.2 — typing never rebuilds the screen under her
+
+A bug I shipped hours earlier and he found in minutes: the catch-up field re-rendered its whole panel per keystroke, replacing the input being typed into.
+
+Verified in the browser rather than by reasoning: same element after the keystroke, focus kept, `window.scrollY` unchanged (1527 → 1527), the field itself moved 0px, and the derived line still updated to "6 packs opened · ₱720".
+
+The test is deliberately **general**: it extracts the whole `input` listener and asserts that *no* branch calls any panel render. The specific fix is pinned too — `textContent`, not `innerHTML`, since `innerHTML` on the container holding the inputs is the identical bug. 4 mutants, all red.
+
+Suites: **208** (`run-tests.js`) + **239** (`contract.test.js`).

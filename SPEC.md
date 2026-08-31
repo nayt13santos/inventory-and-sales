@@ -404,6 +404,14 @@ What it deliberately does **not** do:
 - **A product with no unit cost is counted but not costed**, and listed — the same rule the costing screen follows for an unpriced item.
 - The night is chosen as the most recent open night **in the current cutoff** that logged nothing, falling back to tonight. It never reaches into an earlier cutoff: that fortnight has very likely been settled, and putting supplies into it would restate money that has already moved.
 
+### v2.13.2 — typing never rebuilds the screen under her
+
+Owner, 2026-08-28: *"whenever I type the page goes up."* My own bug, shipped hours earlier: v2.13.1's catch-up field called `renderIbapa()` on every keystroke, which replaced the whole More panel — **including the input being typed into**. The caret went, the keyboard could close, and the page jumped to wherever the rebuilt panel put it.
+
+Fixed the way every other typed field in this app already works: the derived text is **patched in place** (`updateCatchUp`, alongside `updateSplitLive` and `updateStockCard`), with stable ids on the per-product line, the total, the hint and the button, and `textContent` rather than `innerHTML` — `innerHTML` on a container holding the inputs is the same bug wearing a different hat. The summary block is now rendered **unconditionally** and its button disabled when there is nothing to catch up, because a block that appears and disappears can only be rebuilt, not patched.
+
+Pinned across the **whole input listener**, not just this field: no typed field may call `renderIbapa` / `renderGastos` / `renderCutoff` / `renderBenta` / `renderPanel`. This is a shape of mistake, not a single bug.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.
