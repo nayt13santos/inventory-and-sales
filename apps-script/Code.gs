@@ -279,7 +279,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.14.2';
+var VERSION = '2.15.0';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -2079,6 +2079,37 @@ function apiCutoff(ss, settings, payload, dryRun) {
   var excluded = excludedBlock.total;
 
   // RESPONSE: snake_case (per_partner mirrors the Cutoffs column header).
+  /* SUPPLIES USED, IN MONEY (v2.15.0). Owner, 2026-09-01: "theres a breakdown in
+     the cutoff, but its still not shown in note."
+
+     It is NOT an allocation and must never become one: the seven lines above sum
+     with `remaining` to `total`, and that identity is what his partner checks.
+     This is the value of stock OPENED, which answers a different question from
+     the "Supplies" line (money PAID). So it is computed here, printed BELOW the
+     residual, and left out of every sum.
+
+     A product with no unit_cost on file is not costed at nothing — it is left
+     out and the line says how many products it could not price, exactly as the
+     costing screen does. */
+  var usedByProduct = Object.create(null);
+  readStockUsage(ss).forEach(function (u) {
+    if (!inPeriod(u)) return;
+    var name = asStr(u.product);
+    var q = asNum(u.qty);
+    if (!name || !(q > 0)) return;
+    usedByProduct[name] = (usedByProduct[name] || 0) + q;
+  });
+  var stockList = readStockItems(ss).list;
+  var costOf = Object.create(null);
+  stockList.forEach(function (it) { costOf[asStr(it.product).toLowerCase()] = it.unit_cost; });
+  var suppliesUsed = 0, suppliesUsedUnpriced = 0;
+  for (var pname in usedByProduct) {
+    var uc = costOf[pname.toLowerCase()];
+    if (usableCost(uc)) suppliesUsed += usedByProduct[pname] * asNum(uc);
+    else suppliesUsedUnpriced++;
+  }
+  suppliesUsed = round2(suppliesUsed);
+
   var figures = {
     start: start, end: end,
     total: total, cash: cash, gcash: gcash,
@@ -2088,7 +2119,9 @@ function apiCutoff(ss, settings, payload, dryRun) {
     // Display only. See above; and see the identity asserted in the tests:
     // total = mama + split + supplies + octopus + salary + other + electric
     //       + remaining, with `excluded` nowhere in it.
-    excluded: excluded, excluded_lines: excludedLines
+    excluded: excluded, excluded_lines: excludedLines,
+    // Display only, like `excluded`, and outside the identity above.
+    supplies_used: suppliesUsed, supplies_used_unpriced: suppliesUsedUnpriced
   };
 
   // Branch is read CLEANED (CR/LF -> space, v2.5.0): a line break pasted into
@@ -2770,7 +2803,22 @@ function buildNoteText(branch, start, end, f) {
     'Electric bill - ' + orBlank(f.electric),
     '',
     residual
-  ].join('\n');
+  ].concat(usedTail(f)).join('\n');
+}
+
+/** The supplies-used footer, or nothing at all (v2.15.0).
+ *
+ *  BELOW the residual and separated from it, because the seven lines above sum
+ *  with the residual to Total and this figure is not part of that — it is what
+ *  was OPENED, priced at cost, where "Supplies" is what was PAID. Printed only
+ *  when there is something to print, so a period with no usage logged (or no
+ *  costs on file) produces exactly the note it always did. */
+function usedTail(f) {
+  var used = asNum(f.supplies_used);
+  if (!(used > 0)) return [];
+  var unpriced = asNum(f.supplies_used_unpriced);
+  return ['', 'Supplies used (opened) - ' + fmtAmt(used) +
+    (unpriced > 0 ? ' + ' + unpriced + ' with no cost set' : '')];
 }
 
 /** "July 1 - 15" (same month) or "July 30 - August 2" (spanning months). */

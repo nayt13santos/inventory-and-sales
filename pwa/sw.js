@@ -9,7 +9,7 @@
    ============================================================ */
 'use strict';
 
-const VERSION = 'v2.14.2';
+const VERSION = 'v2.15.0';
 const SHELL_CACHE = 'octogo-shell-' + VERSION;
 const FONT_CACHE = 'octogo-fonts-v1';
 const SHELL = [

@@ -590,7 +590,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.14.2';
+const APP_VERSION = '2.15.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -2046,7 +2046,20 @@ function buildNote(f, per){
     'Electric bill - ' + noteVal(f.electric),
     '',
     residual
-  ].join('\n');
+  ].concat(noteUsedTail(f)).join('\n');
+}
+
+/** The supplies-used footer, matching Code.gs's usedTail byte for byte
+ *  (v2.15.0). BELOW the residual and outside every sum: the seven lines above
+ *  add with the residual to Total, and that identity is what his partner
+ *  checks. Printed only when there is something to print, so a period with no
+ *  usage — or no costs on file — writes exactly the note it always did. */
+function noteUsedTail(f){
+  const used = num(asObj(f).suppliesUsed);
+  if (!(used > 0)) return [];
+  const unpriced = asArr(asObj(f).suppliesUsedUnpriced).length;
+  return ['', 'Supplies used (opened) - ' + fmt(used) +
+    (unpriced > 0 ? ' + ' + unpriced + ' with no cost set' : '')];
 }
 
 /**

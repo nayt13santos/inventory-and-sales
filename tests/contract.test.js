@@ -1140,6 +1140,13 @@ const SHARED_FIGURES = ['total', 'cash', 'gcash', 'mama', 'supplies', 'octopus',
  *     notes must match BYTE FOR BYTE again. That last branch arms itself when
  *     the PWA ships its half of this release — it is not a permanent exemption.
  */
+/** A note down to and including the residual — everything his partner does
+ *  arithmetic on. The v2.15.0 supplies-used footer sits below it and is compared
+ *  separately, so "the sums cannot move" stays checkable in one place. */
+function noteSums(text) {
+  return String(text).split('\n\nSupplies used (opened)')[0];
+}
+
 function assertCutoffSeam(app, per, served) {
   const local = app.computeCutoff(per);
   const f = served.figures;
@@ -1631,6 +1638,14 @@ const SPEC_NOTE = [
   'Short - 2,000'
 ].join('\n');
 
+/* The same note when the period's stock usage CAN be priced (v2.15.0,
+   owner-directed: "theres a breakdown in the cutoff, but its still not shown in
+   note"). The value of what was OPENED prints BELOW the residual and outside
+   every sum — the seven lines above still add with the residual to Total, which
+   is the identity his partner checks and which is asserted separately. Derived
+   from SPEC_NOTE rather than retyped, so the two can never drift. */
+const SPEC_NOTE_USED = SPEC_NOTE + '\n\nSupplies used (opened) - 2,940';
+
 const SPEC_PERIOD = { start: '2025-07-01', end: '2025-07-15' };
 const SPEC_EXPENSE_SUPPLIES = 5440;   // Supplies is Expenses(Supplies) ALONE now
 const SPEC_MONEY = {
@@ -1740,16 +1755,22 @@ test('the Supplies figure is Expenses(Supplies) ALONE, exactly', () => {
 });
 
 test('the SERVER note is character-identical to the SPEC sample', () => {
-  assert.strictEqual(SP.cutoff.note_text, SPEC_NOTE);
+  // The spec sample is still the note's opening, byte for byte; the fixture's
+  // usage is priceable, so the v2.15.0 footer follows it.
+  assert.strictEqual(SP.cutoff.note_text, SPEC_NOTE_USED);
+  assert.ok(SP.cutoff.note_text.indexOf(SPEC_NOTE) === 0,
+    'the spec sample is unchanged as the note it always was');
   // Spelled out, so a future edit cannot "tidy" one of these away unnoticed.
   const lines = SP.cutoff.note_text.split('\n');
-  assert.strictEqual(lines.length, 16);
-  assert.deepStrictEqual([lines[1], lines[3], lines[6], lines[14]], ['', '', '', ''],
-    'blank-line placement, including the one before the residual');
+  assert.strictEqual(lines.length, 18, '16 lines of note, plus a blank and the v2.15.0 footer');
+  assert.deepStrictEqual([lines[1], lines[3], lines[6], lines[14], lines[16]], ['', '', '', '', ''],
+    'blank-line placement, including the one before the residual and before the footer');
   assert.strictEqual(lines[8], 'Split - 3,000(1,500 each)', 'no space before the bracket');
   assert.strictEqual(lines[10], 'Octopus - ', 'a zero category keeps the trailing space');
   assert.strictEqual(lines[11], 'Salary - 3,000');
   assert.strictEqual(lines[15], 'Short - 2,000', 'the label carries the sign, never "- -2,000"');
+  // The footer is LAST, after the residual — never inside the block that sums.
+  assert.strictEqual(lines[17], 'Supplies used (opened) - 2,940');
   assert.ok(!/₱|PHP/.test(SP.cutoff.note_text), 'the note never carries a peso sign');
   assert.ok(!/\.00/.test(SP.cutoff.note_text), 'whole pesos print without decimals');
   assert.ok(!/- -/.test(SP.cutoff.note_text));
@@ -1761,8 +1782,8 @@ test('the CLIENT reads that note and agrees on every figure it computes itself',
   const local = app.computeCutoff(SPEC_PERIOD);
   assert.strictEqual(local.supplies, 5440,
     'the phone and the note must not disagree about Supplies after the retirement');
-  assert.strictEqual(app.pick(SP.cutoff, 'note_text', 'noteText'), SPEC_NOTE,
-    'the phone shows the SERVER note verbatim');
+  assert.strictEqual(app.pick(SP.cutoff, 'note_text', 'noteText'), SPEC_NOTE_USED,
+    'the phone shows the SERVER note verbatim, footer and all');
 });
 
 test('stock rows round-trip: sheet -> bootstrap -> form -> request -> sheet', () => {
@@ -1792,7 +1813,11 @@ test('stock rows round-trip: sheet -> bootstrap -> form -> request -> sheet', ()
   const old = post(SP.ctx, { token: SP.token, action: 'saveDay', payload: SPEC_DAYS[2] });
   assert.strictEqual(old.ok, true, old.error);
   const cut = post(SP.ctx, { token: SP.token, action: 'cutoff', payload: { start: SPEC_PERIOD.start, end: SPEC_PERIOD.end, dryRun: true } });
-  assert.strictEqual(cut.data.note_text, SPEC_NOTE, 'a replay must not move the note');
+  // The footer rides along now (the period's usage is priceable), and the point
+  // of this assertion is unchanged: REPLAYING a day must not move the note. It
+  // is compared whole, footer included, because a replay must not move that
+  // either — the same usage rewritten is the same value.
+  assert.strictEqual(cut.data.note_text, SPEC_NOTE_USED, 'a replay must not move the note');
 });
 
 // ===========================================================================
@@ -1872,12 +1897,19 @@ test('stock never reaches the cutoff figures or the note, on either side', () =>
   // The display keys DO move, which is the point of them.
   assert.ok(after.suppliesUsed > before.suppliesUsed,
     'the supplies-used figure is exactly what should follow the usage');
-  assert.strictEqual(app.buildNote(after, SPEC_PERIOD), note,
-    'and the NOTE is byte-identical — what his partner receives cannot move');
+  /* v2.15.0, owner-directed: the note now carries that figure as a FOOTER, so
+     it is no longer byte-identical — and it should not be. What still cannot
+     move is the part his partner does arithmetic on: every allocation above,
+     and the note down to and including the residual. */
+  const upTo = (t) => t.split('\n\nSupplies used (opened)')[0];
+  assert.strictEqual(upTo(app.buildNote(after, SPEC_PERIOD)), upTo(note),
+    'everything down to the residual is byte-identical — the sums cannot move');
+  assert.ok(app.buildNote(after, SPEC_PERIOD).indexOf('Supplies used (opened) - ') > 0,
+    'and the footer is the only thing usage may add');
   // ...and the SERVER note the phone actually shows is unchanged too.
   const again = post(SP.ctx, { token: SP.token, action: 'cutoff',
     payload: { start: SPEC_PERIOD.start, end: SPEC_PERIOD.end, dryRun: true } });
-  assert.strictEqual(again.data.note_text, SPEC_NOTE);
+  assert.strictEqual(again.data.note_text, SPEC_NOTE_USED);
 });
 
 // ===========================================================================
@@ -5104,8 +5136,15 @@ test('SUPPLIES USED shows on the Cutoff tab, and moves nothing (v2.14.0)', () =>
   for (const k of ['total', 'cash', 'gcash', 'supplies', 'octopus', 'remaining', 'split']){
     assert.deepStrictEqual(withUsage[k], without[k], 'usage moved ' + k);
   }
-  assert.strictEqual(app.buildNote(withUsage, per), app.buildNote(without, per),
-    'and the note his partner receives is byte-identical either way');
+  // v2.15.0: usage now adds a FOOTER to the note, at his request. What still
+  // cannot move is the part that sums — pinned here, and the footer's presence
+  // pinned beside it.
+  assert.strictEqual(noteSums(app.buildNote(withUsage, per)), noteSums(app.buildNote(without, per)),
+    'the sums his partner checks are byte-identical either way');
+  assert.ok(app.buildNote(withUsage, per).indexOf('Supplies used (opened) - ') > 0,
+    'and the value of what was opened is now IN the note');
+  assert.ok(app.buildNote(without, per).indexOf('Supplies used (opened)') < 0,
+    'while a period with no usage prints no footer at all');
 });
 
 test('SOURCE PIN: the Cutoff card separates opened from paid, and a negative explains itself (v2.14.0)', () => {
@@ -5200,8 +5239,80 @@ test('CATCH UP can target a cutoff that has ENDED (v2.14.1)', () => {
   const f = app.computeCutoff(lastPer);
   const noteWith = app.buildNote(f, lastPer);
   for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
-  assert.strictEqual(noteWith, app.buildNote(app.computeCutoff(lastPer), lastPer),
-    'logging usage into a finished cutoff cannot change what his partner received');
+  // v2.15.0: the footer DOES change — that is what he asked for. The sums do not.
+  assert.strictEqual(noteSums(noteWith), noteSums(app.buildNote(app.computeCutoff(lastPer), lastPer)),
+    'logging usage into a finished cutoff cannot change the sums his partner checked');
+});
+
+test('THE NOTE CARRIES THE SUPPLIES USED, and the two builders agree (v2.15.0)', () => {
+  // Owner, 2026-09-01: "theres a breakdown in the cutoff, but its still not
+  // shown in note." It is now — BELOW the residual, outside every sum, because
+  // the seven allocation lines add with the residual to Total and that identity
+  // is what his partner checks.
+  const srv = loadServer();
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data;
+  const app = syncedClient(boot);
+  const D = ymdDaysAgo(2);
+  const per = app.currentPeriod(D);
+
+  // Give one product a cost and open some of it on a night in the period.
+  const items = boot.stockItems.map(x => ({ product: x.product, unit: x.unit, active: x.active,
+    reorderAt: x.reorder_at, unitCost: x.product === 'Takoyaki Flour' ? 120 : '' }));
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveStockItems',
+    payload: { rows: items } }).ok, true);
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
+    date: D, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box4', sod: 20, eod: 0, entryId: 'n1' }],
+    stock: [{ product: 'Takoyaki Flour', qty: 6 }], entryId: 'note-used-1' } }).ok, true);
+
+  const cut = post(srv.ctx, { token: srv.token, action: 'cutoff',
+    payload: { start: per.start, end: per.end, dryRun: true } });
+  assert.strictEqual(cut.ok, true, cut.error);
+
+  // THE SERVER writes it, at cost, below the residual.
+  assert.strictEqual(cut.data.figures.supplies_used, 720, '6 x 120');
+  const lines = cut.data.note_text.split('\n');
+  assert.strictEqual(lines[lines.length - 1], 'Supplies used (opened) - 720',
+    'the LAST line, after the residual');
+  assert.strictEqual(lines[lines.length - 2], '', 'separated by a blank line');
+  assert.ok(/^(Remaining|Short) - /.test(lines[lines.length - 3]),
+    'and the residual is still the line before it');
+
+  // THE ALLOCATIONS ARE UNTOUCHED — nothing was added to any sum.
+  const f = cut.data.figures;
+  assert.strictEqual(f.total, f.mama + f.split + f.supplies + f.octopus + f.salary +
+    f.other + f.electric + f.remaining,
+    'the identity his partner checks still holds with the footer present');
+
+  // THE PHONE BUILDS THE SAME NOTE, byte for byte — the two builders must never
+  // drift, and this figure is computed independently on each side.
+  const app2 = syncedClient(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+  const local = app2.computeCutoff(per);
+  assert.strictEqual(local.suppliesUsed, 720, 'the phone prices it identically');
+  assert.strictEqual(app2.buildNote(local, per), cut.data.note_text,
+    'and writes the same note the sheet does, footer included');
+
+  // A PRODUCT WITH NO COST is counted apart and SAID, never priced at nothing.
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
+    date: D, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box4', sod: 20, eod: 0, entryId: 'n1' }],
+    stock: [{ product: 'Takoyaki Flour', qty: 6 }, { product: 'Japanese Mayo', qty: 3 }],
+    entryId: 'note-used-1' } }).ok, true);
+  const cut2 = post(srv.ctx, { token: srv.token, action: 'cutoff',
+    payload: { start: per.start, end: per.end, dryRun: true } });
+  assert.strictEqual(cut2.data.figures.supplies_used, 720, 'the uncosted mayo adds no money');
+  assert.strictEqual(cut2.data.figures.supplies_used_unpriced, 1);
+  assert.match(cut2.data.note_text, /Supplies used \(opened\) - 720 \+ 1 with no cost set/,
+    'and the note says how many it could not price, rather than quietly understating');
+  const app3 = syncedClient(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+  assert.strictEqual(app3.buildNote(app3.computeCutoff(per), per), cut2.data.note_text,
+    'the phone matches that too');
+
+  // NO USAGE AT ALL: no footer, so a fortnight nobody logged writes the note it
+  // always did.
+  const empty = app3.currentPeriod(app3.addDays(per.start, -20));
+  assert.ok(app3.buildNote(app3.computeCutoff(empty), empty).indexOf('Supplies used') < 0,
+    'nothing opened means no footer');
 });
 
 test("HIS SHEET, 2026-09-01: the catch-up must not double what it filled (v2.14.2)", () => {

@@ -482,6 +482,26 @@ The mechanism was not the obvious one. `catchUpFill` ADDED to whatever the row h
 
 **3. "No cost on file" no longer reads as "nothing was used".** Every product in his `StockItems` has a blank `unit_cost`, so the Cutoff card headlined **Value opened ₱0** — which reads as a fortnight that consumed nothing of value. When *nothing* can be priced it now says so instead: the quantities are real, the money is not worked out at all, and here is where to set it.
 
+### v2.15.0 — the supplies used, in the note
+
+Owner, 2026-09-01: *"theres a breakdown in the cutoff, but its still not shown in note."*
+
+The note now ends with the value of what was **opened**:
+
+```
+Remaining - 1,000
+
+Supplies used (opened) - 7,690
+```
+
+**Below the residual, and outside every sum — deliberately.** The seven allocation lines add with the residual to `Total`, and that identity is what his partner checks; a non-allocation line inside that block would make the arithmetic look wrong. So the footer sits after it, separated by a blank line, and enters no total. `apiCutoff` returns `supplies_used` and `supplies_used_unpriced` beside `excluded`, on the same display-only footing.
+
+Written by **both** note builders — `buildNoteText` in Code.gs and `buildNote` on the phone — byte for byte, from a figure each computes independently from its own copy of the data. The contract suite pins that they agree.
+
+A product with **no cost on file** is not priced at nothing: it is left out of the money and the line says how many it could not price (`- 720 + 1 with no cost set`), so the figure is never quietly understated. A period with **no usage** — or no costs at all — prints **no footer**, so a fortnight nobody logged writes exactly the note it always did.
+
+**Two named fences were moved, deliberately and with their reasons recorded.** *"THE FENCE: the cutoff note and its figures are byte-identical with and without costs"* (v2.8.0) and *"stock never reaches the cutoff figures or the note"* both asserted the opposite of what he has now asked for twice. Neither was deleted: each now pins the narrower thing that still matters — every allocation, the total, the residual, and the note **down to and including the residual** are untouched by costs or usage. The footer is the only thing either may add.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.

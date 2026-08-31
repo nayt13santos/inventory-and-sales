@@ -610,3 +610,15 @@ Chasing the doubling took two wrong theories before the right one. First I assum
 Two mutants also pointed at things worth changing rather than testing around: a `q +=` that no test could distinguish from `q =` (now covered by two usage rows for one product on one night, which a rewritten block really can produce), and a length guard in the clash check that was **genuinely redundant** — the distinct-values test already answered it, so it was deleted rather than given a fictional test.
 
 Suites: **208** (`run-tests.js`) + **250** (`contract.test.js`).
+
+### v2.15.0 — the supplies used, in the note
+
+One test, **9 mutants, all red** — but the work was mostly in *relaxing four existing pins without gutting them*, which is the harder half.
+
+Two were named invariants that asserted the exact opposite of the request: `THE FENCE: the cutoff note and its figures are byte-identical with and without costs`, and `stock never reaches the cutoff figures or the note`. Deleting either would have thrown away real protection; leaving them would have meant refusing him a figure he asked for twice. Both now pin the narrower truth — every allocation, the total, the residual, and **the note down to and including the residual** are untouched; the footer is the only thing that may move. A shared `noteSums()` helper makes that one idea rather than four copies of it.
+
+`SPEC_NOTE` was **not** edited: it is the spec sample and still is. A derived `SPEC_NOTE_USED = SPEC_NOTE + footer` covers the fixtures whose usage is priceable, so the two can never drift and the spec keeps meaning what it says. Its figure differs per suite (240 in `run-tests`, 2,940 in `contract`) because the fixtures differ — taken from the actual output rather than hand-computed.
+
+One assertion I kept whole on purpose: *"a replay must not move the note"* is compared **footer included**, because a replay rewriting the same usage must produce the same value, and that is exactly what makes it a replay.
+
+Suites: **208** (`run-tests.js`) + **251** (`contract.test.js`).
