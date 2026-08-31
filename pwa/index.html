@@ -590,7 +590,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.14.0';
+const APP_VERSION = '2.14.1';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -2398,6 +2398,18 @@ function usedBetweenText(product){
 
 let catchOpen = false;                    // whether the catch-up form is open
 const catchDraft = Object.create(null);   // product -> what is really there, as typed
+/* WHICH NIGHT THE CATCH-UP GOES ON (v2.14.1). '' = let catchUpNight() choose.
+   Owner, 2026-09-01: "wheres the value of the used supplies last cutoff" — the
+   fortnight nobody logged had ENDED, and the auto-pick deliberately stays inside
+   the current cutoff, so the value could never land where he needed it.
+   That guard was over-cautious. It was justified as "putting supplies into a
+   settled cutoff restates money that has moved", and that is simply not true
+   here: the value of stock opened is DISPLAY ONLY — it is in no total and no
+   allocation, and buildNote ignores it entirely (pinned byte-for-byte in the
+   contract suite). Re-saving a past night re-prices nothing either, because
+   apiSaveDay reuses that date's own stored price snapshots. So the auto-pick
+   stays the DEFAULT and stops being a prohibition. */
+let catchNightPick = '';
 
 /** What to log, per product, given a map of product -> counted-now. Returns the
  *  rows to fill in, the peso cost they come to, and anything it refuses to
@@ -2428,6 +2440,27 @@ function catchUpPlan(counted){
                 cost: priced ? r2(used * num(uc)) : null });
   }
   return { rows: rows, cost: r2(cost), overs: overs, unpriced: unpriced };
+}
+
+/** The night the catch-up will actually use: his own choice when he has made
+ *  one and it is a real date that has happened, otherwise the automatic pick. */
+function catchUpTarget(){
+  const picked = txt(catchNightPick);
+  if (isDateStr(picked) && picked <= todayStr()) return picked;
+  return catchUpNight();
+}
+
+/** Which cutoff the chosen night falls in, and — plainly — what that changes
+ *  and what it cannot. A past fortnight is allowed BECAUSE this figure is not
+ *  in the note; saying so is what makes choosing it safe rather than daring. */
+function catchLandsText(night){
+  if (!isDateStr(night)) return 'Pick a night that has already happened.';
+  const per = currentPeriod(night);
+  const here = periodKey(per) === periodKey(currentPeriod(todayStr()));
+  return 'The value lands in the ' + monthName(per.start) + ' ' + d2parts(per.start).d + '–' +
+    d2parts(per.end).d + ' cutoff' + (here ? ' — the one running now.' : ', which has already ended.') +
+    ' It changes what that cutoff says under “Supplies used” and what the costing prices. ' +
+    'It changes no total, no share, and nothing in the note — the note is built from money PAID, not from stock opened.';
 }
 
 /** The night to file it under: the most recent OPEN night IN THIS CUTOFF that
@@ -2465,7 +2498,7 @@ function catchUpNight(todayArg){
 function catchUpFill(){
   const plan = catchUpPlan(catchDraft);
   if (!plan.rows.length){ toast('Type what is on the shelf first.'); return; }
-  const night = catchUpNight();
+  const night = catchUpTarget();
   // The night is loaded the ordinary way, so its counts, prices and snapshots
   // are exactly what any other edit of that night would carry.
   loadBentaForm(night);
@@ -2486,6 +2519,7 @@ function catchUpFill(){
   benta.stockOpen = true;
   benta.dirty = true;
   for (const k in catchDraft) delete catchDraft[k];
+  catchNightPick = '';
   catchOpen = false;
   showTab('benta');
   renderPanel('benta');
@@ -6829,7 +6863,7 @@ function catchUpHTML(list){
     '</div>';
   }
   const plan = catchUpPlan(catchDraft);
-  const night = catchUpNight();
+  const night = catchUpTarget();
   h += '<div style="margin:6px 0 14px;">' +
     '<div class="pay-intro">Catch up what was opened</div>' +
     '<p class="hint" style="margin:-4px 0 10px;">Type what is REALLY on the shelf now. What is missing is what was opened and never written down. Nothing is saved here — it fills in one night for you to check.</p>';
@@ -6853,6 +6887,9 @@ function catchUpHTML(list){
     '<div class="co-row big"><span>Supplies used</span>' +
       '<span class="v" id="catch-total">' + peso(plan.cost) + '</span></div>' +
     '<p class="hint" id="catch-unpriced">' + esc(catchUnpricedText(plan)) + '</p>' +
+    '<div class="field" style="margin-top:10px;"><label for="catchNight">Which night should these go on?</label>' +
+      '<input class="input" type="date" id="catchNight" value="' + esc(night) + '" max="' + todayStr() + '">' +
+      '<p class="hint" id="catch-lands" style="margin-top:6px;">' + esc(catchLandsText(night)) + '</p></div>' +
     '<p class="hint" id="catch-where" style="margin-top:8px;">' + esc(catchWhereText(plan, night)) + '</p>' +
     '<div class="btn-row"><button type="button" class="btn" data-act="catch-close">Close</button>' +
       '<button type="button" class="btn primary" id="catch-fill" data-act="catch-fill"' +
@@ -6896,13 +6933,14 @@ function catchWhereText(plan, night){
 function updateCatchUp(){
   const list = stockStatusList();
   const plan = catchUpPlan(catchDraft);
-  const night = catchUpNight();
+  const night = catchUpTarget();
   list.forEach((s, i) => {
     const el = $('catch-note-' + i);
     if (el) el.textContent = catchNoteText(s, plan);
   });
   const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
   set('catch-total', peso(plan.cost));
+  set('catch-lands', catchLandsText(night));
   set('catch-unpriced', catchUnpricedText(plan));
   set('catch-where', catchWhereText(plan, night));
   const btn = $('catch-fill');
@@ -8930,6 +8968,7 @@ document.addEventListener('click', (ev) => {
   else if (act === 'catch-open'){ catchOpen = true; renderIbapa(); }
   else if (act === 'catch-close'){
     catchOpen = false;
+    catchNightPick = '';
     for (const k in catchDraft) delete catchDraft[k];
     renderIbapa();
   }
@@ -8995,6 +9034,11 @@ document.addEventListener('input', (ev) => {
   if (ds.catch != null){
     catchDraft[txt(ds.catch)] = ev.target.value;
     updateCatchUp();     // patches the derived text; never rebuilds the inputs
+    return;
+  }
+  if (ev.target.id === 'catchNight'){
+    catchNightPick = ev.target.value;
+    updateCatchUp();     // same rule: patch, never rebuild the field being typed in
     return;
   }
   if (ds.arr != null){

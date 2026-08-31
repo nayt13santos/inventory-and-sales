@@ -590,3 +590,13 @@ The one worth reading is the change to an OLD guardrail: *"stock never reaches t
 A clock dependency also fired for real, on the day the date rolled to **2026-09-01**: the catch-up night test built its fixture from `today − n` and needed room inside the current cutoff, and on the 1st there is none. The guard I had added caught it loudly instead of silently testing nothing. Fixed properly by making `catchUpNight` take an optional date — dependency injection for the clock, exactly as the server's `makeContext(ss, now)` already does — and pinning the test to a fixed day. Working around a clock is how a test becomes a liability; injecting it is how it stops being one.
 
 Suites: **208** (`run-tests.js`) + **246** (`contract.test.js`).
+
+### v2.14.1 — targeting an ended cutoff
+
+One test, **6 mutants, all red**, and it ends by asserting the thing that makes the whole change safe: logging usage into a **finished** fortnight leaves `buildNote` byte-identical. That is the difference between relaxing a guard and removing one.
+
+Worth recording that the guard being relaxed was mine, added a few hours earlier with a justification I had not checked against the code: *"restating money that has moved."* The note never contained this figure, so nothing could be restated — the test now proves that rather than the comment asserting it.
+
+`catchLandsText` also landed outside every lifted slab on the first attempt, which broke 128 tests at once. That is the third time this session; the rule is simply that a new client function belongs beside the ones it works with, not beside the markup that calls it.
+
+Suites: **208** (`run-tests.js`) + **247** (`contract.test.js`).

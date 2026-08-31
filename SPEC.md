@@ -456,6 +456,20 @@ The date window is the same strict rule the on-hand figure follows: a delivery d
 
 It is **display only, and says so**: the "Supplies" line below it is money **paid**, this is the value of stock **opened**, and a sack bought this fortnight may be opened across the next two. Nothing here enters any total, and the guardrail test now proves it explicitly — every allocation compared key by key, and the note his partner receives asserted byte-identical either way.
 
+### v2.14.1 — the catch-up can target a cutoff that has ended
+
+Owner, 2026-09-01: *"wheres the value of the used supplies last cutoff"*. The fortnight nobody logged had **ended**, and v2.13.1's night-picker deliberately stayed inside the current cutoff — so the value could never land where he needed it.
+
+**That guard was over-cautious.** It was justified as *"putting supplies into a settled cutoff restates money that has moved"*, and for this figure that is simply not true: the value of stock opened is **display only** — in no total, in no allocation, and `buildNote` ignores it entirely (pinned byte-for-byte in the contract suite). Re-saving a past night re-prices nothing either, because `apiSaveDay` reuses that date's own stored price snapshots.
+
+So the automatic pick becomes the **default** rather than a prohibition. The catch-up now carries **"Which night should these go on?"** — a date field, defaulting to the automatic pick, capped at today. A future date or nonsense falls back to the automatic pick rather than being taken.
+
+Beneath it, the app says exactly where the value will land and what that does:
+
+> The value lands in the August 16–31 cutoff, which has already ended. It changes what that cutoff says under "Supplies used" and what the costing prices. It changes no total, no share, and nothing in the note — the note is built from money PAID, not from stock opened.
+
+The chosen night is cleared afterwards, so a fortnight that has ended never becomes the silent default for the next catch-up.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.

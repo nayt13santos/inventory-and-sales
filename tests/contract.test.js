@@ -237,6 +237,10 @@ return {
   catchUpPlan, catchUpNight, catchUpFill,
   // v2.14.0: what was used between two counts — measured, not remembered.
   countsFor, usedBetweenCounts, usedBetweenText,
+  // v2.14.1: the night the catch-up lands on, including a cutoff that has ended.
+  catchUpTarget, catchLandsText,
+  get catchNightPick(){ return catchNightPick; },
+  set catchNightPick(v){ catchNightPick = v; },
   get moved(){ return moved; },
   get catchDraft(){ return catchDraft; },
   // v2.11.0: how the nights compare.
@@ -5122,6 +5126,80 @@ test('SOURCE PIN: the Cutoff card separates opened from paid, and a negative exp
     'and names the rule that most often causes it');
   assert.ok(!/Count what is really there and tap/.test(neg),
     'and it no longer tells him to correct the count, which hides the difference');
+});
+
+test('CATCH UP can target a cutoff that has ENDED (v2.14.1)', () => {
+  // Owner, 2026-09-01: "wheres the value of the used supplies last cutoff". The
+  // fortnight nobody logged had ended, and v2.13.1's auto-pick deliberately
+  // stayed inside the current cutoff — so the value could never land where he
+  // needed it. That guard was justified as "restating money that has moved",
+  // which is not true of this figure: it is display only, and the note ignores
+  // it. So the auto-pick is now a DEFAULT, not a prohibition.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const flour = app.state.stockItems.find(x => x.product === 'Takoyaki Flour');
+  flour.unit_cost = 120; flour.unit = 'pack';
+  flour.baseline_date = ''; flour.baseline_qty = 8;
+  flour.delivered_before = 0; flour.used_before = 0;
+  for (const k in app.state.days) delete app.state.days[k];
+  for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
+  for (const k in app.state.stockDeliveries) delete app.state.stockDeliveries[k];
+
+  // With no choice made, it still picks for her, inside the current cutoff.
+  app.catchNightPick = '';
+  const auto = app.catchUpTarget();
+  assert.strictEqual(auto, app.catchUpNight(), 'no choice means the automatic pick');
+  const nowPer = app.currentPeriod(app.todayStr());
+  assert.ok(auto >= nowPer.start && auto <= nowPer.end, 'and that pick stays in this cutoff');
+
+  // HIS CASE: a night in the cutoff that has already ended.
+  const lastPer = app.shiftPeriod(nowPer, -1);
+  app.catchNightPick = lastPer.end;
+  assert.strictEqual(app.catchUpTarget(), lastPer.end,
+    'a night in a finished cutoff is allowed — that is the whole point');
+
+  // It SAYS where the value lands, and that the note cannot move.
+  const lands = app.catchLandsText(lastPer.end);
+  assert.match(lands, /cutoff, which has already ended/, 'it names the fortnight and its state');
+  assert.match(lands, /Supplies used/, 'and what changes there');
+  assert.match(lands, /no total, no share, and nothing in the note/,
+    'and what cannot change, which is what makes choosing a past night safe');
+  assert.match(lands, /money PAID, not from stock opened/, 'saying why');
+
+  // A night in THIS cutoff says so instead.
+  assert.match(app.catchLandsText(auto), /the one running now/);
+
+  // A FUTURE night is refused and falls back to the automatic pick — nothing
+  // can be logged as opened on a night that has not happened.
+  app.catchNightPick = app.addDays(app.todayStr(), 3);
+  assert.strictEqual(app.catchUpTarget(), app.catchUpNight(), 'a future night is not taken');
+  app.catchNightPick = 'not-a-date';
+  assert.strictEqual(app.catchUpTarget(), app.catchUpNight(), 'nor is nonsense');
+
+  // AND THE VALUE REALLY LANDS THERE. Fill the chosen night, save it, and the
+  // ENDED cutoff is the one whose "Supplies used" moves.
+  app.catchNightPick = lastPer.end;
+  app.state.days[lastPer.end] = { date: lastPer.end, closed: false, total: 2000, cash: 2000, gcash: 0 };
+  const beforeLast = app.computeCutoff(lastPer).suppliesUsed;
+  const beforeNow = app.computeCutoff(nowPer).suppliesUsed;
+  app.catchDraft['Takoyaki Flour'] = 2;          // 8 believed, 2 there => 6 opened
+  app.catchUpFill();
+  app.applyLocalDay(app.bentaPayload());
+  assert.strictEqual(app.computeCutoff(lastPer).suppliesUsed, beforeLast + 6 * 120,
+    'the ENDED cutoff now shows the value of what was opened');
+  assert.strictEqual(app.computeCutoff(nowPer).suppliesUsed, beforeNow,
+    'and the running cutoff is untouched');
+  // The chosen night is CLEARED afterwards, so the next catch-up starts from
+  // the automatic pick rather than silently reusing a fortnight that has ended.
+  assert.strictEqual(app.catchNightPick, '',
+    'a past night must not linger as the default for the next catch-up');
+
+  // The note for that ended fortnight is still built from money PAID only.
+  const f = app.computeCutoff(lastPer);
+  const noteWith = app.buildNote(f, lastPer);
+  for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
+  assert.strictEqual(noteWith, app.buildNote(app.computeCutoff(lastPer), lastPer),
+    'logging usage into a finished cutoff cannot change what his partner received');
 });
 
 test('USED BETWEEN TWO COUNTS: measured, not remembered (v2.14.0)', () => {
