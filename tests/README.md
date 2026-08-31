@@ -566,3 +566,17 @@ The interesting one is `wipes_localstorage`: it inserts a single `store.set` int
 Before building anything I checked all six service-worker shell files for HTTP 200. A single failing file makes `cache.addAll` reject, the install fail, and the phone stay on its old version forever — worth ruling out first, and it is the kind of cause no amount of reasoning would have found.
 
 Suites: **208** (`run-tests.js`) + **242** (`contract.test.js`).
+
+### v2.13.4 — the page is fetched, not remembered
+
+The service worker had **no tests at all** until now, which is how a cache-first page strategy survived long enough to pin a phone to an old version. It is now loaded into a `vm` sandbox with a fake cache and a controllable fetch, and **exercised** — online, offline, slow, and per-route.
+
+Three things this exposed, all in my own test rather than the worker:
+
+- **The first version of this test silently passed while failing.** `test()` is synchronous, so a returned promise was never awaited: an assertion I deliberately broke produced an unhandled rejection that aborted the run rather than a reported failure. Converted to `atest`, which the runner awaits — and the very first honest run showed a real failing assertion the "passing" version had hidden.
+- **The fake cache could not match its own keys.** The worker stores `./index.html` and asks with `https://x.test/index.html`; comparing those as substrings made a cache hit look like a network fetch. Compared by filename now.
+- **The fake requests had no `method`.** The listener returns early on anything that is not a GET, so every route looked "not handled" — and the POST assertion was passing for entirely the wrong reason.
+
+The routing is now driven through the **real fetch listener** (handlers are captured from the fake `self`), because calling the two strategies directly proves they work without proving the worker picks the right one — which was the actual bug. 7 mutants, all red, including both routing mutants that survived while the test bypassed dispatch.
+
+Suites: **208** (`run-tests.js`) + **243** (`contract.test.js`).

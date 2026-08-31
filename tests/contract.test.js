@@ -4861,6 +4861,131 @@ test('SOURCE PIN: the save asks about supplies, once, and never refuses (v2.13.0
     'and a run is counted, so a habit reads as a habit');
 });
 
+atest('THE SERVICE WORKER: the page is network-first, everything else is not (v2.13.4)', async () => {
+  // Owner, 2026-08-28: "its not updating." The page was served cache-first with
+  // no revalidation, which is exactly how a phone gets pinned to an old version:
+  // the cached page is served forever, and a new worker only takes over if the
+  // page it is serving decides to reload. Any hiccup in that handshake froze the
+  // app on whatever version it happened to hold, silently.
+  //
+  // The sw is loaded and EXERCISED here rather than pattern-matched, because a
+  // mistake in it does not show up as a failing screen — it shows up as a phone
+  // that cannot be fixed from the phone.
+  const SW = fs.readFileSync(path.join(ROOT, 'pwa', 'sw.js'), 'utf8');
+
+  // A tiny world: one cache, a controllable fetch, and the two globals the
+  // worker reaches for.
+  function loadSW(opts){
+    const o = opts || {};
+    const log = { fetched: [], put: [], matched: [] };
+    const store = new Map(o.cached || []);
+    const cache = {
+      // Keys are compared by FILENAME: the worker stores './index.html' and asks
+      // with 'https://x.test/index.html'. Comparing those as substrings is what
+      // made the icon case look like a network fetch when it was my fake that
+      // could not match.
+      async match(reqOrUrl){
+        const key = String(reqOrUrl && reqOrUrl.url ? reqOrUrl.url : reqOrUrl);
+        const tail = (v) => String(v).replace(/^\.\//, '').split('/').pop();
+        log.matched.push(key);
+        for (const [k, v] of store) if (tail(k) === tail(key)) return v;
+        return undefined;
+      },
+      async put(k, v){ log.put.push(String(k)); store.set(String(k), v); },
+      async addAll(){ return true; }
+    };
+    const sandbox = {
+      log,
+      caches: { async open(){ return cache; }, async keys(){ return []; }, async delete(){ return true; } },
+      fetch: async (req) => {
+        log.fetched.push(String(req && req.url ? req.url : req));
+        if (o.offline) throw new Error('offline');
+        if (o.slow) return new Promise(() => {});          // never answers
+        return { ok: true, clone(){ return 'FRESH'; }, body: 'FRESH' };
+      },
+      setTimeout, clearTimeout, Promise, Error, URL, String, Object,
+      // Handlers are CAPTURED, so the real routing decision can be exercised
+      // rather than bypassed by calling the two strategies directly.
+      self: { handlers: {},
+              addEventListener(type, fn){ this.handlers[type] = fn; },
+              location: { origin: 'https://x.test' }, clients: { claim(){} },
+              skipWaiting(){} },
+      Response: { error(){ return 'ERR'; } },
+      console
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(SW + '\nthis.__pageNetworkFirst = pageNetworkFirst;' +
+      '\nthis.__shellCacheFirst = shellCacheFirst;' +
+      '\nthis.__NAV = NAV_TIMEOUT_MS;', sandbox, { filename: 'sw.js' });
+    return sandbox;
+  }
+
+  // ONLINE: a navigation goes to the NETWORK and the fresh page replaces the
+  // saved copy — which is the whole fix.
+  // method matters: the listener returns early on anything that is not a GET,
+  // so a fake request without one makes EVERY route look like "not handled" —
+  // which is how the POST assertion below could have passed for the wrong reason.
+  const nav = { url: 'https://x.test/index.html', mode: 'navigate', method: 'GET' };
+
+  // ONLINE: a navigation goes to the NETWORK and the fresh page replaces the
+  // saved copy — which is the whole fix.
+  const sw = loadSW({ cached: [['./index.html', 'OLD']] });
+  const res = await sw.__pageNetworkFirst(nav);
+  assert.strictEqual(res.body, 'FRESH', 'online, she gets the new page');
+  assert.strictEqual(sw.log.fetched.length, 1, 'the network was asked');
+  assert.deepStrictEqual(sw.log.put, ['./index.html'],
+    'and the saved copy is REPLACED, so the next offline open is the new one too');
+
+  // OFFLINE: it falls back to the saved copy. This app lives at a stall with
+  // poor signal, so losing this would be far worse than a stale page.
+  const off = loadSW({ cached: [['./index.html', 'OLD']], offline: true });
+  assert.strictEqual(await off.__pageNetworkFirst(nav), 'OLD', 'no signal still opens the app');
+
+  // SLOW: it does not hang on a bad connection — it waits, then serves the copy.
+  const slow = loadSW({ cached: [['./index.html', 'OLD']], slow: true });
+  assert.ok(slow.__NAV > 0 && slow.__NAV <= 5000,
+    'the wait is short enough to be a wait and not a hang: ' + slow.__NAV);
+  const started = Date.now();
+  assert.strictEqual(await slow.__pageNetworkFirst(nav), 'OLD',
+    'a slow network falls back rather than hanging');
+  assert.ok(Date.now() - started >= slow.__NAV - 50, 'and it really did wait first');
+
+  // EVERYTHING ELSE stays cache-first: the icons are big, never change, and are
+  // not what carries the version.
+  const icons = loadSW({ cached: [['./icon-192.png', 'ICON']] });
+  assert.strictEqual(await icons.__shellCacheFirst({ url: 'https://x.test/icon-192.png', mode: 'no-cors' }),
+    'ICON', 'an icon comes from the cache');
+  assert.strictEqual(icons.log.fetched.length, 0, 'without touching the network');
+
+  // --- THE ROUTING ITSELF, through the real fetch listener. Calling the two
+  // strategies directly proves they work; it does not prove the worker picks
+  // the right one, which is the actual bug being fixed here.
+  const route = async (world, req) => {
+    const box = loadSW(world);
+    const handler = box.self.handlers.fetch;
+    assert.ok(typeof handler === 'function', 'the worker must register a fetch handler');
+    let answered = null;
+    handler({ request: req, respondWith(p){ answered = p; } });
+    const value = answered ? await answered : null;
+    return { box: box, value: value, answered: answered !== null };
+  };
+
+  const navRouted = await route({ cached: [['./index.html', 'OLD']] }, nav);
+  assert.strictEqual(navRouted.box.log.fetched.length, 1,
+    'a NAVIGATION must go to the network first — cache-first here is the bug that started this');
+  assert.strictEqual(navRouted.value.body, 'FRESH');
+
+  const iconRouted = await route({ cached: [['./icon-192.png', 'ICON']] },
+    { url: 'https://x.test/icon-192.png', mode: 'no-cors', method: 'GET' });
+  assert.strictEqual(iconRouted.box.log.fetched.length, 0,
+    'an ICON must NOT go to the network — it is big, it never changes, and it does not carry the version');
+  assert.strictEqual(iconRouted.value, 'ICON');
+
+  // A POST is never intercepted at all: the API must always reach the wire.
+  const posted = await route({}, { url: 'https://x.test/exec', mode: 'cors', method: 'POST' });
+  assert.strictEqual(posted.answered, false, 'the worker does not answer non-GET requests');
+});
+
 test('TYPING NEVER REBUILDS THE SCREEN UNDER HER (v2.13.2)', () => {
   // Owner, 2026-08-28: "whenever I type the page goes up." A field whose input
   // handler re-renders its whole panel replaces the very input being typed into

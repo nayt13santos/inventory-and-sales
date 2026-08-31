@@ -428,6 +428,14 @@ This app updates itself: a new version is downloaded in the background and swapp
 
 Verified beforehand that all six shell files serve HTTP 200 — a single failing file makes `cache.addAll` reject, the install fail, and a phone stay pinned to its old version indefinitely. They were fine, which is what ruled that cause out.
 
+### v2.13.4 — the page is fetched, not remembered
+
+The root cause of *"its not updating"*. The service worker served **every** same-origin GET cache-first **with no revalidation**, the page included. So the cached page was returned forever, and a newer worker only took over if the page it was serving chose to reload — meaning any hiccup in that handshake froze the app on whatever version it happened to hold, silently, with no way out from the phone.
+
+A **navigation** is now network-first: it asks the network, waits at most `NAV_TIMEOUT_MS` (2500ms), and falls back to the saved copy on failure or timeout. A fresh page also **replaces** the cached copy, so the next offline open is the new one too. Everything else — icons, the manifest — stays cache-first: they are large, they almost never change, and they are not what carries the version. Non-GET requests are still never intercepted, so the API always reaches the wire.
+
+Offline is unchanged and was verified as a real navigation with the server stopped: the whole app booted from cache. That mattered more than version freshness — this app lives at a stall with poor signal.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.
