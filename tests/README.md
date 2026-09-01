@@ -690,3 +690,17 @@ Two are about **what the words say**, because a guard whose message is vague can
 **A slab mistake, for the third time this session.** `lastBootstrapAt` went in beside `onAppResume` — its caller — instead of beside `doBootstrap`, which is what writes it. `doBootstrap` is lifted for the sync tests, `onAppResume` is not, so the harness threw `ReferenceError: lastBootstrapAt is not defined` from inside a function that works perfectly in a browser. The rule, restated: **a helper belongs beside its subject, not beside its caller.**
 
 Suites: **208** (`run-tests.js`) + **261** (`contract.test.js`).
+
+### v2.20.0 — Supplies (minor) is every entry
+
+Two tests, **24 mutants**. The first pass killed 16 of 19, and all three survivors were real.
+
+**The two that mattered most were fixture blindness, not missing assertions.** `suppliesSplit.minor` reverted to `f.supplies` alone and nothing failed — because the v2.16.0 fixture had Octopus and Other at **zero**, so the merge and the category were the same number. A fixture that cannot distinguish the right answer from the wrong one is not a test. It now files one expense in *each* of the three buckets and asserts `minor !== f.supplies` outright.
+
+The third: `cutoffWithSplit` dropping the merged figure went unnoticed because nothing exercised it. That path runs every time the Split field is touched, so the minor line would have blanked the moment he typed in it.
+
+**One survivor was a redundancy on one side and load-bearing on the other.** `minorVal` reading the merged field before the parts is unfalsifiable on the server, where the figures object always carries all three and the fallback computes the same value. Rather than delete it — the two note builders must not drift, and the phone's copy *is* load-bearing — both sides now have the same precedence pinned by the only fixture that can tell a direct read from a re-derivation: **an object whose merged field disagrees with its parts.**
+
+**An assertion I wrote and then deleted, because it tested a path that does not exist.** I asserted `buildNote(serverFigures)` matches `buildNote(localFigures)`, on the belief that the phone's builder is handed the server's snake_case reply. It is not: its only two call sites both pass `computeCutoff(per)`. So the snake_case read in `noteMinorVal` is *defensive*, not live, and the test now says so instead of implying a contract. What **is** live is the archived-row fallback, and that is what gets asserted.
+
+Suites: **209** (`run-tests.js`) + **263** (`contract.test.js`).

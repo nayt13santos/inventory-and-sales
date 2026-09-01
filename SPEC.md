@@ -582,6 +582,36 @@ Asked **first**, before "no sales are entered" and "nothing is logged as opened"
 
 **4. A false reassurance removed.** `catchLandsText` promised the value "changes no total, no share, and **nothing in the note**". v2.15.0 made that false by putting the supplies-used line *in* the note. It is the sentence that tells him a settled cutoff is safe to touch, so it now admits the note line moves and says what still cannot: no total, no share.
 
+### v2.20.0 — Supplies (minor) is every entry, whatever bucket was tapped
+
+Owner, 2026-09-01, after ₱3,957 of daily buying went in under the **Other** bucket and so never reached the Supplies line: *"supplies minor must sum all the entries, regardless of what it is, the only things that are not included in the minor are the major."*
+
+**`supplies_minor` = Supplies + Octopus + Other** — every category the Expenses screen can file — and it **replaces** those three lines rather than joining them, because printing both would show the same money twice and stop the block adding up.
+
+The note goes from seven allocation lines to five:
+
+```
+Mama - 500
+Split - 3,000(1,500 each)
+Supplies (minor) - 4,452
+Supplies used (opened) - 7,740
+Salary - 2,800
+Electric bill - 500
+
+Remaining - 12,933
+```
+
+**Mama and Electric keep their own lines.** They are not entered on the Expenses screen — they are one-tap chips on the Cutoff screen — and a partner reads them individually.
+
+**`remaining` does not move by a centavo.** It was already `total` minus all seven, and `supplies + octopus + other` is exactly the part being renamed. Both identities now hold, and the tests assert both — which is the proof this was a rename and not a re-derivation:
+
+```
+total = mama + split + supplies_minor + salary + electric + remaining
+total = mama + split + supplies + octopus + salary + other + electric + remaining
+```
+
+**Nothing is lost.** The three parts stay on the figures object and keep their own `Cutoffs` columns, so the archive holds the detail the note no longer prints. `supplies_minor` is computed, never stored — which is why `minorVal` / `noteMinorVal` fall back to summing the three parts when handed a figures object that has no merged field (an archived row, an older cached reply). Both sides share one precedence, pinned on both: the merged field wins, an explicit `0` is a figure, a blank falls back.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.

@@ -279,7 +279,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.19.0';
+var VERSION = '2.20.0';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -2110,15 +2110,35 @@ function apiCutoff(ss, settings, payload, dryRun) {
   }
   suppliesUsed = round2(suppliesUsed);
 
+  /* SUPPLIES (MINOR) — ONE LINE FOR EVERYTHING PAID (v2.20.0). The owner, after
+     his ₱3,957 of daily buying went in under the "Other" bucket and so never
+     reached the Supplies line: "supplies minor must sum all the entries,
+     regardless of what it is, the only things that are not included in the
+     minor are the major."
+
+     So minor is every category entered on the Expenses screen — Supplies,
+     Octopus and Other — and it REPLACES those three lines rather than joining
+     them, or the same money would be counted twice. Mama, Electric, Split and
+     Salary keep their own lines: they are not entered on that screen, and a
+     partner reads them individually.
+
+     `remaining` does not move by a centavo: it was already total minus all
+     seven, and supplies + octopus + other is exactly the part being renamed.
+     The three parts are STILL returned and still written to their own Cutoffs
+     columns, so the archive keeps the detail the note no longer prints. */
+  var suppliesMinor = round2(supplies + octopus + other);
+
   var figures = {
     start: start, end: end,
     total: total, cash: cash, gcash: gcash,
     mama: mama, split: split, per_partner: perPartner,
     supplies: supplies, octopus: octopus, salary: salary,
     other: other, electric: electric, remaining: remaining,
+    // The one line the note and the Cutoff card print (v2.20.0).
+    supplies_minor: suppliesMinor,
     // Display only. See above; and see the identity asserted in the tests:
-    // total = mama + split + supplies + octopus + salary + other + electric
-    //       + remaining, with `excluded` nowhere in it.
+    // total = mama + split + supplies_minor + salary + electric + remaining,
+    // with `excluded` and `supplies_used` nowhere in it.
     excluded: excluded, excluded_lines: excludedLines,
     // Display only, like `excluded`, and outside the identity above.
     supplies_used: suppliesUsed, supplies_used_unpriced: suppliesUsedUnpriced
@@ -2796,7 +2816,7 @@ function buildNoteText(branch, start, end, f) {
     '',
     'Mama - ' + orBlank(f.mama),
     'Split - ' + splitVal,
-    'Supplies - ' + orBlank(f.supplies),
+    'Supplies (minor) - ' + orBlank(minorVal(f)),
     // Beside the Supplies line it belongs with, at the owner's direction
     // (2026-09-01): "I just want to see it in the supplies section in the cutoff
     // notes, ill handle the deduction for now." It is the value of what was
@@ -2805,9 +2825,10 @@ function buildNoteText(branch, start, end, f) {
     // IT IS STILL IN NO SUM. `remaining` is computed from the seven allocations
     // only, and the tests assert the identity with this line present.
     'Supplies used (opened) - ' + usedVal(f),
-    'Octopus - ' + orBlank(f.octopus),
+    // Octopus and "Other payments" are GONE from the note (v2.20.0): both are now
+    // inside Supplies (minor) above, and printing them as well would show the
+    // same money twice and stop the block from adding up.
     'Salary - ' + orBlank(f.salary),
-    'Other payments - ' + orBlank(f.other),
     'Electric bill - ' + orBlank(f.electric),
     '',
     residual
@@ -2821,6 +2842,15 @@ function buildNoteText(branch, start, end, f) {
  *  "Supplies used (opened) - " exactly as an empty Octopus reads "Octopus - ".
  *  A product with no cost is NOT priced at nothing: it is left out of the money
  *  and counted, so the figure is never quietly understated. */
+/** The minor figure, from either side's casing — and falling back to the three
+ *  parts when an older reply (or an archived row) carries no merged figure. */
+function minorVal(f) {
+  var o = f || {};
+  var direct = o.suppliesMinor !== undefined ? o.suppliesMinor : o.supplies_minor;
+  if (direct !== undefined && direct !== null && direct !== '') return asNum(direct);
+  return round2(asNum(o.supplies) + asNum(o.octopus) + asNum(o.other));
+}
+
 function usedVal(f) {
   var used = asNum(f.supplies_used);
   var unpriced = asNum(f.supplies_used_unpriced);

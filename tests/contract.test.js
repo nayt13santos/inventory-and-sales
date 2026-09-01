@@ -251,6 +251,8 @@ return {
   // v2.17.0: the Expenses screen can be stepped back to a cutoff that has ended,
   // and a new entry lands in the cutoff on screen rather than always today.
   gastosFor, cutoffExpenseDate, gastosWords, periodLabel,
+  // v2.20.0: minor is EVERYTHING entered on the Expenses screen.
+  noteMinorVal,
   // v2.18.0: a list of dated amounts, typed once instead of ten at a time.
   parseDatedAmounts, datedAmountId,
   stashBentaDraft,
@@ -265,7 +267,7 @@ return {
   currentPeriod, shiftPeriod, periodKey, num, fmt, fmtShort, activePrices,
   // v2.3.1: the Split field's one reading, the note guard, what may be said
   // about a refused day, the two collapsible cards, and the price rule.
-  splitFieldAmount, liveCutoff, pendingSplit, splitDefault,
+  splitFieldAmount, liveCutoff, pendingSplit, splitDefault, cutoffWithSplit,
   noteAttention, attentionForDate, dateNotInSheet, daySavedMessage,
   stockRowSaid, stockCardHTML, stockCutoffHTML, wageCardHTML, wageIsCustom, wageSummary,
   priceRowError,
@@ -1607,8 +1609,8 @@ test('a custom-order-only day paid entirely by GCash: Cash prints 0, not blank',
   assertCutoffSeam(app, per, cut.data);
   // The residual is the day's takings minus the entered Split and the wage.
   assert.strictEqual(cut.data.figures.remaining, 300 - 3000 - 200);
-  // Index +1 since v2.15.1's supplies-used line.
-  assert.strictEqual(lines[16], 'Short - 2,900');
+  // Index -1 net: v2.15.1 added a line above, v2.20.0 removed two.
+  assert.strictEqual(lines[14], 'Short - 2,900');
 });
 
 test('customGcash may never exceed customAmount, and says so in plain English', () => {
@@ -1645,14 +1647,16 @@ const SPEC_NOTE = [
   '',
   'Mama - 500',
   'Split - 3,000(1,500 each)',
-  'Supplies - 5,440',
+  // v2.20.0, owner-directed: ONE line for everything entered on the Expenses
+  // screen — Supplies 5,440 + Octopus 0 + Other 1,417 = 6,857. The Octopus and
+  // "Other payments" lines are GONE: printing them as well would show the same
+  // money twice and stop the block adding up.
+  'Supplies (minor) - 6,857',
   // v2.15.1, owner-directed: beside the Supplies line it belongs with, and it
-  // ALWAYS prints — blank when there is nothing, exactly as "Octopus - " does.
+  // ALWAYS prints — blank when there is nothing, exactly as a zero category.
   // It is in no sum; the identity is asserted with it present.
   'Supplies used (opened) - ',
-  'Octopus - ',
   'Salary - 3,000',
-  'Other payments - 1,417',
   'Electric bill - 500',
   '',
   'Short - 2,000'
@@ -1784,16 +1788,20 @@ test('the SERVER note is character-identical to the SPEC sample', () => {
     'every line except supplies-used is the note it always was, byte for byte');
   // Spelled out, so a future edit cannot "tidy" one of these away unnoticed.
   const lines = SP.cutoff.note_text.split('\n');
-  assert.strictEqual(lines.length, 17, '16 as it always was, plus the v2.15.1 supplies-used line');
-  assert.deepStrictEqual([lines[1], lines[3], lines[6], lines[15]], ['', '', '', ''],
+  assert.strictEqual(lines.length, 15,
+    'v2.20.0: Octopus and Other payments folded into Supplies (minor), so two fewer');
+  assert.deepStrictEqual([lines[1], lines[3], lines[6], lines[13]], ['', '', '', ''],
     'blank-line placement, including the one before the residual');
   assert.strictEqual(lines[8], 'Split - 3,000(1,500 each)', 'no space before the bracket');
-  assert.strictEqual(lines[9], 'Supplies - 5,440', 'money PAID');
+  assert.strictEqual(lines[9], 'Supplies (minor) - 6,857',
+    'EVERYTHING paid on the Expenses screen: 5,440 + 0 octopus + 1,417 other');
   // Directly beneath the Supplies line it belongs with — the owner's placement.
   assert.strictEqual(lines[10], 'Supplies used (opened) - 2,940', 'the value OPENED');
-  assert.strictEqual(lines[11], 'Octopus - ', 'a zero category keeps the trailing space');
-  assert.strictEqual(lines[12], 'Salary - 3,000');
-  assert.strictEqual(lines[16], 'Short - 2,000', 'the label carries the sign, never "- -2,000"');
+  assert.strictEqual(lines[11], 'Salary - 3,000');
+  assert.strictEqual(lines[12], 'Electric bill - 500');
+  assert.strictEqual(lines[14], 'Short - 2,000', 'the label carries the sign, never "- -2,000"');
+  assert.ok(!/^Octopus - /m.test(SP.cutoff.note_text), 'the folded lines are GONE, not blank');
+  assert.ok(!/^Other payments - /m.test(SP.cutoff.note_text));
   assert.ok(!/₱|PHP/.test(SP.cutoff.note_text), 'the note never carries a peso sign');
   assert.ok(!/\.00/.test(SP.cutoff.note_text), 'whole pesos print without decimals');
   assert.ok(!/- -/.test(SP.cutoff.note_text));
@@ -4647,7 +4655,7 @@ test('a refused note is refused on the phone too — no local fallback, no Copy/
     'a clean period builds normally');
   // and the phone note it would otherwise have built is exactly the artifact
   // the refusal names — proof the local guard is load-bearing, not decoration.
-  assert.match(app.buildNote(app.computeCutoff(per), per), /Supplies - -500/);
+  assert.match(app.buildNote(app.computeCutoff(per), per), /Supplies \(minor\) - -500/);
 
   // generateNote wires both stops (it renders, so: source pins).
   const gen = slab('async function generateNote(){', 'async function copyNote(){');
@@ -5333,6 +5341,98 @@ test('SOURCE PIN: the Expenses screen steps, and every rule follows the shown cu
     'the comparison follows the stepper');
 });
 
+test('SUPPLIES (MINOR) IS EVERY ENTRY, WHATEVER BUCKET WAS TAPPED (v2.20.0)', () => {
+  // Owner, 2026-09-01, after ₱3,957 of daily buying went in under the "Other"
+  // bucket and so never reached the Supplies line: "supplies minor must sum all
+  // the entries, regardless of what it is, the only things that are not
+  // included in the minor are the major."
+  const srv = loadServer();
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data;
+  const app0 = syncedClient(boot);
+  const D = ymdDaysAgo(2);                       // the harness clock, not the wall clock
+  const per = app0.currentPeriod(D);
+  const add = (category, item, amount, id) => assert.strictEqual(
+    post(srv.ctx, { token: srv.token, action: 'saveExpense', payload: {
+      date: D, category, item, amount, backlogRef: '', notes: '', entryId: id } }).ok,
+    true, category + ' ' + amount);
+
+  // One of each bucket the Expenses screen offers, plus the two that are NOT on
+  // it and keep their own lines.
+  add('Supplies', 'Veggies', 244, 'm-sup');
+  add('Octopus', '', 1500, 'm-oct');
+  add('Other', '', 3957, 'm-oth');
+  add('Mama', 'Mama', 500, 'm-mama');
+  add('Electric', 'Electric bill', 500, 'm-elec');
+
+  const cut = post(srv.ctx, { token: srv.token, action: 'cutoff',
+    payload: { start: per.start, end: per.end, dryRun: true } });
+  assert.strictEqual(cut.ok, true, cut.error);
+  const f = cut.data.figures;
+
+  // THE THREE EXPENSES-SCREEN CATEGORIES BECOME ONE FIGURE.
+  assert.strictEqual(f.supplies_minor, 244 + 1500 + 3957, 'every bucket, whatever was tapped');
+  // ...and the parts are STILL there, so the Cutoffs archive keeps the detail.
+  assert.strictEqual(f.supplies, 244);
+  assert.strictEqual(f.octopus, 1500);
+  assert.strictEqual(f.other, 3957);
+  // MAMA AND ELECTRIC ARE NOT IN IT — they are not entered on that screen and a
+  // partner reads them individually.
+  assert.strictEqual(f.mama, 500);
+  assert.strictEqual(f.electric, 500);
+  assert.ok(f.supplies_minor < f.supplies_minor + f.mama + f.electric);
+
+  // THE IDENTITY CLOSES ON FIVE ALLOCATIONS PLUS THE RESIDUAL — the merged
+  // figure standing in for exactly the three it replaced, so `remaining` cannot
+  // have moved by a centavo.
+  assert.strictEqual(f.total,
+    f.mama + f.split + f.supplies_minor + f.salary + f.electric + f.remaining,
+    'total = mama + split + supplies(minor) + salary + electric + remaining');
+  // And the OLD seven-way identity still holds too, which is the proof that this
+  // was a rename and not a re-derivation.
+  assert.strictEqual(f.total,
+    f.mama + f.split + f.supplies + f.octopus + f.salary + f.other + f.electric + f.remaining,
+    'the seven parts still add to the same Total');
+
+  // THE NOTE PRINTS ONE LINE AND DROPS THE OTHER TWO.
+  const lines = cut.data.note_text.split('\n');
+  assert.ok(lines.some(l => l === 'Supplies (minor) - ' + '5,701'), cut.data.note_text);
+  assert.ok(!lines.some(l => l.indexOf('Octopus - ') === 0), 'no Octopus line');
+  assert.ok(!lines.some(l => l.indexOf('Other payments - ') === 0), 'no Other payments line');
+
+  // THE PHONE AGREES, byte for byte, from figures it computed itself.
+  const app = syncedClient(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+  const local = app.computeCutoff(per);
+  assert.strictEqual(local.suppliesMinor, f.supplies_minor, 'the phone merges identically');
+  assert.strictEqual(app.buildNote(local, per), cut.data.note_text, 'and writes the same note');
+});
+
+test('noteMinorVal: either casing, and a fallback for figures that predate it (v2.20.0)', () => {
+  const app = loadClient();
+  /* WHY BOTH CASINGS. buildNote is only ever handed computeCutoff's own
+     camelCase figures — checked: those are its only two call sites — so the
+     snake_case read is DEFENSIVE, not a live path, and this test says so rather
+     than pretending otherwise.
+
+     What IS live is the fallback below: an archived Cutoffs row carries
+     `supplies`, `octopus` and `other` in their own columns and NO merged field,
+     because the merge is computed and never stored. Anything that rebuilds a
+     figures object from that row needs the parts to add up to minor. */
+  assert.strictEqual(app.noteMinorVal({ suppliesMinor: 4452 }), 4452);
+  assert.strictEqual(app.noteMinorVal({ supplies_minor: 4452 }), 4452);
+  // A ZERO IS A FIGURE, not an absence — it must not fall through to the parts.
+  assert.strictEqual(app.noteMinorVal({ suppliesMinor: 0, supplies: 99 }), 0,
+    'an explicit 0 wins over the parts');
+  // NO MERGED FIELD AT ALL: an older cached reply, or an archived Cutoffs row.
+  // The three parts rebuild it rather than the line reading blank.
+  assert.strictEqual(app.noteMinorVal({ supplies: 244, octopus: 1500, other: 3957 }), 5701,
+    'the parts rebuild it when the merged field is missing');
+  assert.strictEqual(app.noteMinorVal({ supplies: 244 }), 244, 'missing parts are 0');
+  assert.strictEqual(app.noteMinorVal({}), 0);
+  assert.strictEqual(app.noteMinorVal(null), 0, 'and nothing at all is 0, never NaN');
+  assert.strictEqual(app.noteMinorVal({ suppliesMinor: '' , supplies: 7 }), 7,
+    'a BLANK merged field falls back — blank is not zero');
+});
+
 test("A DAY SAVE SAYS WHAT IT WOULD DESTROY (v2.19.0)", () => {
   // 2026-09-01, from his live sheet. A day save REPLACES its date's StockUsage
   // rows (rewriteDateBlock) rather than merging, which is right — it is how a
@@ -5716,12 +5816,17 @@ test('SUPPLIES IN TWO LINES: major is opened, minor is the daily buying (v2.16.0
   for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
   const per = app.currentPeriod('2026-08-20');
 
-  // A NIGHT OF DAILY BUYING inside the cutoff — an eggs-and-veggies run, which
-  // is what a picklist bucket files as: Expenses, category Supplies.
+  // A NIGHT OF DAILY BUYING inside the cutoff — one of EACH bucket the Expenses
+  // screen offers, because v2.20.0 folds all three into minor and a fixture with
+  // octopus and other at zero cannot tell the merge from the category alone.
   app.applyLocalExpense({ date: '2026-08-21', category: 'Supplies', item: 'Veggies',
     amount: 260, backlogRef: '', notes: '', entryId: 'minor-1' });
   app.applyLocalExpense({ date: '2026-08-23', category: 'Supplies', item: 'Eggs',
     amount: 140, backlogRef: '', notes: '', entryId: 'minor-2' });
+  app.applyLocalExpense({ date: '2026-08-22', category: 'Octopus', item: '',
+    amount: 1500, backlogRef: '', notes: '', entryId: 'minor-3' });
+  app.applyLocalExpense({ date: '2026-08-24', category: 'Other', item: '',
+    amount: 700, backlogRef: '', notes: '', entryId: 'minor-4' });
 
   // NOTHING OPENED IS LOGGED: the major is NOT ZERO, it is UNKNOWN. A ₱0 here
   // would read as a fortnight that consumed nothing, which is the one thing a
@@ -5747,8 +5852,14 @@ test('SUPPLIES IN TWO LINES: major is opened, minor is the daily buying (v2.16.0
   // MINOR IS THE ALLOCATION, UNTOUCHED. It is Expenses filed under Supplies —
   // which is every picklist bucket, i.e. the daily buying — and it is exactly
   // what the note's "Supplies" line and the total's arithmetic already used.
-  assert.strictEqual(sup.minor, f.supplies, 'MINOR is the money paid, unchanged');
-  assert.ok(sup.minor >= 400, 'the fixture has daily buying, or this proves nothing');
+  // v2.20.0: MINOR is every bucket on the Expenses screen, not the Supplies
+  // category alone — which is exactly the bug that sent his ₱3,957 to a line he
+  // was not reading.
+  assert.strictEqual(sup.minor, f.supplies + f.octopus + f.other,
+    'MINOR is supplies + octopus + other');
+  assert.notStrictEqual(sup.minor, f.supplies,
+    'and demonstrably NOT the Supplies category on its own');
+  assert.ok(f.octopus > 0 && f.other > 0, 'the fixture exercises all three parts');
 
   // THE TWO ARE NEVER ADDED. The same bag is minor when bought and major when
   // opened; a sum of both would charge the business twice for one bag.
@@ -5783,6 +5894,16 @@ test('SUPPLIES IN TWO LINES: major is opened, minor is the daily buying (v2.16.0
   assert.match(sup.why, /counted but not valued/);
   assert.ok(sup.why.length < 90, 'and it stays one short line, inside a column of figures');
 
+  // A TYPED SPLIT MUST NOT LOSE IT. liveCutoff runs the figures back through
+  // cutoffWithSplit, and a merged field dropped there would blank the minor line
+  // the moment he touched the Split field.
+  const withSplit = app.cutoffWithSplit(f, 4000);
+  assert.strictEqual(withSplit.suppliesMinor, sup.minor, 'the merge survives a typed split');
+  assert.strictEqual(app.suppliesSplit(withSplit).minor, sup.minor);
+  assert.ok(app.buildNote(withSplit, per).indexOf('Supplies (minor) - ' + app.fmt(sup.minor)) > 0,
+    'and the note still prints it');
+  assert.strictEqual(withSplit.split, 4000, 'precondition: the split really changed');
+
   // AND THE MAJOR MOVES NOTHING, on either figure or the note.
   const withUsage = app.computeCutoff(per);
   for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
@@ -5800,9 +5921,16 @@ test('SOURCE PIN: the total card carries both supplies lines, and only one sums 
   assert.ok(at > 0, 'the total card must carry the MINOR line');
   const card = src.slice(at, at + 900);
 
-  // MINOR carries the allocation the arithmetic uses — f.supplies, alone.
-  assert.match(card, /Supplies \(minor\)<\/span><span class="v">' \+ peso\(f\.supplies\)/,
-    'minor prints f.supplies and nothing added to it');
+  // MINOR is the merged figure since v2.20.0 — everything entered on the
+  // Expenses screen — and it comes from suppliesSplit so the card and the note
+  // can never disagree about what "minor" means.
+  assert.match(card, /Supplies \(minor\)<\/span><span class="v">' \+ peso\(sup\.minor\)/,
+    'minor prints the merged figure from the one rule that defines it');
+  assert.ok(card.indexOf('peso(f.supplies)') < 0,
+    'and never the Supplies CATEGORY alone — that is the bug this replaced');
+  // The two folded rows are gone from the card, or the column would not add up.
+  assert.ok(card.indexOf('>Octopus<') < 0, 'no separate Octopus row');
+  assert.ok(card.indexOf('>Other payments<') < 0, 'no separate Other payments row');
 
   // MAJOR comes from the helper, prints '—' when unknown, and says on its face
   // that it is not in the total. A muted style alone is not a statement.
@@ -5943,7 +6071,7 @@ test('THE NOTE CARRIES THE SUPPLIES USED, and the two builders agree (v2.15.1)',
   const at = lines.findIndex(l => l.indexOf('Supplies used (opened) - ') === 0);
   assert.ok(at > 0, 'the line is in the note');
   assert.strictEqual(lines[at], 'Supplies used (opened) - 720');
-  assert.ok(lines[at - 1].indexOf('Supplies - ') === 0,
+  assert.ok(lines[at - 1].indexOf('Supplies (minor) - ') === 0,
     'DIRECTLY BENEATH the Supplies line, which is what he asked for');
   assert.ok(/^(Remaining|Short) - /.test(lines[lines.length - 1]),
     'and the residual is still the LAST line — the footer is gone');

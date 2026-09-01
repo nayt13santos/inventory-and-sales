@@ -598,7 +598,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.19.0';
+const APP_VERSION = '2.20.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -1960,6 +1960,17 @@ function computeCutoff(per){
   return {
     total, cash, gcash, daysWithSales, openDays,
     mama, supplies, octopus, electric, other, salary,
+    /* SUPPLIES (MINOR): everything entered on the Expenses screen, in ONE figure
+       (v2.20.0). Owner, after his ₱3,957 of daily buying landed under "Other"
+       and so never reached the Supplies line: "supplies minor must sum all the
+       entries, regardless of what it is, the only things that are not included
+       in the minor are the major."
+
+       It REPLACES the Supplies, Octopus and Other payments lines rather than
+       joining them — printing both would show the same money twice. The three
+       parts stay on this object and in the Cutoffs archive, so nothing is lost.
+       `remaining` does not move: it was already total minus all seven. */
+    suppliesMinor: r2(supplies + octopus + other),
     split, perPartner: r2(split / 2), splitEntered: sp.entered,
     remaining,
     // Supplies OPENED, in money (v2.14.0) — display only, never an allocation.
@@ -1978,7 +1989,11 @@ function cutoffWithSplit(f, rawSplit){
   const split = r2(Math.max(0, num(rawSplit)));
   const remaining = r2(num(f.total) - num(f.mama) - split - num(f.supplies) -
     num(f.octopus) - num(f.salary) - num(f.other) - num(f.electric));
-  return Object.assign({}, f, { split, perPartner: r2(split / 2), remaining });
+  // suppliesMinor rides along untouched — it is the same three parts under one
+  // name, and the split cannot move it. Object.assign carries it, but naming it
+  // here is what stops a future edit from quietly dropping it.
+  return Object.assign({}, f, { split, perPartner: r2(split / 2), remaining,
+    suppliesMinor: noteMinorVal(f) });
 }
 
 /* ---- The Split field: what it MEANS, and whether it has been saved yet. ----
@@ -2055,20 +2070,32 @@ function buildNote(f, per){
     '',
     'Mama - ' + noteVal(f.mama),
     'Split - ' + (num(f.split) !== 0 ? fmt(f.split) + '(' + fmt(f.perPartner) + ' each)' : ''),
-    'Supplies - ' + noteVal(f.supplies),
+    'Supplies (minor) - ' + noteVal(noteMinorVal(f)),
     // Beside the Supplies line, at the owner's direction (2026-09-01). The value
     // of what was OPENED — what he owes at the cutoff, since his suppliers
     // deliver on credit — where the line above is what he has PAID. In no sum:
     // `remaining` comes from the seven allocations alone. Matches Code.gs's
     // usedVal byte for byte.
     'Supplies used (opened) - ' + noteUsedVal(f),
-    'Octopus - ' + noteVal(f.octopus),
+    // Octopus and "Other payments" are GONE (v2.20.0): both are inside Supplies
+    // (minor) above, and printing them too would show the same money twice and
+    // stop the block adding up. Matches Code.gs's buildNoteText byte for byte.
     'Salary - ' + noteVal(f.salary),
-    'Other payments - ' + noteVal(f.other),
     'Electric bill - ' + noteVal(f.electric),
     '',
     residual
   ].join('\n');
+}
+
+/** The minor figure, from either side's casing — buildNote is handed the phone's
+ *  own camelCase figures AND the server's snake_case reply — and falling back to
+ *  the three parts when a figures object predates the merged field (an older
+ *  cached reply, or an archived Cutoffs row). Matches Code.gs's minorVal. */
+function noteMinorVal(f){
+  const o = asObj(f);
+  const direct = pick(o, 'suppliesMinor', 'supplies_minor');
+  if (direct !== undefined && direct !== null && direct !== '') return num(direct);
+  return r2(num(o.supplies) + num(o.octopus) + num(o.other));
 }
 
 /** The value of what was OPENED, matching Code.gs's usedVal byte for byte
@@ -6812,13 +6839,13 @@ function renderCutoff(){
     // the value opened, carried here so he can read both figures in the one
     // place he settles from, and in NO sum. The row is marked so the block still
     // reads as arithmetic that closes.
-    '<div class="co-row"><span>Supplies (minor)</span><span class="v">' + peso(f.supplies) + '</span></div>' +
+    '<div class="co-row"><span>Supplies (minor)</span><span class="v">' + peso(sup.minor) + '</span></div>' +
     '<div class="co-row aside"><span>Supplies (major) <span class="hint">not in the total</span></span>' +
       '<span class="v">' + (sup.majorKnown ? peso(sup.major) : '—') + '</span></div>' +
     (sup.why ? '<p class="hint" style="margin:2px 0 6px 14px;">' + esc(sup.why) + '</p>' : '') +
-    '<div class="co-row"><span>Octopus</span><span class="v">' + peso(f.octopus) + '</span></div>' +
+    // Octopus and Other payments are inside Supplies (minor) now (v2.20.0), so
+    // they are not shown again here — the column has to add up.
     '<div class="co-row"><span>Salary</span><span class="v">' + peso(f.salary) + '</span></div>' +
-    '<div class="co-row"><span>Other payments</span><span class="v">' + peso(f.other) + '</span></div>' +
     '<div class="co-row"><span>Electric bill</span><span class="v">' + peso(f.electric) + '</span></div>' +
     '<div class="r-sep" role="presentation"></div>' +
     // The RESIDUAL: what is left in the business after everything, and what
@@ -7015,7 +7042,10 @@ function suppliesSplit(f){
     why = '';
   }
   return {
-    minor: r2(num(o.supplies)),
+    // v2.20.0: everything entered on the Expenses screen, not the Supplies
+    // category alone — which is what sent his ₱3,957 to a line he was not
+    // reading. noteMinorVal so the card and the note can never disagree.
+    minor: noteMinorVal(o),
     major: anyPriced ? r2(num(o.suppliesUsed)) : null,
     majorKnown: anyPriced,
     why
