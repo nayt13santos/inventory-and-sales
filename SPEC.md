@@ -563,6 +563,25 @@ A bare day, or a month/day with no year, resolves **inside the cutoff on screen*
 
 The hyphen alternative in the date pattern is **unspaced on purpose**: `16 - 244` is a bare day and an amount, and letting a spaced hyphen be a date separator read it as month 16, day 24, amount 4.
 
+### v2.19.0 — four guards, after a real loss
+
+2026-09-01. Following my own wrong instruction, the owner opened "Catch up what was opened", typed **0 in every box**, and tapped Fill in. The boxes ask what is *really left on the shelf*; he read them as *how much to log*. The plan therefore claimed his entire shelf had been opened in one night — 12 kg flour, 4 gal sauce, 3 kg mayo, 1 bonito — wrote it into 2026-09-01, and his Stock-on-hand screen read **zero everywhere** afterwards. Every individual figure was legal. Nothing warned him.
+
+Four guards, none of which refuses anything outright — every one is a question whose safe answer is "no".
+
+**1. A day save says what it would destroy** (`daySaveRisk`). A day save REPLACES its date's `StockUsage` rows (`rewriteDateBlock`) rather than merging. That is correct — it is how a corrected night corrects — but it means the card must be showing what the sheet holds, and two things silently break that:
+
+- **The phone has no copy of the day.** It has not synced since that day was saved, so the form loads blank and Save writes that blankness over the sheet — *the sales and the wage included* — and the server answers `ok`. The phone cannot see what it is about to overwrite; the only signal available is that it holds no record of the date at all. So that is what it says, and it points at **Sync now**.
+- **The card drops rows the phone itself holds** (a stale draft restored over a loaded night). Here it *can* name them, with quantities, so the size of the loss is visible.
+
+Asked **first**, before "no sales are entered" and "nothing is logged as opened" — behind those it would be second in a queue of dialogs, which is how dialogs stop being read. Adding to a night, or sending everything back unchanged, is silent.
+
+**2. The catch-up challenges a plan that empties the shelf** (`emptiesEverything`, `catchEmptyWarning`). Suspect when it leaves nothing of **every** product it touches *and* touches more than one — one product going to zero is an ordinary last-bag-of-bonito night and must not be challenged, or the warning becomes noise. The message names every quantity, says which way round the box is, and tells him a box left **empty** is skipped. Blank was never treated as zero (`catchUpPlan` already skipped it); the bug was that an explicit 0 is legal and its consequence invisible.
+
+**3. The app re-reads the sheet on resume** (`maybeRefresh`). On-hand is **not** what the server sent — the phone discards that and recomputes from its own mirror — so the screen is only as fresh as the last bootstrap. And a bootstrap almost never happened: `onAppResume` called `drainQueue`, which returns at its own front door on an empty queue, and the re-bootstrap inside it only fires when something *landed*. An installed app resumed rather than cold-started, with nothing waiting to send, **never refreshed at all** — it could sit on mid-August figures for a fortnight and look normal doing it. Throttled at 5 minutes, guarded on `syncing`, a non-empty queue and `isTypingNow`, silent on failure, and the stamp is set only on a bootstrap that **landed**.
+
+**4. A false reassurance removed.** `catchLandsText` promised the value "changes no total, no share, and **nothing in the note**". v2.15.0 made that false by putting the supplies-used line *in* the note. It is the sentence that tells him a settled cutoff is safe to touch, so it now admits the note line moves and says what still cannot: no total, no share.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.

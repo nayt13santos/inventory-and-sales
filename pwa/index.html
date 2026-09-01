@@ -598,7 +598,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.18.0';
+const APP_VERSION = '2.19.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -2497,7 +2497,23 @@ function catchUpPlan(counted){
     rows.push({ product: s.product, unit: s.unit, used: used,
                 cost: priced ? r2(used * num(uc)) : null });
   }
-  return { rows: rows, cost: r2(cost), overs: overs, unpriced: unpriced };
+  // WOULD THIS EMPTY THE SHELF? (v2.19.0) Owner, 2026-09-01: he typed 0 in every
+  // box — a natural "nothing / I don't know" gesture — and the field means the
+  // OPPOSITE: what is really LEFT. So the plan claimed his entire shelf had been
+  // opened in one night (12 kg of flour, 4 gal of sauce, 3 kg of mayo, 1 bonito)
+  // and wrote it into a night, which then read his on-hand down to zero across
+  // the board. Nothing warned him, because every individual figure was legal.
+  //
+  // A plan is SUSPECT when it leaves nothing on the shelf for every product it
+  // touches AND touches more than one. One product going to zero is ordinary —
+  // the last bag of bonito. Every product at once is a data-entry accident.
+  const emptied = rows.filter(r => {
+    const s = stockStatusList().find(x => txt(x.product) === txt(r.product));
+    return s && r2(num(s.on_hand) - num(r.used)) === 0;
+  });
+  const emptiesEverything = rows.length > 1 && emptied.length === rows.length;
+  return { rows: rows, cost: r2(cost), overs: overs, unpriced: unpriced,
+           emptiesEverything: emptiesEverything };
 }
 
 /** The night the catch-up will actually use: his own choice when he has made
@@ -2506,6 +2522,20 @@ function catchUpTarget(){
   const picked = txt(catchNightPick);
   if (isDateStr(picked) && picked <= todayStr()) return picked;
   return catchUpNight();
+}
+
+/** THE WORDS ON A SHELF-EMPTYING PLAN (v2.19.0). Names every quantity it is
+ *  about to claim, and names the mistake that produces it, because the field is
+ *  the opposite way round from what a person assumes: it asks what is LEFT, not
+ *  what to log. Written as a question with the safe answer being "no". */
+function catchEmptyWarning(plan){
+  const bits = asArr(asObj(plan).rows).map(r => qtyWithUnit(r.used, r.unit) + ' of ' + txt(r.product));
+  return 'This says NOTHING is left of anything:\n\n' + bits.join('\n') +
+    '\n\nopened on one night, ' + peso(asObj(plan).cost) + ' in all.\n\n' +
+    'The boxes above ask what is REALLY LEFT on the shelf — not how much to log. ' +
+    'If you typed 0 to mean “nothing” or “I do not know”, tap Cancel and leave those boxes EMPTY instead; ' +
+    'a box you leave empty is skipped.\n\n' +
+    'Is the shelf really empty?';
 }
 
 /** Which cutoff the chosen night falls in, and — plainly — what that changes
@@ -2517,8 +2547,10 @@ function catchLandsText(night){
   const here = periodKey(per) === periodKey(currentPeriod(todayStr()));
   return 'The value lands in the ' + monthName(per.start) + ' ' + d2parts(per.start).d + '–' +
     d2parts(per.end).d + ' cutoff' + (here ? ' — the one running now.' : ', which has already ended.') +
-    ' It changes what that cutoff says under “Supplies used” and what the costing prices. ' +
-    'It changes no total, no share, and nothing in the note — the note is built from money PAID, not from stock opened.';
+    ' It changes what that cutoff says under “Supplies used” and what the costing prices, ' +
+    'and it changes the “Supplies used (opened)” line of that cutoff\'s note. ' +
+    'It changes no total and no share — every figure you settle on is built from money PAID, ' +
+    'not from stock opened.';
 }
 
 /** The night to file it under: the most recent OPEN night IN THIS CUTOFF that
@@ -2556,6 +2588,11 @@ function catchUpNight(todayArg){
 function catchUpFill(){
   const plan = catchUpPlan(catchDraft);
   if (!plan.rows.length){ toast('Type what is on the shelf first.'); return; }
+  // A PLAN THAT EMPTIES THE SHELF IS CHALLENGED IN WORDS (v2.19.0), naming the
+  // quantities, because the mistake that produces it looks completely normal on
+  // screen: every figure is legal, the total is plausible, and only the fact
+  // that NOTHING is left anywhere gives it away.
+  if (plan.emptiesEverything && !confirm(catchEmptyWarning(plan))) return;
   const night = catchUpTarget();
   // The night is loaded the ordinary way, so its counts, prices and snapshots
   // are exactly what any other edit of that night would carry.
@@ -2611,6 +2648,56 @@ function logsNoSupplies(p){
   if (truthy(pay.closed)) return false;
   if (!asArr(state.stockItems).some(x => isObj(x) && truthy(x.active))) return false;
   return !asArr(pay.stock).some(r => num(asObj(r).qty) > 0);
+}
+
+/** WHAT THIS SAVE WOULD DESTROY (v2.19.0), in words, or '' when nothing.
+ *
+ *  A day save REPLACES every StockUsage row of its date (rewriteDateBlock on the
+ *  server) — it does not merge. That is right: it is how a corrected night
+ *  corrects. But it means the card must be showing what the sheet holds, and
+ *  there are two ways it silently is not:
+ *
+ *  1. THE PHONE HAS NO COPY OF THAT DAY. It has not synced since the day was
+ *     saved (or ever), so the form loads blank and Save writes that blankness
+ *     over whatever the sheet holds — the sales figures included. The server
+ *     answers ok. Nothing on screen says a thing. This is the one that cost the
+ *     owner real data on 2026-09-01, and the phone genuinely cannot see it: it
+ *     can only see that it has no record of the date at all.
+ *
+ *  2. THE CARD DROPS ROWS THE PHONE ITSELF HOLDS. A stale draft restored over a
+ *     loaded night, or a product cleared by accident. Here the phone CAN name
+ *     exactly what is about to go.
+ *
+ *  Both are questions, never refusals: deleting a wrong row is a real thing to
+ *  want, and this must not stand between her and a correction. */
+function daySaveRisk(p){
+  const pay = asObj(p);
+  const d = txt(pay.date);
+  if (!isDateStr(d) || d >= todayStr()) return '';        // today is being entered, not re-entered
+
+  // (1) No local record of the day at all.
+  if (!isObj(asObj(state.days)[d])){
+    return 'This phone has no saved copy of ' + fmtShort(d) + '. If that day is already ' +
+      'in the sheet, saving now REPLACES it with what is on screen — the sales, the wage and ' +
+      'the supplies opened. Tap Sync now under More first, then come back.\n\nSave anyway?';
+  }
+
+  // (2) Usage rows this phone knows about that the payload does not carry.
+  const sending = {};
+  for (const r of asArr(pay.stock)) if (num(asObj(r).qty) > 0) sending[txt(asObj(r).product)] = true;
+  const losing = [];
+  for (const r of asArr(asObj(state.stockUsage)[d])){
+    const row = asObj(r);
+    if (num(row.qty) > 0 && !sending[txt(row.product)]){
+      losing.push(qtyWithUnit(row.qty, stockUnitOf(row.product)) + ' of ' + txt(row.product));
+    }
+  }
+  if (losing.length){
+    return 'Saving ' + fmtShort(d) + ' will REMOVE what was logged as opened that night:\n\n' +
+      losing.join('\n') + '\n\nA day save replaces that night\'s supplies rather than adding to ' +
+      'them, so anything not on the card goes.\n\nRemove it?';
+  }
+  return '';
 }
 
 /** The one sentence, or '' when there is nothing to say. */
@@ -3532,6 +3619,28 @@ function applyDroppedSkus(p, skus){
   }
 }
 
+/** The last bootstrap that actually LANDED, as a millisecond stamp, and how
+ *  stale is stale. Declared here, beside doBootstrap, because doBootstrap is
+ *  what writes it — a helper put next to its CALLER instead of its subject ends
+ *  up outside the region the tests lift, and then the function it serves throws
+ *  ReferenceError in the harness while working fine in the browser. */
+let lastBootstrapAt = 0;
+const REFRESH_AFTER_MS = 5 * 60 * 1000;
+
+/** Re-read the sheet when what this phone holds has gone stale (v2.19.0).
+ *  Silent by design: it is not a user action, so it never toasts and never
+ *  blocks. A failure leaves the phone on what it already had — exactly what it
+ *  did before this existed. */
+function maybeRefresh(){
+  if (!config.apiUrl) return;                       // demo mode has nothing to read
+  if (syncing) return;                              // never race the queue
+  if (asArr(queue).length) return;                  // drainQueue bootstraps after it lands
+  if (typeof isTypingNow === 'function' && isTypingNow()) return;   // not under her fingers
+  if (Date.now() - lastBootstrapAt < REFRESH_AFTER_MS) return;
+  doBootstrap().catch(() => {});
+  return true;
+}
+
 async function doBootstrap(){
   if (!config.apiUrl || !navigator.onLine) return false;
   // Stamp the moment the request LEAVES. If anything is saved locally — or the
@@ -3544,6 +3653,10 @@ async function doBootstrap(){
     const data = await api('bootstrap', {});
     if (mutationCounter !== stamp) return false;   // stale before it arrived
     applyBootstrap(data);
+    // The stamp maybeRefresh() throttles on — set only on a bootstrap that
+    // actually LANDED, so a run of failures keeps retrying rather than going
+    // quiet for five minutes on a stale screen.
+    lastBootstrapAt = Date.now();
     persistState();
     renderPanel(activeTab);
     updateStatus();
@@ -5691,6 +5804,12 @@ function saveBenta(){
     return;
   }
   const p = bentaPayload();
+  // WHAT THIS SAVE WOULD DESTROY comes FIRST (v2.19.0). Losing a night that is
+  // already in the sheet outranks every other question here, and asking it after
+  // "no sales are entered" would put it second in a queue of dialogs — which is
+  // how dialogs stop being read.
+  const risk = daySaveRisk(p);
+  if (risk && !confirm(risk)) return;
   // A day with NO money on it still books that day's wage at the cutoff, and it
   // is usually a slip — Save day tapped before the counts went in, or a closed
   // day not marked closed. One plain question, then her word is final.
@@ -9783,9 +9902,26 @@ function onAppResume(){
   renderPanel(activeTab);
   updateDayStrip();
   drainQueue();
+  /* AND PULL FRESH FIGURES (v2.19.0). Owner, 2026-09-01: "the stock on hand
+     still doesnt reflect the remaining after aug and the ones I entered
+     earlier."
+
+     On-hand is NOT what the server sent — the phone deliberately discards that
+     and recomputes it from its own mirror. So the screen is only ever as fresh
+     as the last bootstrap. And a bootstrap almost never happened here: this
+     handler called drainQueue(), which returns at its own front door when the
+     queue is empty, and the re-bootstrap inside it only fires when something
+     LANDED. So an installed app that is resumed rather than cold-started, with
+     nothing waiting to send, never refreshed at all — it could sit on
+     mid-August figures for a fortnight and look perfectly normal doing it.
+
+     Throttled, because resume fires on every tab switch and every unlock, and
+     guarded on `syncing` so it can never race the queue it just drained. */
+  maybeRefresh();
   // Reopening the app is the safest moment to swap in a downloaded update.
   if (typeof applyUpdateIfSafe === 'function') applyUpdateIfSafe();
 }
+
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') onAppResume();
   else stashBentaDraft();      // backgrounded mid-entry: keep what is typed

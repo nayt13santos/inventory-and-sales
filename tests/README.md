@@ -674,3 +674,19 @@ Three tests, **33 mutants**. The first pass killed 14 of 20, and every one of th
 **One branch that production cannot reach.** A bare day that falls twice in one period needs a cutoff spanning two months, and 1–15 / 16–end never does. The branch stays, because `parseDatedAmounts` takes any period and silently guessing a month is the worst thing it could do with money — so the test builds a synthetic wide period to reach it.
 
 Suites: **208** (`run-tests.js`) + **258** (`contract.test.js`).
+
+### v2.19.0 — four guards, after a real loss
+
+Three tests, **21 mutants, all red on the first pass.**
+
+That first-pass result is not a boast, it is a consequence: these guards exist *because* a specific loss happened, so the tests were written from the actual failure rather than from imagination. Every mutant is a way the loss could recur — the guard not consulted, consulted but its answer ignored, asked second in a queue of dialogs, or firing so often it becomes noise.
+
+Two mutants are about **noise**, not correctness, and they matter as much as the rest: `emptiesEverything = emptied.length > 0` (challenges an ordinary last-bag night) and `= rows.length > 1` (challenges any multi-product plan). A warning that fires on normal nights gets tapped through, and then it is not a guard at all.
+
+Two are about **what the words say**, because a guard whose message is vague cannot be acted on: dropping the quantities from the loss list, and dropping the sentence that explains which way round the catch-up box is. That sentence is the entire misunderstanding.
+
+**One mutant restores a bug rather than introducing one:** putting back `"nothing in the note"` in `catchLandsText`. It had been true when written and was made false by v2.15.0 — the kind of defect no test catches unless a test asserts the *current* truth, which this one now does, including that the false promise is **gone** and not merely softened.
+
+**A slab mistake, for the third time this session.** `lastBootstrapAt` went in beside `onAppResume` — its caller — instead of beside `doBootstrap`, which is what writes it. `doBootstrap` is lifted for the sync tests, `onAppResume` is not, so the harness threw `ReferenceError: lastBootstrapAt is not defined` from inside a function that works perfectly in a browser. The rule, restated: **a helper belongs beside its subject, not beside its caller.**
+
+Suites: **208** (`run-tests.js`) + **261** (`contract.test.js`).

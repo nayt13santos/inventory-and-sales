@@ -238,6 +238,8 @@ return {
   tinCountFor, tinVerdict, applyLocalTinCount, applyLocalCutoffSplit,
   // v2.13.0: the run of nights nobody logged anything as opened.
   openedGap, openedGapText, stockCardHTML, logsNoSupplies,
+  // v2.19.0: what a day save would DESTROY, and the shelf-emptying challenge.
+  daySaveRisk, catchEmptyWarning,
   // v2.13.1: what was opened, worked out from what is left on the shelf.
   catchUpPlan, catchUpNight, catchUpFill,
   // v2.14.0: what was used between two counts — measured, not remembered.
@@ -3687,6 +3689,10 @@ return {
   applyLocalStockDelivery, applyLocalDeleteExpense, sanitizeQueue,
   applyServerDay, reapplyQueue,
   enqueue, drainQueue, doBootstrap,
+  // v2.19.0: the resume refresh, and the stamp it throttles on.
+  maybeRefresh,
+  get lastBootstrapAt(){ return lastBootstrapAt; },
+  set lastBootstrapAt(v){ lastBootstrapAt = v; },
   noteAttention, attentionForDate, dateNotInSheet, daySavedMessage, clearAttentionFor,
   attnCopy, persistAttention, isLegacyGcashPayload,
   loadBentaForm, bentaPayload, computeDay, computeCutoff, validateBenta,
@@ -5327,6 +5333,154 @@ test('SOURCE PIN: the Expenses screen steps, and every rule follows the shown cu
     'the comparison follows the stepper');
 });
 
+test("A DAY SAVE SAYS WHAT IT WOULD DESTROY (v2.19.0)", () => {
+  // 2026-09-01, from his live sheet. A day save REPLACES its date's StockUsage
+  // rows (rewriteDateBlock) rather than merging, which is right — it is how a
+  // corrected night corrects. But it means the card must be showing what the
+  // sheet holds, and two things silently break that.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const day = Object.keys(app.state.days).filter(d => d < app.todayStr()).sort().pop();
+  assert.ok(day, 'the fixture has a past day');
+
+  // NOTHING TO SAY about today: today is being entered, not re-entered.
+  assert.strictEqual(app.daySaveRisk({ date: app.todayStr(), stock: [] }), '');
+  assert.strictEqual(app.daySaveRisk({ date: '', stock: [] }), '', 'nor about a junk date');
+  assert.strictEqual(app.daySaveRisk({ date: 'not-a-date', stock: [] }), '');
+
+  // (1) NO LOCAL COPY OF A PAST DAY. The phone cannot see what it is about to
+  // overwrite — this is the case that cost him real data, and the only signal
+  // available is that it holds no record of the date at all.
+  const unknown = app.addDays(day, -400);
+  assert.ok(!app.state.days[unknown], 'precondition: the phone has never seen it');
+  const blind = app.daySaveRisk({ date: unknown, stock: [] });
+  assert.match(blind, /no saved copy/, 'it says the phone has nothing for that day');
+  assert.match(blind, /REPLACES it with what is on screen/, 'and what saving would do');
+  assert.match(blind, /the sales, the wage and the supplies opened/,
+    'naming the money too — the wipe takes more than stock');
+  assert.match(blind, /Sync now/, 'and the one action that fixes it first');
+
+  // (2) DROPPING ROWS THE PHONE ITSELF HOLDS. Here it CAN name them.
+  app.state.stockUsage[day] = [
+    { date: day, product: 'Takoyaki Flour', qty: 17, entry_id: 'r-1' },
+    { date: day, product: 'Takoyaki Sauce', qty: 3, entry_id: 'r-2' }
+  ];
+  const dropAll = app.daySaveRisk({ date: day, stock: [] });
+  assert.match(dropAll, /will REMOVE what was logged as opened/);
+  assert.match(dropAll, /Takoyaki Flour/, 'the products are NAMED');
+  assert.match(dropAll, /Takoyaki Sauce/);
+  assert.match(dropAll, /17/, 'with their quantities, so the size of the loss is visible');
+  assert.match(dropAll, /replaces that night's supplies rather than adding/, 'and why');
+
+  // Dropping ONE of two names only that one.
+  const dropOne = app.daySaveRisk({ date: day,
+    stock: [{ product: 'Takoyaki Flour', qty: 17 }] });
+  assert.match(dropOne, /Takoyaki Sauce/);
+  assert.ok(dropOne.indexOf('Takoyaki Flour') < 0, 'a row being kept is not reported as lost');
+
+  // SENDING EVERYTHING BACK is silent — which is the ordinary case, and the one
+  // that must not train her to tap through the dialog.
+  assert.strictEqual(app.daySaveRisk({ date: day, stock: [
+    { product: 'Takoyaki Flour', qty: 17 }, { product: 'Takoyaki Sauce', qty: 3 }] }), '');
+  // ADDING to a night is silent too — that is the whole point of the fix he needs.
+  assert.strictEqual(app.daySaveRisk({ date: day, stock: [
+    { product: 'Takoyaki Flour', qty: 17 }, { product: 'Takoyaki Sauce', qty: 3 },
+    { product: 'Bonito', qty: 2 }] }), '');
+  // A zero is not a row: it carries no quantity, so it cannot be "lost".
+  app.state.stockUsage[day] = [{ date: day, product: 'Takoyaki Flour', qty: 0, entry_id: 'r-0' }];
+  assert.strictEqual(app.daySaveRisk({ date: day, stock: [] }), '');
+});
+
+test('THE CATCH-UP CHALLENGES A PLAN THAT EMPTIES THE SHELF (v2.19.0)', () => {
+  // Owner, 2026-09-01. He typed 0 in every box — a natural "nothing / I do not
+  // know" — and the boxes ask what is REALLY LEFT. So the plan claimed his whole
+  // shelf had been opened in one night, wrote 12 flour / 4 sauce / 3 mayo /
+  // 1 bonito into 2026-09-01, and his Stock-on-hand screen then read zero
+  // everywhere. Every individual figure was legal; nothing warned him.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const flour = app.state.stockItems.find(x => x.product === 'Takoyaki Flour');
+  const sauce = app.state.stockItems.find(x => x.product === 'Takoyaki Sauce');
+  flour.unit_cost = 120; sauce.unit_cost = 490;
+  const onHand = {};
+  for (const s of app.stockStatusList()) onHand[s.product] = s.on_hand;
+  const withStock = Object.keys(onHand).filter(k => onHand[k] > 0);
+  assert.ok(withStock.length >= 2, 'the fixture has stock on at least two products');
+
+  // A BLANK BOX IS STILL SKIPPED — the iron rule was never broken here, which is
+  // why the fix is a challenge and not a parsing change.
+  assert.deepStrictEqual(app.catchUpPlan({}).rows, [], 'nothing typed, nothing planned');
+  assert.deepStrictEqual(app.catchUpPlan({ 'Takoyaki Flour': '' }).rows, [], 'blank is not zero');
+
+  // ZERO IN EVERY BOX: the plan is flagged, because nothing is left anywhere.
+  const zeros = {};
+  for (const k of Object.keys(onHand)) zeros[k] = '0';
+  const all = app.catchUpPlan(zeros);
+  assert.strictEqual(all.rows.length, withStock.length, 'one row per product that had stock');
+  assert.strictEqual(all.emptiesEverything, true, 'and it is flagged as suspect');
+
+  // ONE PRODUCT GOING TO ZERO IS ORDINARY — the last bag of bonito — and must
+  // NOT be challenged, or the warning becomes noise and stops being read.
+  const one = {};
+  one[withStock[0]] = '0';
+  assert.strictEqual(app.catchUpPlan(one).emptiesEverything, false,
+    'a single product emptying is a normal night');
+
+  // A PLAN THAT LEAVES SOMETHING is not challenged either.
+  const some = {};
+  for (const k of withStock) some[k] = String(Math.max(0, onHand[k] - 1));
+  const partial = app.catchUpPlan(some);
+  assert.ok(partial.rows.length >= 2, 'precondition: more than one row');
+  assert.strictEqual(partial.emptiesEverything, false, 'one unit left is not an empty shelf');
+
+  // THE WORDS. It names every quantity, names the mistake, and the safe answer
+  // is "no" — because the plan LOOKS normal and only the whole-shelf shape gives
+  // it away.
+  const w = app.catchEmptyWarning(all);
+  assert.match(w, /NOTHING is left of anything/);
+  for (const k of withStock) assert.ok(w.indexOf(k) >= 0, 'names ' + k);
+  assert.match(w, /what is REALLY LEFT on the shelf — not how much to log/,
+    'it says which way round the box is, which is the whole misunderstanding');
+  assert.match(w, /leave those boxes EMPTY instead/, 'and what to do instead');
+  assert.match(w, /Is the shelf really empty\?$/, 'ending on the question, safe answer "no"');
+});
+
+test('SOURCE PIN: the guards are wired where they cannot be skipped (v2.19.0)', () => {
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+
+  // THE DESTRUCTION QUESTION IS ASKED FIRST. Behind "no sales are entered" it
+  // would be second in a queue of dialogs, which is how dialogs stop being read.
+  const save = src.slice(src.indexOf('function saveBenta(){'), src.indexOf('function saveBenta(){') + 3000);
+  const risk = save.indexOf('daySaveRisk(p)');
+  const noSales = save.indexOf('No sales are entered');
+  assert.ok(risk > 0, 'saveBenta consults it');
+  assert.ok(risk < noSales, 'and BEFORE the softer questions');
+  assert.match(save, /if \(risk && !confirm\(risk\)\) return;/, 'and a "no" stops the save');
+
+  // THE SHELF CHALLENGE IS IN THE FILL, before anything is written.
+  const fill = src.slice(src.indexOf('function catchUpFill(){'), src.indexOf('function catchUpFill(){') + 1400);
+  assert.match(fill, /if \(plan\.emptiesEverything && !confirm\(catchEmptyWarning\(plan\)\)\) return;/,
+    'a shelf-emptying plan is challenged before it fills a night');
+
+  // THE RESUME REFRESH. Wired into onAppResume, and guarded on every state where
+  // a background fetch would be wrong.
+  const resume = src.slice(src.indexOf('function onAppResume(){'), src.indexOf('function onAppResume(){') + 1800);
+  assert.match(resume, /maybeRefresh\(\);/, 'resume pulls fresh figures');
+  const mr = src.slice(src.indexOf('function maybeRefresh(){'), src.indexOf('async function doBootstrap(){'));
+  for (const guard of ['config.apiUrl', 'syncing', 'asArr(queue).length', 'isTypingNow']){
+    assert.ok(mr.indexOf(guard) >= 0, 'maybeRefresh guards on ' + guard);
+  }
+  assert.match(mr, /doBootstrap\(\)\.catch\(\(\) => \{\}\)/, 'and it is silent on failure');
+
+  // The stamp is set ONLY on a bootstrap that landed, or a run of failures goes
+  // quiet for five minutes on a stale screen.
+  const boot = src.slice(src.indexOf('async function doBootstrap(){'), src.indexOf('function applyBootstrap(data){'));
+  const stamp = boot.indexOf('lastBootstrapAt = Date.now()');
+  const catchAt = boot.indexOf('}catch(e){');
+  assert.ok(stamp > 0 && stamp < catchAt, 'stamped in the success path only');
+  assert.ok(boot.indexOf('applyBootstrap(data)') < stamp, 'and after the reply is applied');
+});
+
 test('A LIST OF DATED AMOUNTS, TYPED ONCE (v2.18.0)', () => {
   // Owner, 2026-09-01: "can you add the supplies I sent to you, I dont want to
   // input manually" — after writing out ten back-dated expenses in one message
@@ -5704,13 +5858,21 @@ test('CATCH UP can target a cutoff that has ENDED (v2.14.1)', () => {
   assert.strictEqual(app.catchUpTarget(), lastPer.end,
     'a night in a finished cutoff is allowed — that is the whole point');
 
-  // It SAYS where the value lands, and that the note cannot move.
+  // It SAYS where the value lands, and — since v2.19.0 — the TRUTH about the
+  // note. This sentence used to promise "nothing in the note", which v2.15.0
+  // made false when it put the supplies-used line INTO the note. It is the
+  // sentence that tells him a settled cutoff is safe to touch, so a false
+  // reassurance here is worse than no sentence at all.
   const lands = app.catchLandsText(lastPer.end);
   assert.match(lands, /cutoff, which has already ended/, 'it names the fortnight and its state');
   assert.match(lands, /Supplies used/, 'and what changes there');
-  assert.match(lands, /no total, no share, and nothing in the note/,
-    'and what cannot change, which is what makes choosing a past night safe');
+  assert.match(lands, /changes the “Supplies used \(opened\)” line of that cutoff's note/,
+    'it admits the note line DOES move — v2.15.0 made the old promise false');
+  assert.match(lands, /no total and no share/,
+    'and what still cannot change, which is what makes choosing a past night safe');
   assert.match(lands, /money PAID, not from stock opened/, 'saying why');
+  assert.ok(!/nothing in the note/.test(lands),
+    'the false promise is gone, not merely softened');
 
   // A night in THIS cutoff says so instead.
   assert.match(app.catchLandsText(auto), /the one running now/);
