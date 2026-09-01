@@ -704,3 +704,17 @@ The third: `cutoffWithSplit` dropping the merged figure went unnoticed because n
 **An assertion I wrote and then deleted, because it tested a path that does not exist.** I asserted `buildNote(serverFigures)` matches `buildNote(localFigures)`, on the belief that the phone's builder is handed the server's snake_case reply. It is not: its only two call sites both pass `computeCutoff(per)`. So the snake_case read in `noteMinorVal` is *defensive*, not live, and the test now says so instead of implying a contract. What **is** live is the archived-row fallback, and that is what gets asserted.
 
 Suites: **209** (`run-tests.js`) + **263** (`contract.test.js`).
+
+### v2.21.0 — the opening balance, and a count you can date
+
+Three tests, **15 mutants, all red.**
+
+**The slab rule bit for the FOURTH time this session**, and in a new way: `openingCountFor` went in immediately *before* `stockCutoffHTML`, which is exactly where `S_STOCKCUT` **begins** — so the helper sat one line outside the lifted region and every test touching that block threw `ReferenceError`. Beside-its-subject is not enough; it has to be *inside the marker*. Same again for `countDateFor` / `countDateHint` / `countDateDraft`, which were in the Stock screen's own section — no slab covers it — and had to move in beside `openingCountFor` to be testable at all. That is now four for four: **check the slab boundary, not just the neighbourhood.**
+
+**One assertion that failed for the right reason and told me the feature worked.** `/1 Bag came in/` failed because the fixture's unit is `pack`, not `Bag` — and the failure message printed the rendered row: *"1 pack at the start, 1 pack came in, 2 packs opened"*. The unit is fixture data; the ARITHMETIC is the contract. The assertions are unit-agnostic now.
+
+**A mutant I expected to survive and didn't:** showing the opening balance LAST instead of first. It changes no figure — but the test pins the ORDER, because a row whose numbers arrive out of sequence stops being arithmetic anyone can check, which is the entire point of the change.
+
+**And one deliberate non-guard.** `countDateFor()` returns `'0002-08-31'` unchanged rather than swapping in today. A reader that silently repairs its input hides the mistake; `saveStockCountNow` refuses it in the server's own words instead, and the test says so explicitly so a future "fix" doesn't quietly add the swap.
+
+Suites: **209** (`run-tests.js`) + **266** (`contract.test.js`).

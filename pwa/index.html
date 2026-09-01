@@ -598,7 +598,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.20.0';
+const APP_VERSION = '2.21.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -6982,13 +6982,18 @@ function stockCutoffHTML(per){
         }
       }
     }
-    if (arrived || opened || counted) rows.push({ product, unit: txt(asObj(it).unit), arrived, opened, counted });
+    if (arrived || opened || counted) rows.push({ product, unit: txt(asObj(it).unit), arrived, opened, counted,
+      opening: openingCountFor(product, per) });
   }
   if (!rows.length) return '';
   let h = '<div class="section-title">Stock this cutoff</div><div class="card">' +
     '<p class="hint" style="margin-bottom:10px;">Counted from what was logged — the paper supplies count, done for you. No money in it, and it is in no figure above.</p>';
   for (const r of rows){
     const bits = [];
+    // THE OPENING BALANCE FIRST (v2.21.0), so the row is arithmetic he can check
+    // rather than two figures that look contradictory: "1 at the start, 1 came
+    // in, 2 opened" against "counted 0" adds up on its face.
+    if (r.opening) bits.push(qtyWithUnit(r.opening.qty, r.unit) + ' at the start');
     if (r.arrived) bits.push(qtyWithUnit(r.arrived, r.unit) + ' came in');
     if (r.opened) bits.push(qtyWithUnit(r.opened, r.unit) + ' opened');
     h += '<div class="co-row"><span>' + esc(r.product) +
@@ -6997,6 +7002,62 @@ function stockCutoffHTML(per){
       '<span class="v">' + esc(bits.join(', ') || '—') + '</span></div>';
   }
   return h + '</div>';
+}
+
+/* THE DATE A CORRECTION IS FOR (v2.21.0). It used to be hard-wired to today, so
+   a count typed wrong on the 31st could never be put right from the app — the
+   server has always accepted a backdated count (reqEntryDate on the payload);
+   only this screen refused to offer one. It is also the ONLY way to settle two
+   counts of one day that disagree: a newer count for that same date wins on
+   updated_at, on the phone and on the sheet alike, so re-counting the date
+   replaces the answer without needing a delete this app does not have. */
+let countDateDraft = '';
+
+/** The date the open correction is for — today until he changes it. */
+function countDateFor(){
+  return isDateStr(countDateDraft) ? txt(countDateDraft) : todayStr();
+}
+
+/** What the count will MEAN, which depends entirely on its date: a count is an
+ *  end-of-day figure, so everything delivered or opened AFTER it still counts on
+ *  top. Backdating one is therefore not a small thing and the screen says so. */
+function countDateHint(){
+  const d = countDateFor();
+  if (d === todayStr()){
+    return 'Count what is on the shelf at closing time today. From now on, on hand is ' +
+      'this figure plus what arrives and minus what is opened.';
+  }
+  return 'This becomes the figure for the close of ' + fmtShort(d) +
+    '. Anything delivered or opened AFTER that day still counts on top of it, so on hand ' +
+    'may not equal what you type. If that day already has a count, this replaces it.';
+}
+
+/** WHAT A CUTOFF STARTED WITH (v2.21.0), or null when no count precedes it.
+ *
+ *  Owner, 2026-09-02: "how to correct the count of bonito, it says 1 bag came in
+ *  2 bags opened." Nothing needed correcting — he had a bag already, from the
+ *  Aug 15 count. The line simply never said so, and "1 came in, 2 opened" reads
+ *  as impossible without it. An opening balance is the difference between a
+ *  figure he can check and a figure he has to take on trust.
+ *
+ *  null, never 0, when nothing was counted before the period: blank is never
+ *  zero, and "started with 0" would be a claim this cannot support. */
+function openingCountFor(product, per){
+  const start = txt(asObj(per).start);
+  if (!isDateStr(start)) return null;
+  let best = null;
+  const cnts = asObj(state.stockCounts);
+  for (const d in cnts){
+    if (!isDateStr(d) || d >= start) continue;
+    for (const r of asArr(cnts[d])){
+      const c = asObj(r);
+      if (txt(c.product) !== txt(product)) continue;
+      if (!best || d > best.date || (d === best.date && txt(c.updated_at) >= best.updated_at)){
+        best = { date: d, qty: num(c.counted_qty), updated_at: txt(c.updated_at) };
+      }
+    }
+  }
+  return best;
 }
 
 /** SUPPLIES IN TWO LINES (v2.16.0). The owner's own words, 2026-09-01:
@@ -7677,12 +7738,14 @@ function stockOnHandHTML(){
       (stockRunwayText(s) ? '<div class="st-sub">' + esc(stockRunwayText(s)) + '</div>' : '') +
       (isCounting
         ? '<div class="st-count">' +
-            '<div><label for="stCountIn">Counted today</label>' +
+            '<div><label for="stCountIn">Counted</label>' +
               '<input class="input money" id="stCountIn" inputmode="numeric" autocomplete="off" placeholder="0" value="' + esc(countDraft) + '"></div>' +
             '<button type="button" class="btn small primary" data-act="count-save" data-product="' + nm + '">Save count</button>' +
             '<button type="button" class="btn small" data-act="count-cancel">Cancel</button>' +
           '</div>' +
-          '<p class="hint" style="margin-top:8px;">Count what is on the shelf at closing time today. From now on, on hand is this figure plus what arrives and minus what is opened.</p>' +
+          '<div class="field" style="margin-top:8px;"><label for="stCountDate">Which day was it counted?</label>' +
+            '<input class="input" type="date" id="stCountDate" value="' + esc(countDateFor()) + '" max="' + todayStr() + '"></div>' +
+          '<p class="hint" id="count-date-hint" style="margin-top:8px;">' + esc(countDateHint()) + '</p>' +
           '<p class="err" id="err-count" hidden></p>'
         : '<div class="st-acts"><button type="button" class="btn small" data-act="count-open" data-product="' + nm + '">Correct the count</button></div>') +
     '</div>';
@@ -7708,6 +7771,7 @@ function openCount(product){
   // confirms it is one tap. A negative one starts blank — there is nothing
   // sensible to confirm.
   countDraft = s && s.on_hand > 0 ? String(s.on_hand) : '';
+  countDateDraft = todayStr();     // a fresh correction is for today until changed
   renderIbapa();
   const f = $('stCountIn');
   if (f) f.focus();
@@ -7725,15 +7789,22 @@ function saveStockCountNow(product){
     }
     return;
   }
-  // Dated TODAY: a stocktake is what you can see now, and the server reads it as
-  // an end-of-day figure that already includes today's deliveries and usage.
-  const payload = { date: todayStr(), product: p, qty, entryId: uuid() };
+  // The DATE it is for (v2.21.0) — today unless he picked another. Refused here
+  // in the server's own words, so a half-typed year never queues.
+  const when = countDateFor();
+  const dateBad = entryDateError(when);
+  if (dateBad){
+    if (err){ err.textContent = dateBad; err.hidden = false; }
+    return;
+  }
+  const payload = { date: when, product: p, qty, entryId: uuid() };
   applyLocalStockCount(payload);
   enqueue('saveStockCount', payload);
   persistState();
-  countingProduct = ''; countDraft = '';
+  countingProduct = ''; countDraft = ''; countDateDraft = '';
   renderIbapa();
-  toast(p + ': counted ' + qtyWithUnit(qty, stockUnitOf(p)) + '. That is the new starting figure.');
+  toast(p + ': counted ' + qtyWithUnit(qty, stockUnitOf(p)) +
+    (when === todayStr() ? '' : ' on ' + fmtShort(when)) + '. That is the new starting figure.');
   drainQueue();
 }
 
@@ -9615,7 +9686,7 @@ document.addEventListener('click', (ev) => {
 
   // Stock on hand
   else if (act === 'count-open') openCount(el.dataset.product);
-  else if (act === 'count-cancel'){ countingProduct = ''; countDraft = ''; renderIbapa(); }
+  else if (act === 'count-cancel'){ countingProduct = ''; countDraft = ''; countDateDraft = ''; renderIbapa(); }
   else if (act === 'count-save') saveStockCountNow(el.dataset.product);
   else if (act === 'arrive-open'){
     arriving = true;
@@ -9765,6 +9836,17 @@ document.addEventListener('input', (ev) => {
         if (r){ r[field] = Math.max(0, num(ev.target.value)); benta.dirty = true; afterCountChange(sku); }
       }
     }
+  }
+
+  // The count's date (v2.21.0). Only the derived sentence is rewritten: this is
+  // a typed field, and rebuilding the panel would replace it mid-entry.
+  else if (id === 'stCountDate'){
+    countDateDraft = ev.target.value;
+    setErr('err-count', ev.target.value ? entryDateError(ev.target.value) : '');
+    // A STABLE ID, patched with textContent — the pattern every other derived
+    // line on this screen uses (see catch-note-N, catch-lands).
+    const hint = $('count-date-hint');
+    if (hint) hint.textContent = countDateHint();
   }
 
   // Expenses fields

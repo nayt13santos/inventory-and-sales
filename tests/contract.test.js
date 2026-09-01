@@ -270,6 +270,11 @@ return {
   splitFieldAmount, liveCutoff, pendingSplit, splitDefault, cutoffWithSplit,
   noteAttention, attentionForDate, dateNotInSheet, daySavedMessage,
   stockRowSaid, stockCardHTML, stockCutoffHTML, wageCardHTML, wageIsCustom, wageSummary,
+  // v2.21.0: what a cutoff STARTED with, so "1 came in, 2 opened" adds up,
+  // and the date a stock correction is FOR.
+  openingCountFor, countDateFor, countDateHint,
+  get countDateDraft(){ return countDateDraft; },
+  set countDateDraft(v){ countDateDraft = v; },
   priceRowError,
   // v2.4.0: the flag whose BLANK means TRUE, the per-sku lookup the screens read,
   // and the period's excluded block (display only).
@@ -5339,6 +5344,133 @@ test('SOURCE PIN: the Expenses screen steps, and every rule follows the shown cu
   const submit = src.slice(src.indexOf('function submitGasto(){'), src.indexOf('function deleteGasto('));
   assert.match(submit, /const here = gastosPer \|\| currentPeriod\(todayStr\(\)\)/,
     'the comparison follows the stepper');
+});
+
+test('THE CUTOFF STOCK BLOCK SHOWS WHAT IT STARTED WITH (v2.21.0)', () => {
+  // Owner, 2026-09-02: "how to correct the count of bonito, it says 1 bag came
+  // in 2 bags opened." Nothing needed correcting — he had a bag already, from
+  // the Aug 15 count. The row simply never said so, and "1 came in, 2 opened"
+  // against "counted 0" reads as impossible without it.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  for (const k in app.state.stockCounts) delete app.state.stockCounts[k];
+  for (const k in app.state.stockDeliveries) delete app.state.stockDeliveries[k];
+  for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
+  const per = { start: '2026-08-16', end: '2026-08-31' };
+
+  // HIS EXACT BONITO HISTORY.
+  app.state.stockCounts['2026-08-15'] = [{ date: '2026-08-15', product: 'Bonito',
+    counted_qty: 1, entry_id: 'c15', updated_at: '2026-08-19 18:50:55' }];
+  app.state.stockCounts['2026-08-31'] = [
+    { date: '2026-08-31', product: 'Bonito', counted_qty: 2, entry_id: 'c31a', updated_at: '2026-08-31 23:57:33' },
+    { date: '2026-08-31', product: 'Bonito', counted_qty: 0, entry_id: 'c31b', updated_at: '2026-08-31 23:57:38' }
+  ];
+  app.state.stockDeliveries['2026-08-27'] = [{ date: '2026-08-27', product: 'Bonito',
+    qty: 1, entry_id: 'd27', updated_at: '2026-08-27 22:37:11' }];
+  app.state.stockUsage['2026-08-31'] = [{ date: '2026-08-31', product: 'Bonito',
+    qty: 2, entry_id: 'u31' }];
+
+  // THE OPENING BALANCE is the latest count BEFORE the period, not inside it.
+  const op = app.openingCountFor('Bonito', per);
+  assert.deepStrictEqual([op.date, op.qty], ['2026-08-15', 1],
+    'the Aug 15 count is what this cutoff started from');
+  // The two Aug 31 counts are INSIDE the period and must not be mistaken for it.
+  assert.ok(op.date < per.start, 'strictly before the period begins');
+
+  // AND THE ROW NOW ADDS UP ON ITS FACE: 1 + 1 - 2 = 0.
+  // Unit-agnostic on purpose: the unit is fixture data, the ARITHMETIC is the
+  // contract. 1 at the start + 1 in - 2 opened = the 0 that was counted.
+  const html = app.stockCutoffHTML(per);
+  assert.match(html, /1 \w+ at the start/, 'what it started with');
+  assert.match(html, /1 \w+ came in/);
+  assert.match(html, /2 \w+s? opened/);
+  assert.match(html, /counted 0 \w+s? on August 31/);
+  const at = html.indexOf('at the start'), came = html.indexOf('came in');
+  assert.ok(at < came, 'the opening balance is FIRST, so the row reads as arithmetic');
+
+  // NO COUNT BEFORE THE PERIOD: null, never 0. "Started with 0" would be a claim
+  // this cannot support, and blank is never zero.
+  assert.strictEqual(app.openingCountFor('Bonito', { start: '2026-08-01', end: '2026-08-15' }), null,
+    'nothing counted before it means UNKNOWN');
+  const early = app.stockCutoffHTML({ start: '2026-08-01', end: '2026-08-15' });
+  assert.ok(early.indexOf('at the start') < 0, 'and the phrase is simply absent');
+
+  // A PRODUCT WITH NO HISTORY AT ALL, and junk dates, are quiet rather than 0.
+  assert.strictEqual(app.openingCountFor('Japanese Mayo', per), null);
+  assert.strictEqual(app.openingCountFor('Bonito', {}), null, 'no period, no answer');
+  assert.strictEqual(app.openingCountFor('Bonito', { start: 'nope', end: 'nope' }), null);
+
+  // TWO COUNTS ON THE SAME EARLIER DAY: the later one wins, the same rule the
+  // baseline uses, so the block and the on-hand figure cannot disagree.
+  app.state.stockCounts['2026-08-15'].push({ date: '2026-08-15', product: 'Bonito',
+    counted_qty: 5, entry_id: 'c15b', updated_at: '2026-08-19 19:00:00' });
+  assert.strictEqual(app.openingCountFor('Bonito', per).qty, 5, 'the later entry of that day');
+});
+
+test('THE DATE A COUNT IS FOR, and what it means (v2.21.0)', () => {
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const today = app.todayStr();
+
+  // TODAY UNTIL HE CHANGES IT, and junk falls back rather than queueing a bad date.
+  app.countDateDraft = '';
+  assert.strictEqual(app.countDateFor(), today);
+  app.countDateDraft = 'nonsense';
+  assert.strictEqual(app.countDateFor(), today, 'junk is not a date');
+  app.countDateDraft = '0002-08-31';
+  assert.strictEqual(app.countDateFor(), '0002-08-31',
+    'a well-formed but absurd date IS returned — saveStockCountNow refuses it in the ' +
+    'server\'s own words rather than this reader silently swapping it');
+  app.countDateDraft = '2026-08-31';
+  assert.strictEqual(app.countDateFor(), '2026-08-31', 'and a real pick is honoured');
+
+  // WHAT IT MEANS depends entirely on the date, because a count is an end-of-day
+  // figure and everything after it still applies on top.
+  app.countDateDraft = today;
+  const now = app.countDateHint();
+  assert.match(now, /closing time today/);
+  app.countDateDraft = '2026-08-31';
+  const back = app.countDateHint();
+  assert.match(back, /close of/, 'a backdated count names the day it is for');
+  assert.match(back, /delivered or opened AFTER that day still counts on top/,
+    'and warns that later rows still apply, so on hand may not equal what he typed');
+  assert.match(back, /this replaces it/, 'and that it settles a day already counted');
+  assert.notStrictEqual(now, back, 'the two cases do not read the same');
+});
+
+test('SOURCE PIN: a count can be dated, and says what that means (v2.21.0)', () => {
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+  const save = src.slice(src.indexOf('function saveStockCountNow(product){'),
+                         src.indexOf('function saveStockCountNow(product){') + 1600);
+
+  // THE DATE IS CHOSEN, not assumed. The server always accepted a backdated
+  // count; only this screen refused to offer one, which left a count typed wrong
+  // on the 31st impossible to put right from the app.
+  assert.match(save, /const when = countDateFor\(\);/, 'the save reads the chosen date');
+  assert.ok(save.indexOf('date: todayStr()') < 0, 'and no longer hard-wires today');
+  assert.match(save, /const dateBad = entryDateError\(when\);/,
+    'refused in the server\'s own words, so a half-typed year never queues');
+  assert.match(save, /payload = \{ date: when,/);
+
+  // THE FIELD, bounded at today — money cannot be counted into the future.
+  const ui = src.slice(src.indexOf('id="stCountDate"') - 200, src.indexOf('id="stCountDate"') + 260);
+  assert.match(ui, /type="date"/);
+  assert.match(ui, /max="' \+ todayStr\(\) \+ '"/, 'no future counts');
+
+  // WHAT IT MEANS depends entirely on the date, and the screen says so.
+  const hint = src.slice(src.indexOf('function countDateHint(){'), src.indexOf('function saveStockCountNow'));
+  assert.match(hint, /closing time today/, 'today reads as it always did');
+  assert.match(hint, /delivered or opened AFTER that day still counts on top/,
+    'and a backdated count warns that later rows still apply');
+  assert.match(hint, /this replaces it/, 'and that it settles a day already counted');
+
+  // TYPING PATCHES THE SENTENCE, never the panel — a stable id, like every other
+  // derived line on this screen.
+  const listener = src.slice(src.indexOf("document.addEventListener('input'"),
+                             src.indexOf("document.addEventListener('change'"));
+  assert.match(listener, /id === 'stCountDate'/);
+  assert.match(listener, /\$\('count-date-hint'\)/, 'patched by id');
+  assert.match(listener, /hint\.textContent = countDateHint\(\)/, 'with textContent');
 });
 
 test('SUPPLIES (MINOR) IS EVERY ENTRY, WHATEVER BUCKET WAS TAPPED (v2.20.0)', () => {

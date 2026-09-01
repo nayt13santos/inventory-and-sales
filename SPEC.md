@@ -612,6 +612,27 @@ total = mama + split + supplies + octopus + salary + other + electric + remainin
 
 **Nothing is lost.** The three parts stay on the figures object and keep their own `Cutoffs` columns, so the archive holds the detail the note no longer prints. `supplies_minor` is computed, never stored — which is why `minorVal` / `noteMinorVal` fall back to summing the three parts when handed a figures object that has no merged field (an archived row, an older cached reply). Both sides share one precedence, pinned on both: the merged field wins, an explicit `0` is a figure, a blank falls back.
 
+### v2.21.0 — the opening balance, and a count you can date
+
+Owner, 2026-09-02: *"how to correct the count of bonito, it says 1 bag came in 2 bags opened."*
+
+**Nothing needed correcting.** He had a bag already, from the Aug 15 count: 1 on the shelf, +1 arrived Aug 27, −2 opened = the 0 that was counted on the 31st. The row simply never said so, and *"1 came in, 2 opened"* against *"counted 0"* reads as impossible without it.
+
+**1. The cutoff stock block shows what the period started with.** `openingCountFor(product, per)` is the latest count strictly BEFORE the period, so the row is arithmetic he can check on its face:
+
+```
+Bonito · counted 0 Bags on August 31
+  1 Bag at the start, 1 Bag came in, 2 Bags opened
+```
+
+`null`, never `0`, when nothing was counted before the period — "started with 0" is a claim this cannot support, and blank is never zero. Two counts on the opening day resolve by `updated_at`, the same rule the baseline uses, so the block and the on-hand figure cannot disagree.
+
+**2. "Correct the count" can be dated.** It was hard-wired to `todayStr()`, so a count typed wrong on the 31st could never be put right from the app — while the server has always accepted a backdated count (`reqEntryDate` on the payload). Only this screen refused to offer one.
+
+It is also the **only** way to settle two counts of one day that disagree: a newer count for that date wins on `updated_at`, on the phone and on the sheet alike, so re-counting the date replaces the answer without needing a delete this app does not have.
+
+The sentence under the field changes with the date, because what a count MEANS depends on it: a count is an end-of-day figure, so anything delivered or opened after that day still counts on top of it. A backdated one says so, and says it replaces a day already counted. Bounded at today; refused in the server's own words via `entryDateError` so a half-typed year never queues.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.
