@@ -147,7 +147,12 @@ const S_VALIDATE  = slab('function isWhole(v){', "/** 'sku:box4' -> 'err-sku-box
 // too — its empty-end-count refusal is the guard that stops an inflated night.
 const S_BLANKS   = slab('function rowUI(r){', 'function syncRowInputs(sku, r){');
 // v2.7.4: the Cutoff screen's stock block, plus the window guard it consults.
-const S_PREVINC   = slab('function missingDaysInPeriod(per){', 'function cutoffExpenseDate(per){');
+// v2.17.0 extended the end marker by exactly one function to bring in
+// cutoffExpenseDate, which was sitting in the gap between two slabs and so had
+// never been lifted or tested. The Expenses screen now depends on it for
+// correctness — it is what stops an entry typed on an earlier cutoff from being
+// dated today and vanishing from the list it was saved on.
+const S_PREVINC   = slab('function missingDaysInPeriod(per){', 'function splitHintText(per, f){');
 const S_STOCKCUT  = slab('function stockCutoffHTML(per){', 'function excludedBlockHTML(f){');
 // The readable name for a sku — what the target table prints, and the one thing
 // in the costing screen that reads a sku out of state rather than the response.
@@ -241,6 +246,9 @@ return {
   catchUpTarget, catchLandsText, sameDayCountClash,
   // v2.16.0: supplies in two lines — major is opened, minor is the daily buying.
   suppliesSplit,
+  // v2.17.0: the Expenses screen can be stepped back to a cutoff that has ended,
+  // and a new entry lands in the cutoff on screen rather than always today.
+  gastosFor, cutoffExpenseDate, gastosWords, periodLabel,
   stashBentaDraft,
   get drafts(){ return drafts; },
   get catchNightPick(){ return catchNightPick; },
@@ -5183,6 +5191,138 @@ test('SOURCE PIN: the Cutoff card separates opened from paid, and a negative exp
     'and names the rule that most often causes it');
   assert.ok(!/Count what is really there and tap/.test(neg),
     'and it no longer tells him to correct the count, which hides the difference');
+});
+
+test('THE EXPENSES SCREEN CAN GO BACK to a cutoff that has ended (v2.17.0)', () => {
+  // Owner, 2026-09-01: "its hard to backtrack in the app", then "for the 8/16
+  // delete my prior entry, use the one I typed here". It was not hard, it was
+  // IMPOSSIBLE: renderGastos listed currentPeriod(todayStr()) and nothing else,
+  // and the delete button only exists on a row the list draws. An expense in a
+  // cutoff that had ended could not be seen, corrected or deleted from the app.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const now = app.currentPeriod('2026-09-05');
+  const prev = app.shiftPeriod(now, -1);
+  const older = app.shiftPeriod(prev, -1);
+
+  // Three expenses, one in each of three consecutive cutoffs.
+  app.applyLocalExpense({ date: '2026-09-03', category: 'Supplies', item: 'Veggies',
+    amount: 111, backlogRef: '', notes: '', entryId: 'gp-now' });
+  app.applyLocalExpense({ date: '2026-08-16', category: 'Supplies', item: 'Veggies',
+    amount: 84, backlogRef: '', notes: '', entryId: 'gp-prev-1' });
+  app.applyLocalExpense({ date: '2026-08-28', category: 'Supplies', item: 'Eggs',
+    amount: 255, backlogRef: '', notes: '', entryId: 'gp-prev-2' });
+  app.applyLocalExpense({ date: '2026-08-04', category: 'Octopus', item: '',
+    amount: 680, backlogRef: '', notes: '', entryId: 'gp-older' });
+
+  // EACH CUTOFF SEES ITS OWN, and no other's.
+  const ids = (per) => app.gastosFor(per).map(e => e.entry_id).sort();
+  assert.deepStrictEqual(ids(now), ['gp-now']);
+  assert.deepStrictEqual(ids(prev), ['gp-prev-1', 'gp-prev-2'],
+    'the cutoff that has ENDED is reachable, which is the whole point');
+  assert.deepStrictEqual(ids(older), ['gp-older']);
+
+  // NEWEST FIRST, so the most recent entry is the one under her thumb.
+  assert.deepStrictEqual(app.gastosFor(prev).map(e => e.date), ['2026-08-28', '2026-08-16']);
+
+  // SAME DAY, MANY ENTRIES: ordered by updated_at within the date, reversed, so
+  // a run of same-day entries reads in the order she typed them.
+  app.state.expenses['gp-a'] = { date: '2026-08-16', category: 'Supplies', item: 'A',
+    amount: 1, backlog_ref: '', notes: '', entry_id: 'gp-a', updated_at: '2026-09-01 21:27:37' };
+  app.state.expenses['gp-b'] = { date: '2026-08-16', category: 'Supplies', item: 'B',
+    amount: 2, backlog_ref: '', notes: '', entry_id: 'gp-b', updated_at: '2026-09-01 21:28:17' };
+  const sameDay = app.gastosFor(prev).filter(e => e.date === '2026-08-16').map(e => e.entry_id);
+  assert.ok(sameDay.indexOf('gp-b') < sameDay.indexOf('gp-a'),
+    'within one date the LATER entry comes first: ' + sameDay.join(','));
+
+  // A BLANK OR JUNK DATE cannot smuggle a row into a period. inPeriod decides,
+  // and it is the same rule the Cutoff screen and the note already use.
+  app.state.expenses['gp-junk'] = { date: '', category: 'Other', item: 'X', amount: 9,
+    backlog_ref: '', notes: '', entry_id: 'gp-junk', updated_at: '' };
+  for (const per of [now, prev, older]){
+    assert.ok(app.gastosFor(per).every(e => e.entry_id !== 'gp-junk'),
+      'a dateless row belongs to no cutoff');
+  }
+
+  // WHAT THE SCREEN CALLS EACH CUTOFF. Every "this cutoff" is false on a screen
+  // that can be stepped, and "No expenses yet this cutoff" over a fortnight that
+  // had plenty is a lie about the business rather than about the screen.
+  const here = app.currentPeriod(app.todayStr());
+  const back = app.shiftPeriod(here, -1);
+  const wNow = app.gastosWords(here), wBack = app.gastosWords(back);
+  assert.strictEqual(wNow.current, true);
+  assert.strictEqual(wBack.current, false);
+  assert.strictEqual(wNow.heading, 'Expenses this cutoff');
+  assert.strictEqual(wBack.heading, 'Expenses', 'an earlier cutoff is not "this" one');
+  assert.strictEqual(wNow.empty, 'No expenses yet this cutoff. Tap + to add one.');
+  assert.strictEqual(wBack.empty, 'Nothing is logged for ' + app.periodLabel(back) + '.',
+    'and an empty earlier cutoff SAYS which cutoff it found nothing in');
+  assert.ok(wBack.empty.indexOf('this cutoff') < 0, 'never "this cutoff" about another one');
+  assert.strictEqual(wNow.sub, 'This cutoff');
+  assert.strictEqual(wBack.sub, String(app.currentPeriod(back.start).start.slice(0, 4)),
+    'and the caption carries the year instead');
+
+  // THE DATE A NEW ENTRY GETS while an earlier cutoff is on screen: the period's
+  // LAST day, never today — or it saves correctly and vanishes from the list he
+  // saved it on. Already the Cutoff screen's rule; now this screen's too.
+  assert.strictEqual(app.cutoffExpenseDate(prev), prev.end);
+  assert.strictEqual(app.cutoffExpenseDate(app.currentPeriod(app.todayStr())), app.todayStr(),
+    'and today when today is inside the cutoff being shown');
+  assert.strictEqual(app.cutoffExpenseDate(app.shiftPeriod(app.currentPeriod(app.todayStr()), 1)), '',
+    'and NOTHING for a cutoff that has not begun');
+});
+
+test('SOURCE PIN: the Expenses screen steps, and every rule follows the shown cutoff (v2.17.0)', () => {
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+  const start = src.indexOf('function renderGastos(){');
+  assert.ok(start > 0);
+  const screen = src.slice(start, src.indexOf('function submitGasto(){'));
+
+  // THE LIST follows the stepper, not the calendar.
+  assert.match(screen, /const per = gastosPer \|\| currentPeriod\(todayStr\(\)\)/,
+    'the screen renders the cutoff being LOOKED AT');
+  assert.ok(!/const per = currentPeriod\(todayStr\(\)\);/.test(screen),
+    'and no longer pins itself to the current one');
+  assert.match(screen, /data-act="gastos-prev"/, 'a way back');
+  assert.match(screen, /data-act="gastos-next"/, 'and forward');
+  assert.match(screen, /previewIncomplete\(per\)/,
+    'an empty list from beyond the phone window must not read as "no expenses"');
+  assert.match(screen, /It reaches further back than this phone keeps/,
+    'and the warning SAYS so — the guard without the sentence teaches nothing');
+  assert.match(screen, /this list is not the full record for this cutoff/,
+    'in words he can act on');
+
+  // EVERY "this cutoff" IS A CLAIM THAT CAN BE FALSE once the screen steps, so
+  // none of them may be written inline: the screen reads gastosWords(), whose
+  // behaviour is tested above. Source-pinning the sentences was NOT enough —
+  // mutating isCurrent's definition left every sentence intact and slipped past.
+  assert.match(screen, /const w = gastosWords\(per\);/, 'the wording comes from the rule');
+  assert.match(screen, /esc\(w\.heading\)/, 'the heading');
+  assert.match(screen, /esc\(w\.empty\)/, 'the empty-list line');
+  assert.match(screen, /esc\(w\.sub\)/, 'the stepper caption');
+  assert.ok(!/isCurrent/.test(screen),
+    'and the screen no longer decides any of it inline');
+  assert.ok(!/'No expenses yet this cutoff/.test(screen),
+    'the wording lives in one place, not two');
+  assert.match(screen, /if \(!cutoffExpenseDate\(per\)\)/,
+    'a cutoff that has not begun is not offered a form it would be refused from');
+
+  // THE HANDLERS move the period AND the date the form will use, together.
+  const acts = src.slice(src.indexOf("act === 'gastos-open'"), src.indexOf("act === 'gastos-pick'"));
+  for (const a of ['gastos-open', 'gastos-prev', 'gastos-next']){
+    assert.ok(acts.indexOf(a) >= 0, a + ' is wired');
+  }
+  assert.strictEqual((acts.match(/cutoffExpenseDate\(/g) || []).length, 3,
+    'all three set the entry date from the cutoff on screen');
+  assert.ok(!/gx\.date = todayStr\(\);/.test(acts),
+    'opening the form no longer always dates the entry today');
+
+  // "SAVED ELSEWHERE" is measured against the cutoff ON SCREEN. Measured against
+  // the current one it would either hide a row that really did land elsewhere or
+  // cry "saved elsewhere" about a row sitting right there in the list.
+  const submit = src.slice(src.indexOf('function submitGasto(){'), src.indexOf('function deleteGasto('));
+  assert.match(submit, /const here = gastosPer \|\| currentPeriod\(todayStr\(\)\)/,
+    'the comparison follows the stepper');
 });
 
 test('SUPPLIES IN TWO LINES: major is opened, minor is the daily buying (v2.16.0)', () => {

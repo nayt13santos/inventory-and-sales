@@ -520,6 +520,27 @@ The Cutoff tab's total card no longer has one `Supplies` row. It has two:
 
 **Blank is never zero, again.** `majorKnown` is false when the quantities are real but no product has a cost on file, and the row prints **—**, not ₱0. A ₱0 there would read as a fortnight that consumed nothing, which a fortnight of takoyaki never does. Three states, three sentences: nothing logged as opened; nothing priced (with the door that fixes it); priced, with any unpriced product **named** rather than folded in at nothing.
 
+### v2.17.0 — the Expenses screen can go back
+
+Owner, 2026-09-01: *"its hard to backtrack in the app"*, then *"for the 8/16 delete my prior entry, use the one I typed here."*
+
+It was not hard, it was **impossible**. `renderGastos` listed `currentPeriod(todayStr())` and nothing else, and the delete button only exists on a row the list draws. So an expense in a cutoff that had ended could not be seen, corrected or deleted from the app at all — the only way to fix a mistyped figure from last fortnight was to open the sheet on a phone.
+
+The screen now carries the **same period stepper the Cutoff screen has** (`gastosPer`, `gastos-prev` / `gastos-next`, null meaning "the one we are in"), and with it four rules that only matter once a screen can lie about which fortnight it is showing:
+
+| rule | why |
+|---|---|
+| `gastosFor(per)` decides the list | one testable rule for what belongs on the screen; newest first, `updated_at` breaking ties within a date |
+| `gastosWords(per)` decides the wording | every "this cutoff" is a claim that can be **false**. `No expenses yet this cutoff` printed over a fortnight that had plenty is a lie about the business, not about the screen |
+| `cutoffExpenseDate(per)` dates a new entry | an entry typed while August is on screen must land in August, or it saves correctly and vanishes from the list it was saved on |
+| `previewIncomplete(per)` warns | for a cutoff older than the phone's window an empty list is **not** evidence there were no expenses |
+
+A cutoff that has **not begun** is offered no form at all, because `cutoffExpenseDate` returns `''` for it and the server would refuse the entry anyway — refusing before asking rather than after.
+
+`gxElsewhere` ("Saved to July 16–31") is now measured against the cutoff **on screen**. Measured against the current one it would either hide a row that really did land elsewhere, or cry "saved elsewhere" about a row sitting right there in the list.
+
+`periodLabel` moved to sit with the other period helpers so `gastosWords` can reach it under test, and the `S_PREVINC` test slab grew by exactly one function to bring in `cutoffExpenseDate`, which had been sitting in the gap between two slabs and so had never been lifted or tested at all.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.

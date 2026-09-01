@@ -279,7 +279,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.16.0';
+var VERSION = '2.17.0';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------

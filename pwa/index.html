@@ -598,7 +598,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.16.0';
+const APP_VERSION = '2.17.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -5860,22 +5860,47 @@ let gx = { open:false, pick:'', amount:'', date:todayStr(), paidFrom:'tin' };
 // correctly but it cannot appear in this list, so it is named here instead of
 // seeming to vanish. { label, item, amount, date }
 let gxElsewhere = null;
+/* WHICH CUTOFF THIS SCREEN IS SHOWING (v2.17.0). Owner, 2026-09-01: "its hard
+   to backtrack in the app." It was impossible, not hard: this screen listed
+   currentPeriod(todayStr()) and nothing else, and the delete button only exists
+   on a row the list draws — so an expense in a cutoff that had ended could not
+   be seen, corrected or deleted from the app at all. The only way out was the
+   sheet, on a phone. null means "the one we are in", exactly like cutoffPer. */
+let gastosPer = null;
 
-// "July 16–31", with the year when it is not the current one.
-function periodLabel(per){
-  const s = d2parts(per.start), e = d2parts(per.end);
-  const sameYear = s.y === d2parts(todayStr()).y;
-  return monthName(per.start) + ' ' + s.d + '–' + e.d + (sameYear ? '' : ', ' + s.y);
-}
 
 function renderGastos(){
-  const per = currentPeriod(todayStr());
-  const items = Object.values(asObj(state.expenses)).filter(isObj)
-    .filter(e => inPeriod(e.date, per))
-    .sort((a,b) => (b.date + (b.updated_at||'')).localeCompare(a.date + (a.updated_at||'')));
+  const per = gastosPer || currentPeriod(todayStr());
+  const w = gastosWords(per);
+  const items = gastosFor(per);
 
-  let h = '<div class="section-title" style="margin-top:4px;">Expenses this cutoff <span class="hint" style="font-weight:600;">(' +
-    periodLabel(per) + ')</span></div>';
+  // THE SAME STEPPER THE CUTOFF SCREEN HAS (v2.17.0), so a cutoff that has
+  // ended can be read, corrected and deleted from here.
+  const s = d2parts(per.start), e = d2parts(per.end);
+  let h = '<div class="card" style="margin-top:4px;"><div class="period-nav">' +
+    '<button type="button" class="nav-btn" data-act="gastos-prev" aria-label="Previous cutoff">‹</button>' +
+    '<div class="p-label">' + monthName(per.start) + ' ' + s.d + ' – ' + e.d +
+      '<span class="p-sub">' + esc(w.sub) + '</span></div>' +
+    '<button type="button" class="nav-btn" data-act="gastos-next" aria-label="Next cutoff">›</button>' +
+  '</div></div>';
+
+  // A cutoff that starts before this phone's window: the rows are on the sheet,
+  // not here, so an empty list is NOT proof there were no expenses. Say which
+  // it is rather than letting "No expenses" read as a fact about the business.
+  if (previewIncomplete(per)){
+    h += '<div class="card" style="border-color:var(--accent);">' +
+      '<p style="font-weight:600;">This phone cannot see the whole of this cutoff.</p>' +
+      '<p class="hint" style="margin-top:4px;">It reaches further back than this phone keeps. Anything missing below is ' +
+        'still on the sheet — this list is not the full record for this cutoff.</p>' +
+    '</div>';
+  }
+
+  h += '<div class="section-title" style="margin-top:14px;">' + esc(w.heading) +
+    ' <span class="hint" style="font-weight:600;">(' + esc(periodLabel(per)) + ')</span>' +
+    (items.length
+      ? ' <span class="hint" style="font-weight:600;">· ' +
+        peso(items.reduce((t, x) => t + num(x.amount), 0)) + '</span>'
+      : '') + '</div>';
 
   // An expense dated into an earlier cutoff saves fine but cannot show up in
   // this list. Name it here so it never looks like it disappeared.
@@ -5885,6 +5910,17 @@ function renderGastos(){
       '<p class="hint" style="margin-top:4px;">' + esc(gxElsewhere.item) + ' · ' + peso(gxElsewhere.amount) +
         ' on ' + esc(fmtShort(gxElsewhere.date)) + '. It belongs to that cutoff, so it is not in the list below.</p>' +
     '</div>';
+  }
+
+  // A CUTOFF THAT HAS NOT BEGUN takes no entries (v2.17.0). cutoffExpenseDate
+  // returns '' for it precisely because dating real money into a day that has
+  // not happened is something the server refuses — so the form is not offered
+  // rather than offered and then refused.
+  if (!cutoffExpenseDate(per)){
+    h += '<div class="card"><p class="hint">This cutoff has not started yet, so nothing can be logged into it. ' +
+      'Tap ‹ to go back to the one you are in.</p></div>';
+    $('panel-gastos').innerHTML = h;
+    return;
   }
 
   // Add form (collapsible)
@@ -5938,7 +5974,8 @@ function renderGastos(){
 
   // Grouped list
   if (!items.length){
-    h += '<div class="card" style="margin-top:14px;"><p class="hint" style="text-align:center; padding:8px 0;">No expenses yet this cutoff. Tap + to add one.</p></div>';
+    h += '<div class="card" style="margin-top:14px;"><p class="hint" style="text-align:center; padding:8px 0;">' +
+      esc(w.empty) + '</p></div>';
   } else {
     const groups = {};
     for (const e of items) (groups[e.date] = groups[e.date] || []).push(e);
@@ -6012,7 +6049,11 @@ function submitGasto(){
   applyLocalExpense(payload);
   enqueue('saveExpense', payload);
   persistState();
-  const here = currentPeriod(todayStr());
+  // Measured against the cutoff ON SCREEN (v2.17.0). Before the stepper existed
+  // "here" and "the current cutoff" were the same thing; now they are not, and
+  // comparing against the wrong one either hides a row that really did land
+  // elsewhere or cries "saved elsewhere" about a row sitting right there.
+  const here = gastosPer || currentPeriod(todayStr());
   const itsPeriod = currentPeriod(payload.date);
   const elsewhere = !inPeriod(payload.date, here);
   // An earlier date belongs to an earlier cutoff, so it will not appear in the
@@ -6111,10 +6152,56 @@ function previewIncomplete(per){
   return !!config.apiUrl && isDateStr(ws) && txt(asObj(per).start) < ws;
 }
 
+// "July 16–31", with the year when it is not the current one. Moved here in
+// v2.17.0 to sit with the other period helpers — and so gastosWords below can
+// reach it under test.
+function periodLabel(per){
+  const s = d2parts(per.start), e = d2parts(per.end);
+  const sameYear = s.y === d2parts(todayStr()).y;
+  return monthName(per.start) + ' ' + s.d + '–' + e.d + (sameYear ? '' : ', ' + s.y);
+}
+
+/** WHAT THE EXPENSES SCREEN CALLS THE CUTOFF IT IS SHOWING (v2.17.0).
+ *
+ *  Once the screen can be stepped, every "this cutoff" on it is a claim that
+ *  can be FALSE. The worst is the empty-list line: "No expenses yet this
+ *  cutoff", printed over a fortnight that had plenty of them, is a quiet lie
+ *  about the business rather than about the screen.
+ *
+ *  These are returned as VALUES rather than decided inline so the rule is
+ *  behaviour a test can run, not a sentence a test can only grep for. Mutating
+ *  `current` has to change what this returns, and it does. */
+function gastosWords(per){
+  const current = periodKey(per) === periodKey(currentPeriod(todayStr()));
+  return {
+    current,
+    heading: current ? 'Expenses this cutoff' : 'Expenses',
+    empty: current
+      ? 'No expenses yet this cutoff. Tap + to add one.'
+      : 'Nothing is logged for ' + periodLabel(per) + '.',
+    sub: current ? 'This cutoff' : String(d2parts(asObj(per).start).y)
+  };
+}
+
+/** The expenses of ONE cutoff, newest first (v2.17.0). Lifted out of
+ *  renderGastos so the screen's period can be stepped and the rule for what
+ *  belongs on it stays one testable thing. Sorted by date then updated_at so a
+ *  run of same-day entries reads in the order she typed them, reversed. */
+function gastosFor(per){
+  return Object.values(asObj(state.expenses)).filter(isObj)
+    .filter(e => inPeriod(txt(e.date), per))
+    .sort((a,b) => (txt(b.date) + txt(b.updated_at)).localeCompare(txt(a.date) + txt(a.updated_at)));
+}
+
 /** The date a Cutoff-screen expense (a one-tap chip, a backlog payment) lands
  *  on: today when today is inside the period shown, the period's LAST day for
  *  an earlier cutoff — and NOTHING for a future one, because that would date
- *  real money into a day that has not happened and the server refuses it. */
+ *  real money into a day that has not happened and the server refuses it.
+ *
+ *  The Expenses screen reads it for the SAME reason since v2.17.0: once that
+ *  screen can be stepped back, a new entry typed while an earlier cutoff is on
+ *  screen must land in the cutoff he is looking at, or it saves correctly and
+ *  then vanishes from the list he saved it on. */
 function cutoffExpenseDate(per){
   const t = todayStr();
   if (inPeriod(t, per)) return t;
@@ -9014,7 +9101,27 @@ document.addEventListener('click', (ev) => {
   else if (act === 'paper-hide') paperHide();
 
   // Expenses
-  else if (act === 'gastos-open'){ gx.open = true; gx.date = todayStr(); renderGastos(); }
+  // The date defaults into the cutoff ON SCREEN (v2.17.0), not always today —
+  // otherwise stepping back and adding an entry files it in the current cutoff
+  // and it vanishes from the list he added it on. cutoffExpenseDate gives the
+  // period's last day for an earlier cutoff, and '' for one not yet begun.
+  else if (act === 'gastos-open'){
+    gx.open = true;
+    gx.date = cutoffExpenseDate(gastosPer || currentPeriod(todayStr())) || todayStr();
+    renderGastos();
+  }
+  else if (act === 'gastos-prev'){
+    gastosPer = shiftPeriod(gastosPer || currentPeriod(todayStr()), -1);
+    gx.date = cutoffExpenseDate(gastosPer) || gx.date;
+    gxElsewhere = null;
+    renderGastos();
+  }
+  else if (act === 'gastos-next'){
+    gastosPer = shiftPeriod(gastosPer || currentPeriod(todayStr()), 1);
+    gx.date = cutoffExpenseDate(gastosPer) || gx.date;
+    gxElsewhere = null;
+    renderGastos();
+  }
   else if (act === 'gastos-cancel'){ gx.open = false; gxElsewhere = null; renderGastos(); }
   // The bucket IS the whole choice (v2.7.1): Octopus/Other file as those
   // categories, a picklist name files as Supplies with that name as the item.

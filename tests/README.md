@@ -640,3 +640,21 @@ The last one is the boring one that matters: `esc(sup.why)` → `sup.why`. The e
 **A mutant I had to rewrite.** My first attempt at "the residual takes the opened value out" was `function suppliesSplit(f){ void f;` — which changes nothing at all, so it survived and briefly looked like a coverage gap. It was a bad mutant, not a missing test. Replaced with one that actually mutates `liveCutoff`, and it died immediately.
 
 Suites: **208** (`run-tests.js`) + **253** (`contract.test.js`).
+
+### v2.17.0 — the Expenses screen can go back
+
+Two tests, **18 mutants, all red** — but only after a lesson this repo has now learned three times.
+
+The first pass wrote **source pins**: grep the screen for `isCurrent ? 'Expenses this cutoff' : 'Expenses'` and friends. Eleven of twelve mutants died. Then I mutated `isCurrent`'s **definition** to `true`, and to `false`, and both survived — every pinned sentence was still there, character for character, while the screen printed "this cutoff" over August. Pinning the sentence is not pinning the condition, and a ternary is a sentence.
+
+The fix was not a better regex. The wording moved into `gastosWords(per)`, which returns `{current, heading, empty, sub}` as **values**, and the tests assert what it returns. Now mutating `current` has to change an answer, and it does — all five wording mutants die, plus one that stubs `gastosWords` out of the screen entirely.
+
+Same story for the window warning: `assert.match(screen, /previewIncomplete\(per\)/)` passed while the sentence under the guard was deleted. The guard without the sentence teaches nothing, so the sentence is pinned too.
+
+**Two mutants I had to rewrite rather than trust.** One anchor matched three times (`isCurrent` is declared on three screens), so it silently skipped and reported as a survivor — an anchor that does not match uniquely is not a result. The other, from v2.16.0, was `function suppliesSplit(f){ void f;` — a no-op that changes nothing and therefore always survives. Both were bad mutants, not coverage gaps.
+
+**One thing the browser caught that no test did:** the delete button. Every unit test could pass with the list rendering correctly and the trash icon missing, because the delete path is keyed on `entry_id` and works fine — it just has nowhere to be tapped. Stepping back to August 16–31 in the preview and counting four `data-act="gastos-del"` buttons is what actually proves the owner can do what he asked for.
+
+`S_PREVINC` grew by exactly one function. `cutoffExpenseDate` was its **end marker**, which means it sat in the gap between two slabs and had never been lifted — untested, in a codebase with 463 tests, while v2.17.0's correctness now rests on it.
+
+Suites: **208** (`run-tests.js`) + **255** (`contract.test.js`).
