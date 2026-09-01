@@ -249,6 +249,8 @@ return {
   // v2.17.0: the Expenses screen can be stepped back to a cutoff that has ended,
   // and a new entry lands in the cutoff on screen rather than always today.
   gastosFor, cutoffExpenseDate, gastosWords, periodLabel,
+  // v2.18.0: a list of dated amounts, typed once instead of ten at a time.
+  parseDatedAmounts, datedAmountId,
   stashBentaDraft,
   get drafts(){ return drafts; },
   get catchNightPick(){ return catchNightPick; },
@@ -5323,6 +5325,227 @@ test('SOURCE PIN: the Expenses screen steps, and every rule follows the shown cu
   const submit = src.slice(src.indexOf('function submitGasto(){'), src.indexOf('function deleteGasto('));
   assert.match(submit, /const here = gastosPer \|\| currentPeriod\(todayStr\(\)\)/,
     'the comparison follows the stepper');
+});
+
+test('A LIST OF DATED AMOUNTS, TYPED ONCE (v2.18.0)', () => {
+  // Owner, 2026-09-01: "can you add the supplies I sent to you, I dont want to
+  // input manually" — after writing out ten back-dated expenses in one message
+  // rather than making ten trips through a date picker. This parses exactly the
+  // shape he wrote them in.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const aug = { start: '2026-08-16', end: '2026-08-31' };
+
+  // HIS ACTUAL MESSAGE, pasted verbatim.
+  const his = ['8/16 - 244','8/18 - 504','8/19 - 680','8/21 - 446','8/23 - 318',
+               '8/26 - 170','8/27 - 1075','8/28 - 255','8/29 - 200','8/31 - 65'].join('\n');
+  const p = app.parseDatedAmounts(his, aug);
+  assert.strictEqual(p.ok, true, 'his own format reads, exactly as he typed it');
+  assert.strictEqual(p.bad, 0);
+  assert.strictEqual(p.rows.length, 10);
+  assert.strictEqual(p.total, 3957, 'and the batch total is his figure');
+  assert.deepStrictEqual(p.rows.map(r => r.date).slice(0, 3),
+    ['2026-08-16', '2026-08-18', '2026-08-19'], 'the YEAR comes from the cutoff on screen');
+  assert.strictEqual(p.rows[6].amount, 1075, 'a four-figure amount is not truncated');
+
+  // THE SEPARATOR IS NOT A MINUS SIGN. "8/16 - 244" is 244, never -244: a
+  // negative here would subtract money from the fortnight it was meant to add.
+  assert.ok(p.rows.every(r => r.amount > 0), 'every amount is positive');
+
+  // THE SHAPES HE MIGHT TYPE INSTEAD, all the same day.
+  for (const line of ['8/16 - 244', '8/16 244', '08/16 - 244', '8-16 - 244',
+                      '2026-08-16 - 244', '16 - 244', '8/16: 244', '8/16 ₱244',
+                      '8/16 - 1,244']){
+    const one = app.parseDatedAmounts(line, aug);
+    assert.strictEqual(one.bad, 0, 'should read: ' + line + ' — ' + (one.rows[0] || {}).error);
+    assert.strictEqual(one.rows[0].date, '2026-08-16', 'wrong date for: ' + line);
+  }
+  assert.strictEqual(app.parseDatedAmounts('8/16 - 1,244', aug).rows[0].amount, 1244,
+    'a thousands comma is a separator, not a decimal point');
+
+  // BLANK LINES ARE NOT LINES, so a pasted list with gaps still reads.
+  assert.strictEqual(app.parseDatedAmounts('\n8/16 - 244\n\n  \n8/18 - 504\n', aug).rows.length, 2);
+  assert.strictEqual(app.parseDatedAmounts('', aug).ok, false, 'nothing typed is not a batch');
+  assert.strictEqual(app.parseDatedAmounts(null, aug).rows.length, 0, 'and neither is nothing');
+
+  // A DATE OUTSIDE THE CUTOFF IS AN ERROR, never quietly filed elsewhere. The
+  // one thing worse than retyping ten expenses is ten of them landing in a
+  // fortnight he has already settled with his partner.
+  const out = app.parseDatedAmounts('8/16 - 244\n7/20 - 100', aug);
+  assert.strictEqual(out.ok, false, 'the batch refuses while any line is wrong');
+  assert.strictEqual(out.bad, 1);
+  assert.match(out.rows[1].error, /not in this cutoff/);
+  assert.strictEqual(out.total, 244, 'and the bad line adds nothing to the total');
+
+  // NOTHING SAVES WHILE ANYTHING IS UNREADABLE — half a list of money is worse
+  // than none of it.
+  const junk = app.parseDatedAmounts('8/16 - 244\nbought some veggies\n8/18 - 504', aug);
+  assert.strictEqual(junk.ok, false);
+  assert.strictEqual(junk.bad, 1);
+  assert.strictEqual(junk.rows[1].raw, 'bought some veggies',
+    'the line is quoted back so he can see which one to fix');
+  assert.match(junk.rows[1].error, /Could not read this line/);
+
+  // AN IMPOSSIBLE DATE SAYS SO, rather than being reported as a cutoff problem.
+  // isDateStr only checks the SHAPE — "2026-13-15" and "2026-02-30" both pass it
+  // — and either would then be measured against the period and come back as
+  // "not in this cutoff", which sends him looking for the wrong problem.
+  for (const bad of ['13/15 - 100', '2/30 - 100', '13/40 - 100', '44 - 100', '2026-02-30 - 100']){
+    const r = app.parseDatedAmounts(bad, aug).rows[0];
+    assert.match(r.error, /not a real date/, bad + ' -> ' + r.error);
+  }
+  // And a REAL date outside the cutoff still gets the cutoff message, so the two
+  // complaints are never confused with each other.
+  assert.match(app.parseDatedAmounts('7/20 - 100', aug).rows[0].error, /not in this cutoff/);
+
+  // A BAD ROW CARRIES NO AMOUNT. This is what lets the batch total simply sum
+  // every row: there is no such thing as a rejected line with money on it.
+  const mixed = app.parseDatedAmounts(
+    '8/16 - 244\nnonsense\n13/15 - 999\n2026-02-30 - 999\n7/20 - 999\n00 - 999', aug);
+  for (const r of mixed.rows){
+    if (r.error) assert.strictEqual(r.amount, null, 'a rejected line has no amount: ' + r.raw);
+  }
+  assert.strictEqual(mixed.total, 244, 'so the total is the readable lines alone');
+
+  // ZERO AND NEGATIVE ARE REFUSED, not coerced.
+  for (const bad of ['8/16 - 0', '8/16 - 0.00']){
+    assert.match(app.parseDatedAmounts(bad, aug).rows[0].error, /more than zero/, bad);
+  }
+
+  // A DAY THAT HAS NOT HAPPENED cannot have money spent on it — the server
+  // refuses it, so the preview refuses it first, where he can see why.
+  const sep = app.currentPeriod(app.todayStr());
+  const future = app.parseDatedAmounts(app.addDays(app.todayStr(), 1).slice(8) + ' - 100', sep);
+  assert.match(future.rows[0].error, /has not happened yet/);
+
+  // A CUTOFF SPANNING TWO MONTHS: a bare day that falls in both is ambiguous
+  // and SAYS so rather than picking one.
+  const span = { start: '2026-07-30', end: '2026-08-14' };
+  assert.strictEqual(app.parseDatedAmounts('8/1 - 50', span).rows[0].date, '2026-08-01',
+    'a month/day still resolves across the boundary');
+  assert.strictEqual(app.parseDatedAmounts('31 - 50', span).rows[0].date, '2026-07-31',
+    'and a bare day resolves to whichever month contains it');
+
+  // A BARE DAY THAT FALLS IN BOTH MONTHS is AMBIGUOUS, and says so rather than
+  // picking one. No real cutoff (1-15, 16-end) spans two months, so this cannot
+  // come from currentPeriod — but the parser takes any period, and silently
+  // guessing a month would be the worst thing it could do with money.
+  const wide = { start: '2026-07-20', end: '2026-08-25' };
+  const ambBatch = app.parseDatedAmounts('7/21 - 40\n22 - 50', wide);
+  const amb = ambBatch.rows[1];
+  assert.strictEqual(amb.date, null, 'nothing is guessed');
+  assert.strictEqual(amb.amount, null, 'and no money rides on a line that was refused');
+  assert.strictEqual(ambBatch.total, 40, 'so the total is the readable line alone');
+  assert.match(amb.error, /falls twice in this cutoff/);
+  assert.match(amb.error, /Write the month too/, 'and says how to fix it');
+  assert.strictEqual(app.parseDatedAmounts('7\/22 - 50', wide).rows[0].date, '2026-07-22',
+    'naming the month resolves it');
+
+  // A YEAR BOUNDARY: December 16-31 and January 1-15 are different cutoffs, and
+  // the year must come from the period rather than from today.
+  const dec = { start: '2025-12-16', end: '2025-12-31' };
+  assert.strictEqual(app.parseDatedAmounts('12/20 - 300', dec).rows[0].date, '2025-12-20');
+});
+
+test('THE PASTED BATCH CANNOT DOUBLE-CHARGE A CUTOFF (v2.18.0)', () => {
+  // The one irreversible mistake this feature could make is charging a fortnight
+  // twice. The entry id is derived from (bucket, date), so a second tap of Save
+  // UPSERTS the same rows rather than adding a second set — impossible by
+  // construction rather than by being careful.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  assert.strictEqual(app.datedAmountId('Veggies', '2026-08-16'), 'bulk-veggies-2026-08-16');
+  assert.strictEqual(app.datedAmountId('Veggies', '2026-08-16'),
+    app.datedAmountId('Veggies', '2026-08-16'), 'stable across calls');
+  assert.notStrictEqual(app.datedAmountId('Veggies', '2026-08-16'),
+    app.datedAmountId('Veggies', '2026-08-18'), 'but not across dates');
+  assert.notStrictEqual(app.datedAmountId('Veggies', '2026-08-16'),
+    app.datedAmountId('Other', '2026-08-16'), 'nor across buckets');
+  // A bucket name is SHEET DATA and may carry anything; the id must stay a safe,
+  // stable key rather than smuggling punctuation into an entry_id.
+  assert.strictEqual(app.datedAmountId("Mama's <b>Sauce</b>", '2026-08-16'),
+    'bulk-mama-s-b-sauce-b-2026-08-16');
+  assert.ok(/^[a-z0-9-]+$/.test(app.datedAmountId("Mama's <b>Sauce</b>", '2026-08-16')),
+    'nothing but lowercase, digits and dashes');
+
+  // AND THE UPSERT REALLY REPLACES. Two saves of the same (bucket, date) leave
+  // ONE row, at the second amount — the sheet upserts by entry_id, and the
+  // phone's own applier must agree with it or the two disagree until a sync.
+  const id = app.datedAmountId('Veggies', '2026-08-16');
+  const base = { date: '2026-08-16', category: 'Supplies', item: 'Veggies',
+    backlogRef: '', notes: '', paidFrom: 'tin', entryId: id };
+  app.applyLocalExpense({ ...base, amount: 244 });
+  app.applyLocalExpense({ ...base, amount: 244 });
+  const hits = Object.values(app.state.expenses).filter(e => e && e.entry_id === id);
+  assert.strictEqual(hits.length, 1, 'one row, not two');
+  assert.strictEqual(hits[0].amount, 244);
+  app.applyLocalExpense({ ...base, amount: 61 });
+  assert.strictEqual(Object.values(app.state.expenses).filter(e => e && e.entry_id === id).length, 1);
+  assert.strictEqual(app.state.expenses[id].amount, 61, 'a corrected paste corrects the row');
+  assert.strictEqual(app.gastosFor({ start: '2026-08-16', end: '2026-08-31' })
+    .filter(e => e.entry_id === id).length, 1, 'and the list shows it once');
+});
+
+test('SOURCE PIN: the pasted batch is previewed, never auto-saved (v2.18.0)', () => {
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+  const block = src.slice(src.indexOf('function bulkBlockHTML(per){'), src.indexOf('function submitGasto(){'));
+  assert.ok(block.length > 500, 'the block must be findable');
+
+  // THE SAVE BUTTON DOES NOT EXIST while any line is unreadable. Not disabled —
+  // absent, so there is nothing to tap and nothing to explain away.
+  assert.match(block, /asObj\(parsed\)\.ok\s*\n?\s*\?\s*'<button[^']*data-act="bulk-save"/,
+    'Save is drawn only when every line reads');
+  assert.match(block, /peso\(parsed\.total\)/, 'and it says the total it is about to add');
+
+  // AND IT LIVES INSIDE THE PATCHED REGION. Typing rewrites only #bulkPreview,
+  // and whether Save exists at all depends on what was typed — outside it, he
+  // pastes a perfect list and finds nothing to tap. Found by pasting his real
+  // list into the real screen, not by any assertion.
+  const preview = src.slice(src.indexOf('function bulkPreviewHTML('), src.indexOf('function saveBulk(){'));
+  assert.match(preview, /bulkActionsHTML\(parsed\)/,
+    'the buttons are part of what the preview returns');
+  assert.ok((preview.match(/bulkActionsHTML\(parsed\)/g) || []).length >= 2,
+    'including the nothing-typed-yet case, or Close vanishes on an empty box');
+  const shell = src.slice(src.indexOf('function bulkBlockHTML(per){'), src.indexOf('function bulkPreviewHTML('));
+  assert.ok(shell.indexOf('bulk-save') < 0,
+    'and Save is NOT drawn outside the region typing can reach');
+
+  // NOTHING AUTO-SAVES: the save path is a tap, and it confirms first.
+  assert.match(block, /function saveBulk\(\)/);
+  const save = src.slice(src.indexOf('function saveBulk(){'), src.indexOf('function submitGasto(){'));
+  assert.match(save, /if \(!parsed\.ok\) return;/, 'a bad batch cannot be saved at all');
+  assert.match(save, /confirm\(/, 'and a good one is confirmed with its total');
+  assert.match(save, /entryId: datedAmountId\(gxBulk\.pick, r\.date\)/,
+    'every row gets the STABLE id — this is what stops a double charge');
+  assert.ok(save.indexOf('uuid()') < 0,
+    'a fresh id per save would double-charge the cutoff on a second tap');
+  assert.match(save, /enqueue\('saveExpense', payload\)/, 'and each row goes to the sheet');
+
+  // A PICKLIST NAME FILES UNDER SUPPLIES, with its own name as the item —
+  // exactly as the single-entry form does. Filing "Veggies" as category
+  // "Veggies" would be a category the server refuses outright.
+  assert.match(save, /category: isBucket \? gxBulk\.pick : 'Supplies'/,
+    'a picklist bucket is a Supplies row, not its own category');
+  assert.match(save, /item: isBucket \? '' : gxBulk\.pick/, 'and its name is the item');
+  assert.match(save, /const isBucket = gxBulk\.pick === 'Octopus' \|\| gxBulk\.pick === 'Other'/,
+    'the two real category buckets are the only exceptions');
+
+  // PAID FROM IS WHITELISTED. The server refuses anything outside the three, and
+  // it refuses the WHOLE row — ten rows lost to one bad chip value.
+  assert.match(save, /paidFrom: gxBulk\.paidFrom === 'gcash' \|\| gxBulk\.paidFrom === 'own' \? gxBulk\.paidFrom : 'tin'/,
+    'anything but gcash or own falls back to the tin, never through unchecked');
+
+  // THE PREVIEW IS ITS OWN STRING so typing can patch it without rebuilding the
+  // panel — v2.13.1's bug, pinned generally by the v2.13.2 guard as well.
+  assert.match(block, /id="bulkPreview"/);
+  const listener = src.slice(src.indexOf("document.addEventListener('input'"),
+                             src.indexOf("document.addEventListener('change'"));
+  assert.match(listener, /id === 'bulkText'/, 'the textarea is read as it is typed');
+  assert.match(listener, /bulkPreviewHTML\(/, 'and only the preview is rewritten');
+
+  // AN OVERWRITE IS NEVER A SURPRISE: a stable id means a second paste replaces,
+  // and the preview says so per line before anything is saved.
+  assert.match(block, /replaces /, 'the preview names what a row will replace');
 });
 
 test('SUPPLIES IN TWO LINES: major is opened, minor is the daily buying (v2.16.0)', () => {

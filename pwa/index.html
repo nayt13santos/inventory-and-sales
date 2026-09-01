@@ -598,7 +598,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.17.0';
+const APP_VERSION = '2.18.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -1378,6 +1378,14 @@ function isDateStr(s){ return /^\d{4}-\d{2}-\d{2}$/.test(String(s == null ? '' :
 function d2parts(s){ const [y,m,d] = String(s == null ? '' : s).split('-').map(Number); return { y, m, d }; }
 function partsToStr(y,m,d){ return y + '-' + String(m).padStart(2,'0') + '-' + String(d).padStart(2,'0'); }
 function lastDayOf(y,m){ return new Date(y, m, 0).getDate(); }
+/** Whether a yyyy-mm-dd string names a day that EXISTS. isDateStr only checks
+ *  the shape, so "2026-16-24" and "2026-02-30" both pass it — and a pasted list
+ *  can produce either (v2.18.0). */
+function isRealDate(s){
+  if (!isDateStr(s)) return false;
+  const { y, m, d } = d2parts(s);
+  return m >= 1 && m <= 12 && d >= 1 && d <= lastDayOf(y, m);
+}
 /** The next calendar day, month and year rolls included. Built from the parts
  *  rather than a timestamp, so it can never drift with a timezone (v2.7.6). */
 function addDays(s, n){
@@ -5923,6 +5931,10 @@ function renderGastos(){
     return;
   }
 
+  // MANY AT ONCE (v2.18.0). Its own collapsible, below the single-entry form,
+  // because the single entry is the nightly path and this is the catch-up.
+  h += bulkBlockHTML(per);
+
   // Add form (collapsible)
   if (!gx.open){
     h += '<button type="button" class="btn block" data-act="gastos-open">+ Add an expense</button>';
@@ -6004,6 +6016,142 @@ function renderGastos(){
     h += '</div>';
   }
   $('panel-gastos').innerHTML = h;
+}
+
+/* MANY AT ONCE (v2.18.0) — the paste box, its preview, and the save.
+   The preview is the whole point: money is never written from text nobody has
+   looked at, so every line is shown resolved to a real date and a real amount,
+   with the batch total, and the Save button does not exist while any line is
+   bad. Nothing here auto-saves, exactly like every other screen. */
+let gxBulk = { open:false, text:'', pick:'', paidFrom:'tin' };
+
+function bulkBlockHTML(per){
+  if (!gxBulk.open){
+    return '<button type="button" class="btn block" data-act="bulk-open" style="margin-bottom:10px;">' +
+      '+ Add several at once</button>';
+  }
+  const plist = supplyPicklist().filter(n => n !== 'Octopus' && n !== 'Other');
+  const parsed = parseDatedAmounts(gxBulk.text, per);
+  let h = '<div class="card">' +
+    '<div class="pay-intro">Add several at once</div>' +
+    '<p class="hint" style="margin-top:0;">One line each, date then amount. ' +
+    'The month and year come from the cutoff above, so “8/16 - 244” or just “16 - 244” both work.</p>';
+
+  h += '<div class="field"><label>What is this money for?</label>' +
+    '<div class="chips" role="group" aria-label="Expense bucket">';
+  for (const b of ['Octopus', ...plist, 'Other']){
+    h += '<button type="button" class="chip" data-act="bulk-pick" data-pick="' + esc(b) +
+      '" aria-pressed="' + String(gxBulk.pick === b) + '">' + esc(b) + '</button>';
+  }
+  h += '</div>' +
+    (gxBulk.pick && gxBulk.pick !== 'Octopus' && gxBulk.pick !== 'Other'
+      ? '<p class="hint" style="margin-top:8px;">Filed under Supplies.</p>' : '') +
+    '<p class="err" id="err-bulk-pick" hidden></p></div>';
+
+  h += '<div class="field"><label>Where did the money come from?</label>' +
+    '<div class="chips" role="group" aria-label="Where the money came from">';
+  for (const c of PAID_FROM_CHOICES){
+    h += '<button type="button" class="chip" data-act="bulk-paid" data-paid="' + c.key +
+      '" aria-pressed="' + String(gxBulk.paidFrom === c.key) + '">' + esc(c.label) + '</button>';
+  }
+  h += '</div><p class="hint" style="margin-top:8px;">The same answer for every line. ' +
+    'Change any one of them afterwards from the list below.</p></div>';
+
+  h += '<div class="field"><label for="bulkText">The list</label>' +
+    '<textarea class="input" id="bulkText" rows="8" autocomplete="off" spellcheck="false" ' +
+      'placeholder="8/16 - 244&#10;8/18 - 504&#10;8/19 - 680">' + esc(gxBulk.text) + '</textarea></div>';
+
+  // THE PREVIEW, AND THE SAVE BUTTON WITH IT. Resolved dates, real amounts, and
+  // what each line will DO — "new" or "replaces" — because a stable entry id
+  // means a second paste overwrites, and an overwrite must never be a surprise.
+  //
+  // THE BUTTON IS INSIDE THIS CONTAINER ON PURPOSE. Typing patches only what is
+  // in here, and the button's very existence depends on what was typed — leave
+  // it outside and he pastes a perfect list, sees a correct preview, and finds
+  // nothing to tap until something else happens to redraw the panel. Found by
+  // pasting his real list into the real screen.
+  h += '<div id="bulkPreview">' + bulkPreviewHTML(parsed, per) + '</div>';
+  return h + '</div>';
+}
+
+/** The preview table, as its OWN string so typing can patch it without
+ *  re-rendering the panel — v2.13.1's bug, where a typed field re-rendered its
+ *  whole panel on every keystroke and threw the page back to the top. */
+function bulkPreviewHTML(parsed, per){
+  if (!parsed.rows.length){
+    return '<p class="hint" style="text-align:center; padding:6px 0;">Nothing typed yet.</p>' +
+      bulkActionsHTML(parsed);
+  }
+  let h = '';
+  for (const r of parsed.rows){
+    if (r.error){
+      h += '<div class="co-row"><span style="color:var(--alert);">' + esc(r.raw) + '</span></div>' +
+        '<p class="err" style="margin:0 0 8px 0;">' + esc(r.error) + '</p>';
+      continue;
+    }
+    const already = asObj(state.expenses)[datedAmountId(gxBulk.pick, r.date)];
+    h += '<div class="co-row"><span>' + esc(fmtShort(r.date)) +
+      (already ? ' <span class="hint">replaces ' + esc(peso(already.amount)) + '</span>'
+               : ' <span class="hint">new</span>') +
+      '</span><span class="v">' + peso(r.amount) + '</span></div>';
+  }
+  h += '<div class="r-sep" role="presentation"></div>' +
+    '<div class="co-row"><span>' + parsed.rows.length +
+      (parsed.rows.length === 1 ? ' line' : ' lines') +
+      (parsed.bad ? ', <span style="color:var(--alert);">' + parsed.bad + ' to fix</span>' : '') +
+    '</span><span class="v">' + peso(parsed.total) + '</span></div>';
+  if (parsed.bad){
+    h += '<p class="hint" style="margin-top:6px;">Nothing is added while a line cannot be read — ' +
+      'half a list of money is worse than none of it.</p>';
+  }
+  return h + bulkActionsHTML(parsed);
+}
+
+/** Close, and — only when every line reads — Save. Part of the patched region,
+ *  so the button appears the moment the last bad line is fixed. */
+function bulkActionsHTML(parsed){
+  return '<div class="btn-row"><button type="button" class="btn" data-act="bulk-cancel">Close</button>' +
+    (asObj(parsed).ok
+      ? '<button type="button" class="btn primary" data-act="bulk-save">Add ' + parsed.rows.length +
+        (parsed.rows.length === 1 ? ' expense' : ' expenses') + ' · ' + peso(parsed.total) + '</button>'
+      : '') +
+  '</div>';
+}
+
+function saveBulk(){
+  const per = gastosPer || currentPeriod(todayStr());
+  const pickEl = $('err-bulk-pick');
+  if (!gxBulk.pick){
+    if (pickEl){ pickEl.textContent = 'Choose what this money was for.'; pickEl.hidden = false; }
+    return;
+  }
+  if (pickEl) pickEl.hidden = true;
+  const parsed = parseDatedAmounts(gxBulk.text, per);
+  if (!parsed.ok) return;
+  const isBucket = gxBulk.pick === 'Octopus' || gxBulk.pick === 'Other';
+  if (!confirm('Add ' + parsed.rows.length + ' expenses totalling ' + peso(parsed.total) +
+      ' to ' + periodLabel(per) + '?')) return;
+  for (const r of parsed.rows){
+    const payload = {
+      date: r.date,
+      category: isBucket ? gxBulk.pick : 'Supplies',
+      item: isBucket ? '' : gxBulk.pick,
+      amount: r.amount,
+      backlogRef: '',
+      notes: '',
+      paidFrom: gxBulk.paidFrom === 'gcash' || gxBulk.paidFrom === 'own' ? gxBulk.paidFrom : 'tin',
+      // STABLE, so a second tap upserts instead of double-charging the cutoff.
+      entryId: datedAmountId(gxBulk.pick, r.date)
+    };
+    applyLocalExpense(payload);
+    enqueue('saveExpense', payload);
+  }
+  persistState();
+  gxBulk = { open:false, text:'', pick:gxBulk.pick, paidFrom:gxBulk.paidFrom };
+  gxElsewhere = null;
+  renderGastos();
+  toast(parsed.rows.length + ' expenses added · ' + peso(parsed.total));
+  drainQueue();
 }
 
 function submitGasto(){
@@ -6181,6 +6329,123 @@ function gastosWords(per){
       : 'Nothing is logged for ' + periodLabel(per) + '.',
     sub: current ? 'This cutoff' : String(d2parts(asObj(per).start).y)
   };
+}
+
+/** A LIST OF DATED AMOUNTS, TYPED ONCE (v2.18.0). Owner, 2026-09-01: "can you
+ *  add the supplies I sent to you, I dont want to input manually" — ten
+ *  back-dated expenses is ten trips through a date picker, and he had already
+ *  given up and written them out in one message instead.
+ *
+ *  This parses exactly the shape he wrote them in:
+ *
+ *      8/16 - 244        8-16 244        2026-08-16 244        16 - 244
+ *
+ *  A bare day, or a month/day with no year, is resolved INSIDE THE CUTOFF ON
+ *  SCREEN — which is the whole reason v2.17.0's stepper had to come first. A
+ *  line whose date lands outside that cutoff is an ERROR, never quietly filed
+ *  somewhere else: the one thing worse than retyping ten expenses is ten
+ *  expenses landing in a fortnight he has already settled.
+ *
+ *  NOTHING IS GUESSED. A line that does not parse is reported with its own text
+ *  beside it, and the batch refuses to save while any line is bad — half a list
+ *  of money, saved silently, is the worst outcome available here.
+ *
+ *  Returns { rows, ok, total, bad } where each row is
+ *  { n, raw, date, amount, error } and `date`/`amount` are null on a bad line. */
+function parseDatedAmounts(text, per){
+  const p = asObj(per);
+  const start = txt(p.start), end = txt(p.end);
+  const rows = [];
+  let n = 0;
+  for (const raw of String(text == null ? '' : text).split('\n')){
+    const line = raw.trim();
+    if (!line) continue;
+    n++;
+    const row = { n, raw: line, date: null, amount: null, error: '' };
+    rows.push(row);
+    // The date token, then an optional separator he may or may not have typed,
+    // then the amount. The amount is the LAST number so "8/16 - 244" cannot
+    // read its own separator as a minus sign.
+    // The hyphen alternative is UNSPACED on purpose. "16 - 244" is a bare day
+    // and an amount; letting a spaced hyphen be a date separator read it as
+    // month 16, day 24, amount 4 — a real bug, found by a test.
+    const m = line.match(/^(\d{4}-\d{2}-\d{2}|\d{1,2}\s*[\/.]\s*\d{1,2}|\d{1,2}-\d{1,2}|\d{1,2})\s*[-–—:,]?\s*₱?\s*([\d,]*\.?\d+)$/);
+    if (!m){
+      row.error = 'Could not read this line. Write it as “8/16 - 244”.';
+      continue;
+    }
+    const tok = m[1].replace(/\s+/g, '');
+    let date = '';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(tok)){
+      date = tok;
+    } else if (/[\/\-.]/.test(tok)){
+      // month/day — the YEAR comes from the cutoff on screen, and a cutoff can
+      // span two months (Jul 30 – Aug 2), so try both of its years.
+      const bits = tok.split(/[\/\-.]/);
+      const mm = String(num(bits[0])).padStart(2, '0'), dd = String(num(bits[1])).padStart(2, '0');
+      for (const y of [start.slice(0, 4), end.slice(0, 4)]){
+        const cand = y + '-' + mm + '-' + dd;
+        if (isDateStr(cand) && cand >= start && cand <= end){ date = cand; break; }
+      }
+      // Outside the cutoff: still resolve it so the message can NAME the date it
+      // read, rather than only saying "no".
+      if (!date) date = start.slice(0, 4) + '-' + mm + '-' + dd;
+    } else {
+      // A bare day. The cutoff decides the month, and if the cutoff spans two
+      // months the day is only unambiguous in one of them.
+      const dd = String(num(tok)).padStart(2, '0');
+      const hits = [];
+      for (const ym of [start.slice(0, 7), end.slice(0, 7)]){
+        const cand = ym + '-' + dd;
+        if (isDateStr(cand) && cand >= start && cand <= end && hits.indexOf(cand) < 0) hits.push(cand);
+      }
+      if (hits.length === 1) date = hits[0];
+      else if (hits.length > 1){
+        row.error = 'Day ' + dd + ' falls twice in this cutoff. Write the month too, as “8/' + dd + '”.';
+        continue;
+      } else date = start.slice(0, 7) + '-' + dd;
+    }
+    if (!isRealDate(date)){
+      row.error = 'That is not a real date.';
+      continue;
+    }
+    if (date < start || date > end){
+      row.error = fmtShort(date) + ' is not in this cutoff. Step to the right one, or fix the line.';
+      continue;
+    }
+    // A day that has not happened cannot have money spent on it, and the server
+    // refuses it — so it is refused here, in the preview, where he can see it.
+    if (date > todayStr()){
+      row.error = fmtShort(date) + ' has not happened yet.';
+      continue;
+    }
+    const amount = r2(num(String(m[2]).replace(/,/g, '')));
+    if (!(amount > 0)){
+      row.error = 'The amount has to be more than zero.';
+      continue;
+    }
+    row.date = date;
+    row.amount = amount;
+  }
+  const bad = rows.filter(r => r.error).length;
+  return {
+    rows,
+    ok: rows.length > 0 && bad === 0,
+    bad,
+    // A bad row never reaches `row.amount = amount`, so its amount is null and
+    // num(null) is 0. No guard needed here; the invariant is pinned in the tests.
+    total: r2(rows.reduce((t, r) => t + num(r.amount), 0))
+  };
+}
+
+/** The entry_id a pasted row gets. STABLE on (bucket, date), so tapping Save
+ *  twice — or pasting a corrected list — UPSERTS rather than duplicating. That
+ *  is the whole safety story of this feature: the one irreversible mistake it
+ *  could make is double-charging a fortnight, and a deterministic id makes that
+ *  impossible by construction rather than by being careful. */
+function datedAmountId(pick, date){
+  const slug = txt(pick).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return 'bulk-' + (slug || 'x') + '-' + txt(date);
 }
 
 /** The expenses of ONE cutoff, newest first (v2.17.0). Lifted out of
@@ -9112,17 +9377,26 @@ document.addEventListener('click', (ev) => {
   }
   else if (act === 'gastos-prev'){
     gastosPer = shiftPeriod(gastosPer || currentPeriod(todayStr()), -1);
+    gxBulk.text = '';
     gx.date = cutoffExpenseDate(gastosPer) || gx.date;
     gxElsewhere = null;
     renderGastos();
   }
   else if (act === 'gastos-next'){
     gastosPer = shiftPeriod(gastosPer || currentPeriod(todayStr()), 1);
+    gxBulk.text = '';
     gx.date = cutoffExpenseDate(gastosPer) || gx.date;
     gxElsewhere = null;
     renderGastos();
   }
   else if (act === 'gastos-cancel'){ gx.open = false; gxElsewhere = null; renderGastos(); }
+  // MANY AT ONCE (v2.18.0). The Save button only exists while every line reads,
+  // so tapping it is already a decision made against the preview.
+  else if (act === 'bulk-open'){ gxBulk.open = true; renderGastos(); }
+  else if (act === 'bulk-cancel'){ gxBulk.open = false; renderGastos(); }
+  else if (act === 'bulk-pick'){ gxBulk.pick = el.dataset.pick || ''; renderGastos(); }
+  else if (act === 'bulk-paid'){ gxBulk.paidFrom = el.dataset.paid || 'tin'; renderGastos(); }
+  else if (act === 'bulk-save') saveBulk();
   // The bucket IS the whole choice (v2.7.1): Octopus/Other file as those
   // categories, a picklist name files as Supplies with that name as the item.
   else if (act === 'gastos-pick'){
@@ -9345,6 +9619,20 @@ document.addEventListener('input', (ev) => {
   }
 
   // Expenses fields
+  else if (id === 'bulkText'){
+    gxBulk.text = ev.target.value;
+    // ONLY the preview is rewritten (v2.18.0). Rebuilding the whole panel here
+    // would replace the textarea being typed into on every keystroke, which is
+    // exactly v2.13.1'''s bug: "whenever I type the page goes up". The v2.13.2
+    // guard scans this listener for the panel renderers by NAME, so do not even
+    // name one in a comment here — a blunt scan is the point.
+    const box = $('bulkPreview');
+    if (box){
+      box.innerHTML = bulkPreviewHTML(
+        parseDatedAmounts(gxBulk.text, gastosPer || currentPeriod(todayStr())),
+        gastosPer || currentPeriod(todayStr()));
+    }
+  }
   else if (id === 'gxAmount') gx.amount = ev.target.value;
   else if (id === 'gxDate'){
     // Kept as typed, judged live — a half-edited year ("0002-…") shows the

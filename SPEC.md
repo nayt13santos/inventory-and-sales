@@ -541,6 +541,28 @@ A cutoff that has **not begun** is offered no form at all, because `cutoffExpens
 
 `periodLabel` moved to sit with the other period helpers so `gastosWords` can reach it under test, and the `S_PREVINC` test slab grew by exactly one function to bring in `cutoffExpenseDate`, which had been sitting in the gap between two slabs and so had never been lifted or tested at all.
 
+### v2.18.0 — a list of dated amounts, typed once
+
+Owner, 2026-09-01: *"can you add the supplies I sent to you, I dont want to input manually"* — after writing ten back-dated expenses out in one message rather than making ten trips through a date picker.
+
+The Expenses screen gains **Add several at once**: one textarea, one bucket, one "where did the money come from", and a preview. It parses the shape he actually wrote:
+
+```
+8/16 - 244        8-16 244        2026-08-16 244        16 - 244
+```
+
+A bare day, or a month/day with no year, resolves **inside the cutoff on screen** — which is why v2.17.0's stepper had to come first.
+
+**Five rules, each of them load-bearing:**
+
+1. **Nothing is guessed.** A line that does not parse is quoted back with its own text, and the batch **refuses to save while any line is bad**. Half a list of money, saved silently, is the worst outcome available here.
+2. **A date outside the cutoff is an error**, never quietly filed elsewhere. The one thing worse than retyping ten expenses is ten of them landing in a fortnight already settled with his partner.
+3. **The entry id is derived from (bucket, date)** — `bulk-veggies-2026-08-16`. A second tap of Save, or a corrected list pasted again, **upserts**. The one irreversible mistake this feature could make is double-charging a fortnight, and a deterministic id makes that impossible by construction rather than by being careful. The preview says `replaces ₱244` per line, so an overwrite is never a surprise.
+4. **The Save button does not exist** while any line is unreadable — absent, not disabled — and it lives **inside** the region typing patches, or he pastes a perfect list and finds nothing to tap.
+5. **`isRealDate`** joins `isDateStr`: the latter only checks the *shape*, so `2026-13-15` and `2026-02-30` both pass it and would come back as "not in this cutoff", sending him after the wrong problem.
+
+The hyphen alternative in the date pattern is **unspaced on purpose**: `16 - 244` is a bare day and an amount, and letting a spaced hyphen be a date separator read it as month 16, day 24, amount 4.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.

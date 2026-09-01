@@ -658,3 +658,19 @@ Same story for the window warning: `assert.match(screen, /previewIncomplete\(per
 `S_PREVINC` grew by exactly one function. `cutoffExpenseDate` was its **end marker**, which means it sat in the gap between two slabs and had never been lifted — untested, in a codebase with 463 tests, while v2.17.0's correctness now rests on it.
 
 Suites: **208** (`run-tests.js`) + **255** (`contract.test.js`).
+
+### v2.18.0 — a list of dated amounts, typed once
+
+Three tests, **33 mutants**. The first pass killed 14 of 20, and every one of the six survivors was a real gap.
+
+**Two bugs the tests found before the owner could.** `16 - 244` parsed as **April 24** — the ` - ` separator was eaten as a date separator, giving month 16, day 24, amount 4, and `isDateStr` waved `2026-16-24` through because it only checks the shape. The fix was two things: the hyphen alternative in the date pattern is now unspaced, and `isRealDate` checks that the month and the day of the month exist. The second bug was a `</b>` in a bucket name leaving a trailing dash, so an entry id carried `--`.
+
+**One bug only the browser could find.** Pasting his real ten lines produced a correct preview and **no Save button** — typing patches `#bulkPreview`, and the button was outside it, so it never appeared until something else redrew the panel. Every unit test passed. Now the button is part of what the preview returns, and a test pins that it is not drawn outside the region typing can reach.
+
+**Three survivors were redundant code, not missing tests.** A `r.error ? 0 :` guard in the batch total could not be distinguished from `num(r.amount)`, because a rejected line never reaches the assignment — deleted, with the invariant *"a rejected line has no amount"* pinned instead. A duplicate `isRealDate` check inside the month/day branch made the shared check below it unreachable from that path, which is exactly why a mutant that let a rejected line carry money survived — two checks doing one job. And the wording mutants from v2.17.0 taught the same lesson from the other side.
+
+**Three mutants I had to rewrite.** `if (false) row.amount = null;` changes nothing. `void f;` changes nothing. An anchor that matched three times skipped silently and reported as a survivor. A bad mutant is not a coverage gap, and telling them apart is the actual skill.
+
+**One branch that production cannot reach.** A bare day that falls twice in one period needs a cutoff spanning two months, and 1–15 / 16–end never does. The branch stays, because `parseDatedAmounts` takes any period and silently guessing a month is the worst thing it could do with money — so the test builds a synthetic wide period to reach it.
+
+Suites: **208** (`run-tests.js`) + **258** (`contract.test.js`).
