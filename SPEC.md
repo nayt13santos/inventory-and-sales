@@ -482,25 +482,43 @@ The mechanism was not the obvious one. `catchUpFill` ADDED to whatever the row h
 
 **3. "No cost on file" no longer reads as "nothing was used".** Every product in his `StockItems` has a blank `unit_cost`, so the Cutoff card headlined **Value opened ₱0** — which reads as a fortnight that consumed nothing of value. When *nothing* can be priced it now says so instead: the quantities are real, the money is not worked out at all, and here is where to set it.
 
-### v2.15.0 — the supplies used, in the note
+### v2.15.0 / v2.15.1 — the supplies used, in the note
 
-Owner, 2026-09-01: *"theres a breakdown in the cutoff, but its still not shown in note."*
+Owner, 2026-09-01: *"theres a breakdown in the cutoff, but its still not shown in note."* Then, on where it belongs: *"I just want to see it in the supplies section in the cutoff notes, ill handle the deduction for now."*
 
-The note now ends with the value of what was **opened**:
+The note carries the value of what was **opened**, directly beneath the Supplies line it belongs with:
 
 ```
-Remaining - 1,000
-
-Supplies used (opened) - 7,690
+Split - 3,000(1,500 each)
+Supplies - 5,440
+Supplies used (opened) - 2,940
+Octopus -
 ```
 
-**Below the residual, and outside every sum — deliberately.** The seven allocation lines add with the residual to `Total`, and that identity is what his partner checks; a non-allocation line inside that block would make the arithmetic look wrong. So the footer sits after it, separated by a blank line, and enters no total. `apiCutoff` returns `supplies_used` and `supplies_used_unpriced` beside `excluded`, on the same display-only footing.
+v2.15.0 put it in a **footer** below the residual, on the reasoning that a non-allocation line inside the block that sums would make the arithmetic look wrong. He asked for it in the supplies section instead, and that is where it is. Two things keep the arithmetic honest anyway: the line **enters no sum** (`remaining` still comes from the seven allocations alone), and it is **always present** — blank when there is nothing, exactly as an empty category prints `Octopus - `. One shape all fortnight.
 
-Written by **both** note builders — `buildNoteText` in Code.gs and `buildNote` on the phone — byte for byte, from a figure each computes independently from its own copy of the data. The contract suite pins that they agree.
+`apiCutoff` returns `supplies_used` and `supplies_used_unpriced` beside `excluded`, on the same display-only footing.
 
-A product with **no cost on file** is not priced at nothing: it is left out of the money and the line says how many it could not price (`- 720 + 1 with no cost set`), so the figure is never quietly understated. A period with **no usage** — or no costs at all — prints **no footer**, so a fortnight nobody logged writes exactly the note it always did.
+Written by **both** note builders — `buildNoteText` in Code.gs and `buildNote` on the phone — byte for byte, from a figure each computes independently from its own copy of the data. The contract suite pins that they agree. `noteUsedVal` reads **either casing** (`suppliesUsed` and `supplies_used`), because the phone's builder is also handed the server's figures.
 
-**Two named fences were moved, deliberately and with their reasons recorded.** *"THE FENCE: the cutoff note and its figures are byte-identical with and without costs"* (v2.8.0) and *"stock never reaches the cutoff figures or the note"* both asserted the opposite of what he has now asked for twice. Neither was deleted: each now pins the narrower thing that still matters — every allocation, the total, the residual, and the note **down to and including the residual** are untouched by costs or usage. The footer is the only thing either may add.
+A product with **no cost on file** is not priced at nothing: it is left out of the money and the line says how many it could not price (`- 720 + 1 with no cost set`), so the figure is never quietly understated.
+
+**Two named fences were moved, deliberately and with their reasons recorded.** *"THE FENCE: the cutoff note and its figures are byte-identical with and without costs"* (v2.8.0) and *"stock never reaches the cutoff figures or the note"* both asserted the opposite of what he has now asked for twice. Neither was deleted: each now compares the note through `noteSums()`, which strips the supplies-used line **by name** and asserts every other line is byte-identical — plus the allocations key by key. The one line is all either may change.
+
+### v2.16.0 — supplies in two lines, in his words
+
+Owner, 2026-09-01: *"we need to add one more line to the total card in the cutoff tab / supplies(major) this consists of the supplies used this cutoff card / supplies(minor) this totalts the things inputted daily, eggs, flour, veggies, etc."*
+
+The Cutoff tab's total card no longer has one `Supplies` row. It has two:
+
+| | what it is | in the arithmetic? |
+|---|---|---|
+| **Supplies (minor)** | money **paid** — `Expenses` where category = `Supplies`, which is every picklist bucket, i.e. the daily buying | **yes** — it is one of the seven allocations |
+| **Supplies (major)** | the value **opened**, priced at `unit_cost` | **no** — in no total, on either side |
+
+**Why major can never be added.** The same bag of flour is *minor* the night it is bought and *major* the night it is opened. Summing both charges the business twice for one bag. So `suppliesSplit(f)` returns `major` apart from the allocations, the row is drawn as a `.co-row.aside` (indented, muted, off the column of bold values), and it says **"not in the total"** in words — a visual cue alone is not a statement. The identity `total = mama + split + supplies + octopus + salary + other + electric + remaining` still closes with the row on screen, and the contract suite pins that it does.
+
+**Blank is never zero, again.** `majorKnown` is false when the quantities are real but no product has a cost on file, and the row prints **—**, not ₱0. A ₱0 there would read as a fortnight that consumed nothing, which a fortnight of takoyaki never does. Three states, three sentences: nothing logged as opened; nothing priced (with the door that fixes it); priced, with any unpriced product **named** rather than folded in at nothing.
 
 ### Editable Split per cutoff
 

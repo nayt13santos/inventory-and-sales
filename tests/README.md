@@ -611,14 +611,32 @@ Two mutants also pointed at things worth changing rather than testing around: a 
 
 Suites: **208** (`run-tests.js`) + **250** (`contract.test.js`).
 
-### v2.15.0 — the supplies used, in the note
+### v2.15.0 / v2.15.1 — the supplies used, in the note
 
 One test, **9 mutants, all red** — but the work was mostly in *relaxing four existing pins without gutting them*, which is the harder half.
 
-Two were named invariants that asserted the exact opposite of the request: `THE FENCE: the cutoff note and its figures are byte-identical with and without costs`, and `stock never reaches the cutoff figures or the note`. Deleting either would have thrown away real protection; leaving them would have meant refusing him a figure he asked for twice. Both now pin the narrower truth — every allocation, the total, the residual, and **the note down to and including the residual** are untouched; the footer is the only thing that may move. A shared `noteSums()` helper makes that one idea rather than four copies of it.
+Two were named invariants that asserted the exact opposite of the request: `THE FENCE: the cutoff note and its figures are byte-identical with and without costs`, and `stock never reaches the cutoff figures or the note`. Deleting either would have thrown away real protection; leaving them would have meant refusing him a figure he asked for twice. Both now pin the narrower truth — every allocation key by key, the total, the residual, and **every other line of the note byte for byte**; the supplies-used line is the only thing that may move. A shared `noteSums()` helper makes that one idea rather than four copies of it.
 
-`SPEC_NOTE` was **not** edited: it is the spec sample and still is. A derived `SPEC_NOTE_USED = SPEC_NOTE + footer` covers the fixtures whose usage is priceable, so the two can never drift and the spec keeps meaning what it says. Its figure differs per suite (240 in `run-tests`, 2,940 in `contract`) because the fixtures differ — taken from the actual output rather than hand-computed.
+**v2.15.1 moved that line into the supplies section**, at his instruction, and the helper had to change with it. `noteSums()` originally stripped a **trailing** footer; a line in the middle of the block cannot be stripped by position, so it now filters **by name**. That is strictly better: it keeps working wherever the line goes, and it cannot accidentally strip a line that merely sits last.
 
-One assertion I kept whole on purpose: *"a replay must not move the note"* is compared **footer included**, because a replay rewriting the same usage must produce the same value, and that is exactly what makes it a replay.
+`SPEC_NOTE` was **not** edited: it is the spec sample and still is. A derived `SPEC_NOTE_USED` replaces the blank value with a real one, so the two can never drift and the spec keeps meaning what it says. Its figure differs per suite (240 in `run-tests`, 2,940 in `contract`) because the fixtures differ — taken from the actual output rather than hand-computed.
+
+One assertion I kept whole on purpose: *"a replay must not move the note"* is compared with that line **included**, because a replay rewriting the same usage must produce the same value, and that is exactly what makes it a replay.
 
 Suites: **208** (`run-tests.js`) + **251** (`contract.test.js`).
+
+### v2.16.0 — supplies in two lines
+
+Two tests, **12 mutants, all red.**
+
+The interesting part is what the mutants were *for*. A row that shows a non-allocation figure inside a block whose rows add up is exactly the sort of thing that rots into a bug six months later, when someone "tidies" the render. So the mutants attack the mix-up from both ends: `major` folding the minor in, `minor` folding the major in, the row printing `peso(f.supplies + f.suppliesUsed)`, and `liveCutoff` quietly subtracting the opened value from the residual. All four are caught by the same identity test — `total = mama + split + supplies + octopus + salary + other + electric + remaining` — which is the one his partner actually checks.
+
+Three more defend *honesty about what is unknown*: `majorKnown: true` (a ₱0 that means "not priced"), `anyPriced` counting rows instead of costs, and the card printing `peso(sup.major)` unconditionally instead of `—`.
+
+Two defend the *words*, not the styling: deleting `not in the total` from the row and renaming the `.co-row.aside` style both fail. A muted row that no longer says why it is muted is a regression even though every number is still right.
+
+The last one is the boring one that matters: `esc(sup.why)` → `sup.why`. The explanation names products read out of his sheet.
+
+**A mutant I had to rewrite.** My first attempt at "the residual takes the opened value out" was `function suppliesSplit(f){ void f;` — which changes nothing at all, so it survived and briefly looked like a coverage gap. It was a bad mutant, not a missing test. Replaced with one that actually mutates `liveCutoff`, and it died immediately.
+
+Suites: **208** (`run-tests.js`) + **253** (`contract.test.js`).

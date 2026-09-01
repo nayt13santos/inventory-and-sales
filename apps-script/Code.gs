@@ -279,7 +279,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.15.0';
+var VERSION = '2.16.0';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -2797,28 +2797,36 @@ function buildNoteText(branch, start, end, f) {
     'Mama - ' + orBlank(f.mama),
     'Split - ' + splitVal,
     'Supplies - ' + orBlank(f.supplies),
+    // Beside the Supplies line it belongs with, at the owner's direction
+    // (2026-09-01): "I just want to see it in the supplies section in the cutoff
+    // notes, ill handle the deduction for now." It is the value of what was
+    // OPENED — his suppliers deliver on credit, so that is what he owes at the
+    // cutoff — where the line above is what he has actually PAID.
+    // IT IS STILL IN NO SUM. `remaining` is computed from the seven allocations
+    // only, and the tests assert the identity with this line present.
+    'Supplies used (opened) - ' + usedVal(f),
     'Octopus - ' + orBlank(f.octopus),
     'Salary - ' + orBlank(f.salary),
     'Other payments - ' + orBlank(f.other),
     'Electric bill - ' + orBlank(f.electric),
     '',
     residual
-  ].concat(usedTail(f)).join('\n');
+  ].join('\n');
 }
 
-/** The supplies-used footer, or nothing at all (v2.15.0).
+/** The value of what was OPENED, for the line beside Supplies (v2.15.1).
  *
- *  BELOW the residual and separated from it, because the seven lines above sum
- *  with the residual to Total and this figure is not part of that — it is what
- *  was OPENED, priced at cost, where "Supplies" is what was PAID. Printed only
- *  when there is something to print, so a period with no usage logged (or no
- *  costs on file) produces exactly the note it always did. */
-function usedTail(f) {
+ *  Blank when there is nothing to say — the same rule every other category line
+ *  follows, so a fortnight with no usage logged (or no costs on file) reads
+ *  "Supplies used (opened) - " exactly as an empty Octopus reads "Octopus - ".
+ *  A product with no cost is NOT priced at nothing: it is left out of the money
+ *  and counted, so the figure is never quietly understated. */
+function usedVal(f) {
   var used = asNum(f.supplies_used);
-  if (!(used > 0)) return [];
   var unpriced = asNum(f.supplies_used_unpriced);
-  return ['', 'Supplies used (opened) - ' + fmtAmt(used) +
-    (unpriced > 0 ? ' + ' + unpriced + ' with no cost set' : '')];
+  if (!(used > 0) && !(unpriced > 0)) return '';
+  return (used > 0 ? fmtAmt(used) : '0') +
+    (unpriced > 0 ? ' + ' + unpriced + ' with no cost set' : '');
 }
 
 /** "July 1 - 15" (same month) or "July 30 - August 2" (spanning months). */

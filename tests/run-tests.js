@@ -93,6 +93,10 @@ const SPEC_NOTE = [
   'Mama - 500',
   'Split - 3,000(1,500 each)',
   'Supplies - 5,440',
+  // v2.15.1, owner-directed: beside the Supplies line it belongs with, and it
+  // ALWAYS prints — blank when there is nothing, exactly as "Octopus - " does.
+  // It is in no sum; the identity is asserted with it present.
+  'Supplies used (opened) - ',
   'Octopus - ',
   'Salary - 3,000',
   'Other payments - 1,417',
@@ -102,12 +106,22 @@ const SPEC_NOTE = [
 ].join('\n');
 
 /* The same note when the period's stock usage CAN be priced (v2.15.0,
-   owner-directed: "theres a breakdown in the cutoff, but its still not shown in
-   note"). The value of what was OPENED prints BELOW the residual and outside
-   every sum — the seven lines above still add with the residual to Total, which
+   owner-directed). The value of what was OPENED prints BESIDE the Supplies
+   line it belongs with — his instruction, 2026-09-01: "I just want to see it in
+   the supplies section in the cutoff notes, ill handle the deduction for now" —
+   and is in no sum — the seven lines above still add with the residual to Total, which
    is the identity his partner checks and which is asserted separately. Derived
    from SPEC_NOTE rather than retyped, so the two can never drift. */
-const SPEC_NOTE_USED = SPEC_NOTE + '\n\nSupplies used (opened) - 240';
+/** A note with the supplies-used line taken out — everything the seven
+ *  allocations and the residual are made of, which is what his partner does
+ *  arithmetic on. Removed BY NAME, not by position, since v2.15.1 puts that line
+ *  inside the category block at the owner's direction. */
+function noteSums(text) {
+  return String(text).split('\n').filter(l => l.indexOf('Supplies used (opened)') !== 0).join('\n');
+}
+
+const SPEC_NOTE_USED = SPEC_NOTE.replace('Supplies used (opened) - ',
+  'Supplies used (opened) - 240');
 
 const SPEC_FIGURES = {
   total: 11857, cash: 10530, gcash: 1327,
@@ -122,13 +136,16 @@ test('buildNoteText reproduces the spec sample EXACTLY', () => {
   assert.strictEqual(note, SPEC_NOTE);
   // Spelled out so a future edit cannot quietly "tidy" one of these away.
   const lines = note.split('\n');
-  assert.strictEqual(lines.length, 16);
-  assert.deepStrictEqual([lines[1], lines[3], lines[6], lines[14]], ['', '', '', ''],
+  assert.strictEqual(lines.length, 17, '16 as it always was, plus the v2.15.1 supplies-used line');
+  assert.deepStrictEqual([lines[1], lines[3], lines[6], lines[15]], ['', '', '', ''],
     'blank-line placement, including the one before the residual');
   assert.strictEqual(lines[8], 'Split - 3,000(1,500 each)', 'no space before the bracket');
-  assert.strictEqual(lines[10], 'Octopus - ', 'a zero category keeps the trailing space');
-  assert.strictEqual(lines[11], 'Salary - 3,000');
-  assert.strictEqual(lines[15], 'Short - 2,000', 'the LABEL carries the sign');
+  assert.strictEqual(lines[9], 'Supplies - 5,440', 'money PAID');
+  assert.strictEqual(lines[10], 'Supplies used (opened) - ',
+    'the value OPENED sits directly beneath it, blank like any empty category');
+  assert.strictEqual(lines[11], 'Octopus - ', 'a zero category keeps the trailing space');
+  assert.strictEqual(lines[12], 'Salary - 3,000');
+  assert.strictEqual(lines[16], 'Short - 2,000', 'the LABEL carries the sign');
   assert.ok(!/- -/.test(note), 'a note must never print a minus sign after "- "');
 });
 
@@ -150,11 +167,12 @@ test('a zero Salary blanks like the other categories, and never blanks Total', (
   const note = ctx.buildNoteText('Tañong', '2025-07-01', '2025-07-15',
     Object.assign({}, SPEC_FIGURES, { salary: 0, total: 0, cash: 0, gcash: 0, remaining: 0 }));
   const lines = note.split('\n');
-  assert.strictEqual(lines[11], 'Salary - ', 'a zero Salary keeps the line and blanks the value');
+  // Indices moved by one from v2.15.1's supplies-used line, which sits above.
+  assert.strictEqual(lines[12], 'Salary - ', 'a zero Salary keeps the line and blanks the value');
   assert.strictEqual(lines[2], 'Total - 0');
   assert.strictEqual(lines[4], 'Cash - 0');
   assert.strictEqual(lines[5], 'GCash - 0');
-  assert.strictEqual(lines[15], 'Remaining - 0');
+  assert.strictEqual(lines[16], 'Remaining - 0');
 });
 
 test('periodLabel spans months: "July 30 - August 2"', () => {
@@ -796,8 +814,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.15.0', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.15.0');
+  assert.strictEqual(g.data.version, '2.16.0', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.16.0');
 });
 
 // ---------------------------------------------------------------------------
@@ -1428,8 +1446,8 @@ test('cutoff Supplies is Expenses(Supplies) ALONE — nothing else can inflate i
   // sample — the assertions above already pin Supplies at 5,440 and the
   // total/remaining identity, which is what "Supplies is Expenses ALONE" means.
   assert.strictEqual(r.data.note_text, SPEC_NOTE_USED);
-  assert.ok(r.data.note_text.indexOf(SPEC_NOTE) === 0,
-    'the spec note is still its opening, unchanged, byte for byte');
+  assert.strictEqual(noteSums(r.data.note_text), noteSums(SPEC_NOTE),
+    'every other line is unchanged, byte for byte — only the supplies-used value differs');
 });
 
 // ---------------------------------------------------------------------------
@@ -2975,11 +2993,11 @@ test('the cutoff shows nori as excluded and in NOTHING else, and the identity cl
     'Total = Mama + Split + Supplies + Octopus + Salary + Other + Electric + Remaining');
   assert.notStrictEqual(f.excluded, 0, 'and that identity closed while money WAS excluded');
 
-  // (4) The note names no excluded sku and gains no line of its own: it is the
-  // same fifteen lines it has always been.
+  // (4) The note names no excluded sku and gains no line of its own: the only
+  // line added since is v2.15.1's supplies-used, which the owner asked for.
   assert.ok(!/nori/i.test(withNori.note_text), 'nori must not be named in the note');
-  assert.strictEqual(withNori.note_text.split('\n').length, 16,
-    'the note is still exactly 16 lines — no "Excluded" line was added to it');
+  assert.strictEqual(withNori.note_text.split('\n').length, 17,
+    'no "Excluded" line was added to the note');
 });
 
 test('the note is BYTE-IDENTICAL to the spec sample with nori sales present', () => {
@@ -3831,7 +3849,7 @@ test('branch strips CR/LF on both paths, and a null body gets the friendly error
   const cut = cutoffFor(ctx, token, '2026-07-16', '2026-07-31');
   assert.strictEqual(cut.ok, true, cut.error);
   assert.match(cut.data.note_text, /^Tañong Main: /, 'the note heading stays ONE line');
-  assert.strictEqual(cut.data.note_text.split('\n').length, 16, 'and the line structure is intact');
+  assert.strictEqual(cut.data.note_text.split('\n').length, 17, 'and the line structure is intact');
   assert.strictEqual(post(ctx, { token, action: 'bootstrap', payload: {} }).data.settings.branch,
     'Tañong Main', 'the phone previews with the same cleaned branch');
 
@@ -5076,13 +5094,16 @@ test('THE FENCE: the cutoff note and its figures are byte-identical with and wit
     assert.deepStrictEqual(noCosts.data.figures[k], withCosts.data.figures[k],
       'a unit cost moved the note figure ' + k);
   }
-  const upTo = (t) => t.split('\n\nSupplies used (opened)')[0];
-  assert.strictEqual(upTo(noCosts.data.note_text), upTo(withCosts.data.note_text),
-    'everything down to and including the residual is byte-identical');
-  assert.ok(withCosts.data.note_text.indexOf('Supplies used (opened) - ') > 0,
-    'with costs, the footer is there — which is the point of the change');
-  assert.ok(noCosts.data.note_text.indexOf('Supplies used (opened)') < 0,
-    'and with NO costs it is absent rather than printed as a zero');
+  assert.strictEqual(noteSums(noCosts.data.note_text), noteSums(withCosts.data.note_text),
+    'every line except supplies-used is byte-identical');
+  assert.match(withCosts.data.note_text, /Supplies used \(opened\) - [0-9]/,
+    'with costs, the value is there — which is the point of the change');
+  // With usage logged but NO costs, the line does not blank and does not print a
+  // bare zero: it says how many products it could not price, so the fortnight
+  // never looks like it consumed nothing.
+  assert.match(noCosts.data.note_text, /Supplies used \(opened\) - 0 \+ \d+ with no cost set/,
+    'no costs means the line SAYS so rather than reading as nothing used');
+  assert.strictEqual(noCosts.data.figures.supplies_used, 0, 'and no money is invented');
   assert.strictEqual(noCosts.data.figures.supplies_used, 0,
     'nothing priceable means nothing priced, never a guess');
   // ...and with no costs at all, the costing screen says so instead of pricing
@@ -6050,14 +6071,14 @@ test('an unknown action is refused by name, and doGet answers without a token', 
   assert.strictEqual(r.error, 'Unknown action: "saveDay".',
     'this app cannot save a day, and says so rather than pretending');
   const g = JSON.parse(ctx.doGet({}).getContent());
-  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.15.0' } });
+  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.16.0' } });
 });
 
 test('ping proves the setup WITHOUT spending a unit of quota — even with no key yet', () => {
   const ctx = loadVision({ keepKeyPlaceholder: true });
   const r = vpost(ctx, { token: VISION_TOK, action: 'ping', payload: {} });
   assert.strictEqual(r.ok, true, r.error);
-  assert.strictEqual(r.data.version, '2.15.0', 'the vision project ships with the release it belongs to');
+  assert.strictEqual(r.data.version, '2.16.0', 'the vision project ships with the release it belongs to');
   assert.strictEqual(r.data.model, 'gemini-3.6-flash');
   assert.strictEqual(r.data.key_configured, false, 'a yes/no — never the key itself');
   keepsSecrets(JSON.stringify(r));
