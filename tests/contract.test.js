@@ -5842,6 +5842,14 @@ test('THE CUTOFF STOCK BLOCK SHOWS WHAT IT STARTED WITH (v2.21.0)', () => {
   assert.ok(op.date < per.start, 'strictly before the period begins');
 
   // AND THE ROW NOW ADDS UP ON ITS FACE: 1 + 1 - 2 = 0.
+  // v2.22.1: the sentence must NOT sit in a `.co-row .v` — that column is
+  // white-space:nowrap, and this sentence at ~390px widened the layout viewport
+  // on a phone, stretching the fixed tab bar until the fourth tab fell off the
+  // screen. Owner: "if I tap cutoff, there are only 3 available tabs."
+  assert.ok(!/<span class="v">[^<]*at the start/.test(app.stockCutoffHTML(per)),
+    'the opened/arrived sentence is never placed in the nowrap value column');
+  assert.match(app.stockCutoffHTML(per), /<div class="stk-line-what">[^<]*at the start/,
+    'it has its own wrapping line under the product');
   // Unit-agnostic on purpose: the unit is fixture data, the ARITHMETIC is the
   // contract. 1 at the start + 1 in - 2 opened = the 0 that was counted.
   const html = app.stockCutoffHTML(per);
@@ -5900,6 +5908,27 @@ test('THE DATE A COUNT IS FOR, and what it means (v2.21.0)', () => {
     'and warns that later rows still apply, so on hand may not equal what he typed');
   assert.match(back, /this replaces it/, 'and that it settles a day already counted');
   assert.notStrictEqual(now, back, 'the two cases do not read the same');
+});
+
+test('SOURCE PIN: nothing in a panel may widen the page, or the tab bar loses a tab (v2.22.1)', () => {
+  // The tab bar is position:fixed at 100% width, so it is exactly as wide as the
+  // LAYOUT viewport. Any element that overflows the page sideways widens that
+  // viewport past the visible screen, and the rightmost tab is drawn off the
+  // edge where no finger can reach it. Found on the owner's phone the day after
+  // v2.21.0 lengthened one sentence in "Stock this cutoff".
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+  const main = src.slice(src.indexOf('\nmain{'), src.indexOf('\nmain{') + 200);
+  assert.match(main, /overflow-x:hidden/, 'the page column clips sideways overflow');
+  assert.match(main, /min-width:0/, 'and lets flex children shrink rather than force it wider');
+  // The stock block's sentence has a wrapping home, and it is not the nowrap column.
+  assert.match(src, /\.stk-line-what\{[^}]*overflow-wrap:anywhere/, 'the sentence line wraps');
+  const block = src.slice(src.indexOf('function stockCutoffHTML(per){'), src.indexOf('function stockCutoffHTML(per){') + 4000);
+  assert.ok(block.indexOf("'<span class=\"v\">' + esc(bits.join(") < 0,
+    'the sentence is no longer written into a .v span');
+  assert.match(block, /class="stk-line-what">' \+ esc\(bits\.join\(', '\)/, 'it goes in its own line');
+  // .co-row .v stays nowrap — that is right for money — which is exactly why a
+  // sentence cannot live there.
+  assert.match(src, /\.co-row \.v\{[^}]*white-space:nowrap/, 'the value column is still nowrap');
 });
 
 test('SOURCE PIN: a count can be dated, and says what that means (v2.21.0)', () => {

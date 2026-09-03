@@ -661,6 +661,16 @@ Every line from Mama to the bottom of the note adds to Total — which is what m
 
 Three smaller review findings closed alongside: a cost edit now drops the note on screen (`applyLocalStockItems` clears `lastNote` when a cost actually changes — the figures card was showing one Remaining over a "saved" note showing another); the phone's "priced" test is now `usableCostVal` — non-blank, finite, **≥ 0** — matching the server's `usableCost`, where it used to require > 0 and a cost of exactly 0 made the two notes disagree on the *"with no cost set"* suffix; and the fallback lookup case-folds the product name as the server does, since `apiSaveDay` does not validate product names against StockItems and a hand-edited row could otherwise price on one side only. `catchLandsText` tells the truth again: a night logged into a finished cutoff changes that cutoff's opened line **and its Remaining**; what cannot move is the Total and the Split.
 
+### v2.22.1 — a sentence in a money column cost a tab
+
+Owner, 2026-09-03: *"if I tap cutoff, there are only 3 available tabs at the bottom."*
+
+The tab bar is `position:fixed` at 100% width, so it is exactly as wide as the **layout** viewport. Anything that overflows the page sideways widens that viewport past the visible screen, the bar stretches to match, and the rightmost tab is drawn off the edge where no finger can reach it.
+
+What overflowed: the **"Stock this cutoff"** block put its per-product sentence in the `.co-row .v` column, which is `white-space:nowrap` — right for `₱1,200`, wrong for *"2 kgs at the start, 10 kgs came in, 9 kgs opened"*. v2.21.0's *"at the start"* took that sentence to ~390px, wider than a phone. Reproduced in the preview: document 498px wide in a 467px viewport, the `.v` span's right edge at 498.
+
+Two fixes, one structural. The sentence now has its own wrapping line under the product name (`.stk-line` / `.stk-line-what`, `overflow-wrap:anywhere`), and `.co-row .v` stays `nowrap` because money must never wrap mid-figure. And **`main` now carries `overflow-x:hidden; min-width:0`**, so no future element in any panel can widen the layout viewport — wide content scrolls inside its own container or wraps; the page itself never scrolls sideways. Verified at 467px and 375px: document width equals viewport width, all four tabs on screen.
+
 ### Editable Split per cutoff
 
 Tab **CutoffInputs** (start | end | split_amount | entry_id | updated_at) — upsert by (start, end). New action **`saveCutoffSplit`** payload `{start, end, amount, entryId}`. `apiCutoff` reads the row for the period and falls back to Settings `split_default`; `per_partner = split / 2`. The Cutoff screen shows Split as an editable amount pre-filled from whichever applies, and the residual (`Remaining`/`Short`) updates live as it is changed. Two rules keep that field honest, because the NOTE is built from the saved row and nothing else: an **empty** field means the default (`splitFieldAmount`), never ₱0 — otherwise the headline residual swings by the whole split and flips its label; and while the field differs from what is saved, **"Generate cutoff note" refuses** and says to save the split first (`pendingSplit`). A note that contradicts the figures printed directly above it is worse than no note.

@@ -127,7 +127,19 @@ button{ font:inherit; color:inherit; }
 }
 
 /* Layout */
-main{ max-width:560px; margin:0 auto; padding:16px 16px 8px; }
+/* overflow-x:hidden (v2.22.1) is the STRUCTURAL guard: no element inside a
+   panel may ever widen the layout viewport, because the tab bar is fixed at
+   100% width and stretches with it — which is how a long line in one card cut
+   the fourth tab off the screen. Wide content scrolls INSIDE its own container
+   or wraps; the page itself never scrolls sideways. min-width:0 lets flex
+   children shrink instead of forcing the column wider. */
+main{ max-width:560px; margin:0 auto; padding:16px 16px 8px; overflow-x:hidden; min-width:0; }
+/* One product in "Stock this cutoff": a name line and a wrapping sentence
+   beneath it. Deliberately NOT .co-row — that column does not wrap. */
+.stk-line{ padding:6px 0; font-size:16px; }
+.stk-line + .stk-line{ border-top:1px dashed var(--line); }
+.stk-line-name{ font-weight:600; }
+.stk-line-what{ color:var(--muted); font-size:15px; margin-top:2px; overflow-wrap:anywhere; }
 .card{
   background:var(--paper); border:1px solid var(--line-strong);
   border-radius:var(--radius); padding:16px; margin-bottom:14px;
@@ -598,7 +610,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.22.0';
+const APP_VERSION = '2.22.1';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -7080,10 +7092,17 @@ function stockCutoffHTML(per){
     if (r.opening) bits.push(qtyWithUnit(r.opening.qty, r.unit) + ' at the start');
     if (r.arrived) bits.push(qtyWithUnit(r.arrived, r.unit) + ' came in');
     if (r.opened) bits.push(qtyWithUnit(r.opened, r.unit) + ' opened');
-    h += '<div class="co-row"><span>' + esc(r.product) +
+    // NOT a `.co-row .v` (v2.22.1). That column is white-space:nowrap, built for
+    // "₱1,200" — and this is a sentence. With v2.21.0's "at the start" it ran to
+    // ~390px, wider than a phone, and the card pushed the LAYOUT viewport past
+    // the visual one. The tab bar is position:fixed at 100% width, so it
+    // stretched to match and the fourth tab fell off the right edge of the
+    // screen. Owner, 2026-09-03: "if I tap cutoff, there are only 3 available
+    // tabs at the bottom." The sentence now wraps on its own line.
+    h += '<div class="stk-line"><div class="stk-line-name">' + esc(r.product) +
       (r.counted ? '<span class="hint"> · counted ' + esc(qtyWithUnit(r.counted.qty, r.unit)) +
-        ' on ' + esc(fmtShort(r.counted.date)) + '</span>' : '') + '</span>' +
-      '<span class="v">' + esc(bits.join(', ') || '—') + '</span></div>';
+        ' on ' + esc(fmtShort(r.counted.date)) + '</span>' : '') + '</div>' +
+      '<div class="stk-line-what">' + esc(bits.join(', ') || '—') + '</div></div>';
   }
   return h + '</div>';
 }

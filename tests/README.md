@@ -742,3 +742,11 @@ Four new tests, **22 mutants, all red** — but the work was **thirteen existing
 **Two anchors that matched twice.** `readStockUsage`'s row-building block and `normStockUse`'s return block are byte-identical to `readStockDeliveries`' and `normStockDelivery`'s, so an unscoped replace found two and the script refused to write. Both edits were scoped to the function body. The rule already in this file — an anchor that does not match uniquely is not a result — applies to edits as much as to mutants.
 
 Suites: **209** (`run-tests.js`) + **273** (`contract.test.js`).
+
+### v2.22.1 — a sentence in a money column cost a tab
+
+One behaviour pin, one source pin, **5 mutants, all red**. The bug itself was found by the owner on his phone the day after v2.21.0 shipped, and could not have been found by these suites: Node has no layout engine, so no test can measure that a 390px sentence in a nowrap span widened the viewport and pushed a fixed tab bar off the screen. The preview browser found it in one measurement — `documentElement.scrollWidth` 498 against `innerWidth` 467, and the offending span's right edge at 498.
+
+What the tests *can* hold is the two facts that make the bug impossible: the sentence is never written into a `.v` span (a behaviour pin on `stockCutoffHTML`'s output), and `main` clips sideways overflow (a source pin on the rule). One mutant removes `nowrap` from `.co-row .v` to make the sentence "fit" — it is killed on purpose, because a peso figure wrapping mid-number is the worse bug, and the fix must not be to make money wrap.
+
+Suites: **209** (`run-tests.js`) + **274** (`contract.test.js`).
