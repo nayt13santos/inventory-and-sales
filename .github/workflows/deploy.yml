@@ -33,11 +33,39 @@ jobs:
         run: node run-all.js
 
   # ---------------------------------------------------------------------------
+  # Guard: never publish an app that does not fit on a phone. The Node suites
+  # have no layout engine, so v2.22.1's sideways overflow (a sentence in a
+  # nowrap span pushed the fourth tab off the screen) sailed through 483 of
+  # them. This renders the real page in headless Chromium at phone size and
+  # fails on overflow, a tab bar off the viewport, console errors or an empty
+  # screen. See tests/smoke/README.md.
+  # ---------------------------------------------------------------------------
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Puppeteer downloads Chrome for Testing (~170 MB) on install; keep it
+      # between runs, keyed on the pinned version so a bump refreshes it.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/puppeteer
+          key: puppeteer-25.9.0-${{ runner.os }}
+      # PINNED to the version tests/smoke/phone.js was written against — bump
+      # both together. Its bundled Chromium runs on ubuntu-latest as-is.
+      - name: Install puppeteer
+        run: npm i --no-save puppeteer@25.9.0
+      - name: Phone-size browser smoke test
+        run: node tests/smoke/phone.js
+
+  # ---------------------------------------------------------------------------
   # The phone app -> GitHub Pages. Only pwa/ is published; the sheet script,
   # tests and docs stay out of the public site.
   # ---------------------------------------------------------------------------
   deploy-app:
-    needs: test
+    needs: [test, smoke]
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -56,7 +84,7 @@ jobs:
   # and SCRIPT_ID secrets exist, so the app still deploys without them.
   # ---------------------------------------------------------------------------
   deploy-script:
-    needs: test
+    needs: [test, smoke]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
