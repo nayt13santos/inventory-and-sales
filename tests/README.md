@@ -750,3 +750,17 @@ One behaviour pin, one source pin, **5 mutants, all red**. The bug itself was fo
 What the tests *can* hold is the two facts that make the bug impossible: the sentence is never written into a `.v` span (a behaviour pin on `stockCutoffHTML`'s output), and `main` clips sideways overflow (a source pin on the rule). One mutant removes `nowrap` from `.co-row .v` to make the sentence "fit" — it is killed on purpose, because a peso figure wrapping mid-number is the worse bug, and the fix must not be to make money wrap.
 
 Suites: **209** (`run-tests.js`) + **274** (`contract.test.js`).
+
+### v2.23.0 — five things, and a browser in CI
+
+Seven new tests, **28 mutants, all red** after one refinement and one round trip.
+
+**The refinement was to the rule, not the tests.** The first cut of "Out" was `on_hand <= 0`, and five existing tests failed — *"a blank threshold warns about nothing"*, *"never warns without one"*. Reading them, they were half right: a product nobody has ever counted or moved reads 0 by *absence* of data, and badging it "Out" asserts what nobody knows. So `out` requires a baseline or some movement, and the five tests were turned, not deleted — each now asserts `low === out` for a blank threshold, which *is* the rule. A fresh install stays quiet; his nori and chili, counted at zero, do not.
+
+**The round trip.** The envelope test set `app.cfg.enteredBy` directly and proved the name travels beside the token — and a mutant that made `sanitizeConfig` drop the name survived, because nothing read a config back through it. A phone would have been named once and blank again by morning, silently. One test now round-trips the name through `sanitizeConfig`: kept, trimmed, capped at 40, blank for an old config, `'42'` for a number.
+
+**The spec fixture had a ₱1,000 Backlog row all along.** Taking backlog payments out of every allocation moved `other` 1,417 → 417, Supplies (minor) 6,857 → 5,857, and every residual in both suites by exactly 1,000 — thirteen pins, one cause. And `grep` exiting 1 on a non-match silently short-circuited an `&&` chain once, skipping an edit I believed had run; the output only showed test results because those were `;`-separated. Chains that must run to the end are `;`-separated now.
+
+**The smoke test is the first browser in CI.** `tests/smoke/phone.js` drives headless Chromium at 375×812 and 360×740 across six screens and fails on sideways overflow, a tab off the glass, a console error or an empty panel. Built by an agent in its own worktree, proven both ways: green on the current app in 6 s, and red on a scratch copy with v2.22.1's bug re-introduced — naming the two `<span class="v">` sentences at 401px on a 375px screen and the "More" tab pushed to 401. Its one finding: under mobile emulation an overflowing document grows the layout viewport *with* it, so `scrollWidth <= innerWidth` holds in exactly the bug state; it measures against the emulator's screen width instead. Run locally with `PUPPETEER_EXECUTABLE_PATH` pointing at a cached Chrome and `PUPPETEER_SKIP_DOWNLOAD=1` on install.
+
+Suites: **210** (`run-tests.js`) + **280** (`contract.test.js`) + **12 phone screens** (`smoke/phone.js`).

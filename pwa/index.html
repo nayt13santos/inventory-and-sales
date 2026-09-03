@@ -610,7 +610,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.22.1';
+const APP_VERSION = '2.23.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -719,7 +719,7 @@ function freshState(){
 // photo-reader has no business holding it. BLANK means the feature is simply
 // not on this phone: no button renders anywhere, so nothing can be tapped that
 // cannot work.
-function freshConfig(){ return { apiUrl:'', token:'', sheetUrl:'', visionUrl:'', visionToken:'' }; }
+function freshConfig(){ return { apiUrl:'', token:'', sheetUrl:'', visionUrl:'', visionToken:'', enteredBy:'' }; }
 
 /* ------------------------------------------------------------
    Loading saved data safely.
@@ -1133,6 +1133,10 @@ function sanitizeConfig(raw){
   // feature is absent, which is the truth on a phone that has not been given it.
   c.visionUrl = txt(raw.visionUrl).trim();
   c.visionToken = txt(raw.visionToken).trim();
+  // WHO USES THIS PHONE (v2.23.0). Per phone, never in the shared Settings tab:
+  // it is the one thing that differs between his phone and his mother's. Written
+  // onto every row this phone saves. A label, not an identity.
+  c.enteredBy = txt(raw.enteredBy).trim().slice(0, 40);
   return c;
 }
 
@@ -1991,7 +1995,11 @@ function computeCutoff(per){
     else if (from === '') unknownOut += num(e.amount);
   }
   const supplies = r2(b.Supplies);
-  const other = r2(b.Backlog + b.Other);
+  // Backlog payments are OUT of every allocation since v2.23.0 (see Code.gs):
+  // the stock they bought is deducted the night it is opened, so counting the
+  // payment too took the same money off twice. Reported as backlogPaid.
+  const other = r2(b.Other);
+  const backlogPaid = r2(b.Backlog);
   const mama = r2(b.Mama), octopus = r2(b.Octopus), electric = r2(b.Electric);
   // Split is an ENTERED amount now, so it is no longer the residual...
   const sp = splitFor(per);
@@ -2035,10 +2043,8 @@ function computeCutoff(per){
        parts stay on this object and in the Cutoffs archive, so nothing is lost.
        `remaining` does not move: it was already total minus all seven. */
     suppliesMinor: r2(supplies + octopus + other),
-    // How much of minor is Backlog payments (v2.22.0). A backlog for bulk stock
-    // whose consumption is already in suppliesUsed is deducted twice, in two
-    // different cutoffs. Reported so the screen can say so; never subtracted.
-    backlogInMinor: r2(b.Backlog),
+    // Backlog payments this period (v2.23.0) — settled debt, in NO allocation.
+    backlogPaid,
     split, perPartner: r2(split / 2), splitEntered: sp.entered,
     remaining,
     // Supplies OPENED, in money (v2.14.0) — display only, never an allocation.
@@ -2342,7 +2348,15 @@ function stockStatusOf(it){
   return {
     product, unit: txt(item.unit),
     on_hand: onHand,
-    low: reorderAt > 0 && onHand <= reorderAt,
+    // OUT (v2.23.0): KNOWN to be gone — a baseline or some movement exists and
+    // on-hand is at or below zero. A product never counted or moved reads 0 by
+    // absence of data, not knowledge, and must not be badged: blank is never
+    // zero. `low` includes `out`, so a reorder point of 0 disarms only the low
+    // BAND — it used to mean "never warn", which left nori and chili at 0 with no
+    // badge. Code.gs applies the identical rule, so the seam cannot disagree.
+    out: (!!base.date || delivered > 0 || used > 0) && onHand <= 0,
+    low: ((!!base.date || delivered > 0 || used > 0) && onHand <= 0) ||
+         (reorderAt > 0 && onHand <= reorderAt),
     reorder_at: reorderAt,
     baseline_qty: r2(base.qty), baseline_date: base.date,
     delivered_since: delivered, used_since: used
@@ -2801,6 +2815,42 @@ function daySaveRisk(p){
       'them, so anything not on the card goes.\n\nRemove it?';
   }
   return '';
+}
+
+/** ROWS THAT LOOK LIKE A SHELF COUNT (v2.23.0). Owner, 2026-09-03: Mama typed
+ *  what was LEFT into "Opened today" two nights running — 12/4/3/1 the night the
+ *  delivery arrived, 9/3/2/1 the next — and the app took both as consumption,
+ *  zeroing the shelf and charging the cutoff for stock nobody had used.
+ *
+ *  The tell is the shape, not any one figure: a night whose "opened" equals the
+ *  whole shelf for SEVERAL products at once. One product going to zero is an
+ *  ordinary last-bag night and is left alone; the caller asks only from two.
+ *  `before` is the shelf BEFORE tonight — on-hand plus whatever this same night
+ *  already had logged, since a re-save has already taken that off. */
+function shelfAsUsage(p){
+  const pay = asObj(p);
+  if (truthy(pay.closed)) return [];
+  const d = txt(pay.date);
+  const saved = Object.create(null);
+  for (const r of asArr(asObj(state.stockUsage)[d])) saved[txt(asObj(r).product)] = num(asObj(r).qty);
+  const hits = [];
+  for (const s of stockStatusList()){
+    const row = asArr(pay.stock).find(x => txt(asObj(x).product) === txt(s.product));
+    const qty = row ? num(asObj(row).qty) : 0;
+    if (!(qty > 0)) continue;
+    const before = r2(num(s.on_hand) + (saved[s.product] || 0));
+    if (before > 0 && qty >= before) hits.push({ product: s.product, unit: s.unit, qty, before });
+  }
+  return hits;
+}
+
+/** The question, naming every figure and the misreading that produces it. */
+function shelfAsUsageWarning(hits){
+  const bits = asArr(hits).map(h => qtyWithUnit(h.qty, h.unit) + ' of ' + txt(h.product) +
+    ' (all ' + qtyWithUnit(h.before, h.unit) + ' you had)');
+  return 'This says you OPENED everything on the shelf tonight:\n\n' + bits.join('\n') +
+    '\n\nIf those are what is LEFT, tap Cancel — this card asks what was opened, not what remains. ' +
+    'What is left is under More → Stock on hand.\n\nWas all of it really opened tonight?';
 }
 
 /** The one sentence, or '' when there is nothing to say. */
@@ -3488,7 +3538,9 @@ async function api(action, payload){
   const res = await fetchWithTimeout(config.apiUrl, {
     method:'POST',
     redirect:'follow',
-    body: JSON.stringify({ token: config.token, action, payload: payload || {} })
+    // enteredBy rides beside the token on EVERY request (v2.23.0), so a queued
+    // payload never has to carry it and a replay stamps whoever is replaying.
+    body: JSON.stringify({ token: config.token, action, payload: payload || {}, enteredBy: config.enteredBy })
   }, API_TIMEOUT_MS, 'server');
   const text = await res.text();
   let data;
@@ -5241,9 +5293,12 @@ function stockCardHTML(){
   let body = '';
   const gap = openedGapText();
   if (gap) body += '<p class="err" style="margin-top:0;">' + esc(gap) + '</p>';
-  body += '<p class="hint">Count whole units you OPENED today — one gallon of sauce, one pack of flour. ' +
-    'This is not money: it never changes the day’s total. It is what keeps the ' +
-    '“Stock on hand” figures under More right.</p>';
+  // SAY WHAT IT IS NOT (v2.23.0). Twice in two nights the person closing typed
+  // what was LEFT on the shelf into this card, reading it as a stock count. The
+  // sentence now names that reading and where it belongs instead.
+  body += '<p class="hint">Count whole units you <b>OPENED</b> today — one gallon of sauce, one pack of flour. ' +
+    '<b>Not what is left on the shelf</b>: that lives under More → Stock on hand. ' +
+    'This is not money: it never changes the day’s total.</p>';
   const rows = asArr(benta.stock);
   if (!rows.length){
     body += '<p class="hint" style="margin-top:10px;">No products yet. Add them under More → Maintenance, or in the StockItems tab of the Google Sheet.</p>';
@@ -5262,7 +5317,7 @@ function stockCardHTML(){
   // A warning behind a collapsed header is not a warning. A run of empty nights
   // opens the card by itself — once — the same way a held GCash figure does.
   const open = benta.stockOpen || !!gap;
-  return collapseCardHTML('stock', 'Stock used today',
+  return collapseCardHTML('stock', 'Opened today',
     n ? n + (n === 1 ? ' product' : ' products') : (gap ? 'needs a look' : ''), open, body);
 }
 
@@ -5925,6 +5980,10 @@ function saveBenta(){
   // is usually a slip — Save day tapped before the counts went in, or a closed
   // day not marked closed. One plain question, then her word is final.
   if (!p.closed){
+    // OPENED-EQUALS-SHELF (v2.23.0), asked before the softer questions and only
+    // from two products up — see shelfAsUsage for why.
+    const shelf = shelfAsUsage(p);
+    if (shelf.length >= 2 && !confirm(shelfAsUsageWarning(shelf))) return;
     const c = computeDay(p);
     if (c.total === 0 && c.excluded === 0){
       const wage = (p.salary === '' || p.salary == null) ? dailySalary() : Math.max(0, num(p.salary));
@@ -5944,7 +6003,7 @@ function saveBenta(){
        nothing was opened is a real night, and this must never refuse it. */
     else if (logsNoSupplies(p)){
       const run = openedGap().nights;
-      const ask = 'Nothing is logged under “Stock used today” for ' + fmtShort(p.date) +
+      const ask = 'Nothing is logged under “Opened today” for ' + fmtShort(p.date) +
         '. If flour, sauce or mayo was opened tonight, add it first — what is on the shelf ' +
         'and the cost per ball both come from it.' +
         (run >= 1 ? ' That would make ' + (run + 1) + ' nights in a row with nothing logged.' : '') +
@@ -6927,17 +6986,13 @@ function renderCutoff(){
     '<div class="co-row"><span>Supplies (major)</span>' +
       '<span class="v">' + (sup.majorKnown ? peso(sup.major) : '—') + '</span></div>' +
     (sup.why ? '<p class="hint" style="margin:2px 0 6px 14px;">' + esc(sup.why) + '</p>' : '') +
-    // THE BACKLOG OVERLAP (v2.22.0), said rather than fixed — his instruction was
-    // "dont touch the backlogs I tell when to pay backlogs". A Backlog payment
-    // sits inside Supplies (minor); if it settles bulk stock whose consumption
-    // is already in Supplies (major), the same money is deducted twice. Drawn
-    // only when BOTH figures are present, because with either at zero there is
-    // no overlap to speak of.
-    (num(f.backlogInMinor) > 0 && num(f.suppliesUsed) > 0
-      ? '<p class="hint" style="margin:2px 0 6px 14px;color:var(--alert);">' +
-        esc(peso(f.backlogInMinor)) + ' of Supplies (minor) is backlog payments. If that backlog is for ' +
-        'bulk stock already counted in Supplies (major), that money is deducted twice — once when it was ' +
-        'opened, once when it was paid.</p>'
+    // BACKLOG PAYMENTS ARE OUTSIDE THESE FIGURES (v2.23.0), on the owner's
+    // decision: the stock they bought is deducted the night it is opened, so a
+    // payment settles a debt and moves nothing here. Said in one line when any
+    // were made, so money that left the tin is never simply absent.
+    (num(f.backlogPaid) > 0
+      ? '<p class="hint" style="margin:2px 0 6px 14px;">' +
+        esc(peso(f.backlogPaid)) + ' paid on backlogs this cutoff — settled debt, not in the figures above or in the note.</p>'
       : '') +
     // Octopus and Other payments are inside Supplies (minor) now (v2.20.0), so
     // they are not shown again here — the column has to add up.
@@ -7499,8 +7554,11 @@ function addSuggestedExpense(cat, item, amount){
     toast('This cutoff has not started yet, so this cannot be added to it now.');
     return;
   }
+  // FROM THE TIN (v2.23.0). Mama's share and the electric bill come out of the
+  // night's cash; leaving paid_from blank put ₱1,000 a fortnight into the tin
+  // card's "does not say where the money came from".
   const payload = { date, category:cat, item, amount:num(amount), backlogRef:'', notes:'',
-    entryId:uuid() };
+    paidFrom:'tin', entryId:uuid() };
   applyLocalExpense(payload);
   enqueue('saveExpense', payload);
   persistState();
@@ -7551,6 +7609,9 @@ function renderIbapa(){
       '<input class="input" id="cfgToken" autocomplete="off" autocapitalize="off" spellcheck="false" value="' + esc(config.token) + '"></div>' +
     '<div class="field"><label for="cfgSheet">Google Sheet link (optional)</label>' +
       '<input class="input" id="cfgSheet" autocomplete="off" autocapitalize="off" spellcheck="false" inputmode="url" placeholder="https://docs.google.com/spreadsheets/…" value="' + esc(config.sheetUrl) + '"></div>' +
+    '<div class="field"><label for="cfgWho">This phone is used by</label>' +
+      '<input class="input" id="cfgWho" autocomplete="off" spellcheck="false" maxlength="40" placeholder="Mama" value="' + esc(config.enteredBy) + '">' +
+      '<p class="hint" style="margin-top:6px;">Written onto every row this phone saves, so the sheet can say who entered what. Set it once per phone.</p></div>' +
     '<button type="button" class="btn block" data-act="test-conn" id="testBtn">Test connection</button>' +
     '<p id="testResult" class="hint" style="margin-top:8px;" aria-live="polite"></p>' +
   '</div>';
@@ -7820,7 +7881,7 @@ function stockOnHandHTML(){
     h += '<div class="st-item">' +
       '<div class="st-top">' +
         '<span class="st-name">' + nm + '</span>' +
-        (s.low ? '<span class="badge-low">Low</span>' : '') +
+        (s.out ? '<span class="badge-low">Out</span>' : (s.low ? '<span class="badge-low">Low</span>' : '')) +
         '<span class="st-qty' + (s.on_hand < 0 ? ' neg' : '') + '">' + esc(qtyWithUnit(s.on_hand, s.unit)) + '</span>' +
       '</div>' +
       '<div class="st-sub">' + esc(stockExplain(s)) + '</div>' +
@@ -10012,6 +10073,7 @@ document.addEventListener('input', (ev) => {
   else if (id === 'cfgUrl'){ config.apiUrl = ev.target.value.trim(); persistConfig(); updateStatus(); }
   else if (id === 'cfgToken'){ config.token = ev.target.value.trim(); persistConfig(); }
   else if (id === 'cfgSheet'){ config.sheetUrl = ev.target.value.trim(); persistConfig(); }
+  else if (id === 'cfgWho'){ config.enteredBy = ev.target.value.trim().slice(0, 40); persistConfig(); }
   // The photo reader's OWN pair (v2.9.0), persisted exactly like the sheet's.
   // No re-render here, for the same reason the three fields above do not do one:
   // rewriting the panel would destroy the field being typed in. The Sales button

@@ -226,7 +226,7 @@ return {
   set lastNote(v){ lastNote = v; },
   get splitEdits(){ return splitEdits; },
   pick, normPrice, normBacklog, normDay, normCount, normExpense, normStockItem,
-  normStockDelivery, sanitizeQueue, sanitizeState,
+  normStockDelivery, sanitizeQueue, sanitizeState, sanitizeConfig,
   applyBootstrap, applyLocalDay, applyLocalExpense, applyLocalStockCount,
   applyLocalStockDelivery,
   applyLocalCutoffSplit, applyLocalPrices, applyLocalStockItems, applyServerDay, reapplyQueue,
@@ -243,6 +243,8 @@ return {
   openedGap, openedGapText, stockCardHTML, logsNoSupplies,
   // v2.19.0: what a day save would DESTROY, and the shelf-emptying challenge.
   daySaveRisk, catchEmptyWarning,
+  // v2.23.0: rows that look like a shelf count, and the question they raise.
+  shelfAsUsage, shelfAsUsageWarning,
   // v2.13.1: what was opened, worked out from what is left on the shelf.
   catchUpPlan, catchUpNight, catchUpFill,
   // v2.14.0: what was used between two counts — measured, not remembered.
@@ -551,7 +553,9 @@ const EXPECT = {
   salary: 200,            // one open day inside PERIOD, at the seeded ₱200
   supplies: 500,          // the PAYMENT's peso amount, counted once, when paid
   split: 2000, perPartner: 1000,
-  remaining: 1045 - 2000 - 500 - 200 - 700,
+  // v2.23.0: the 700 Backlog payment settles a debt and is in NO allocation, so
+  // it no longer comes off the residual. Nine releases read this as -2,355.
+  remaining: 1045 - 2000 - 500 - 200,
   refTotal: 6700, refPaid: 700, refBalance: 6000,
   allBacklogsTotal: 81352, allBacklogsRemaining: 81352 - 700
 };
@@ -861,7 +865,10 @@ test('the stock list reaches the phone with its unit and a COMPUTED on-hand', ()
   // on the backfill list, so its cell is still the seeded blank.
   const aonori = F.boot.stockItems.find(r => r.product === 'Aonori');
   assert.strictEqual(aonori.reorder_at, '', 'a blank reorder point must arrive blank');
-  assert.strictEqual(aonori.low, false, 'a blank threshold warns about nothing');
+  // v2.23.0: a blank threshold disarms the low band only; OUT still warns when
+  // the product is known to be gone. Whatever this fixture's on-hand is, low
+  // must equal out for a blank threshold — that IS the rule.
+  assert.strictEqual(aonori.low, aonori.out, 'with a blank threshold, low is exactly out');
   // The stocktake became Bonito's baseline, and the phone is told the figures
   // behind it so it can explain them without holding the history.
   const bonito = F.boot.stockItems.find(r => r.product === 'Bonito');
@@ -1164,7 +1171,7 @@ const SHARED_FIGURES = ['total', 'cash', 'gcash', 'mama', 'supplies', 'octopus',
 const SHARED_FIGURES_MAPPED = [
   ['supplies_used', 'suppliesUsed'],
   ['supplies_minor', 'suppliesMinor'],
-  ['backlog_in_minor', 'backlogInMinor'],
+  ['backlog_paid', 'backlogPaid'],
   ['per_partner', 'perPartner']
 ];
 
@@ -1227,15 +1234,21 @@ test("the server's note_text reaches the client reader, and the shared figures a
   // The note the phone shows is the SERVER's, Salary and residual included.
   assert.match(note, /\nSalary - 200\n/);
   assert.match(note, /\nSplit - 2,000\(1,000 each\)\n/);
-  assert.match(note, /\n\nShort - 2,355$/);
+  // v2.23.0: this fixture's 700 Backlog payment left every allocation, so the
+  // residual is 700 better off than the 2,355 it read for nine releases.
+  assert.match(note, /\n\nShort - 1,655$/);
 });
 
 test('cutoff money is identical on both sides, and the identity closes', () => {
   const app = syncedClient(F.boot);
   const { local, f } = assertCutoffSeam(app, PERIOD, F.cutoff);
-  assert.strictEqual(local.other, f.other, 'the Backlog payment must land in "Other payments"');
+  assert.strictEqual(local.other, f.other, 'the two sides agree on "Other payments"');
+  assert.strictEqual(local.backlogPaid, f.backlog_paid, 'and on the backlog payment, which is in neither');
   assert.strictEqual(f.total, EXPECT.total);
-  assert.strictEqual(f.other, EXPECT.refPaid);
+  // v2.23.0: the Backlog payment is REPORTED, not spent — it settles a debt whose
+  // stock is deducted as it is opened, so it lands in no allocation.
+  assert.strictEqual(f.backlog_paid, EXPECT.refPaid);
+  assert.strictEqual(f.other, 0, 'and "Other payments" no longer carries it');
   assert.strictEqual(f.supplies, EXPECT.supplies, "the delivery's pesos, counted once");
   assert.strictEqual(f.salary, EXPECT.salary);
   assert.strictEqual(f.split, EXPECT.split, 'the amount entered for this period');
@@ -1684,10 +1697,11 @@ const SPEC_NOTE = [
   'Mama - 500',
   'Split - 3,000(1,500 each)',
   // v2.20.0, owner-directed: ONE line for everything entered on the Expenses
-  // screen — Supplies 5,440 + Octopus 0 + Other 1,417 = 6,857. The Octopus and
+  // screen — Supplies 5,440 + Octopus 0 + Other 417 = 5,857 (v2.23.0: the
+  // fixture's 1,000 Backlog payment is in NO allocation now). The Octopus and
   // "Other payments" lines are GONE: printing them as well would show the same
   // money twice and stop the block adding up.
-  'Supplies (minor) - 6,857',
+  'Supplies (minor) - 5,857',
   // v2.15.1, owner-directed: beside the Supplies line it belongs with, and it
   // ALWAYS prints — blank when there is nothing, exactly as a zero category.
   // It is in no sum; the identity is asserted with it present.
@@ -1695,7 +1709,7 @@ const SPEC_NOTE = [
   'Salary - 3,000',
   'Electric bill - 500',
   '',
-  'Short - 2,000'
+  'Short - 1,000'
 ].join('\n');
 
 /* The same note when the period's stock usage CAN be priced (v2.15.0,
@@ -1711,7 +1725,7 @@ const SPEC_NOTE = [
    than written out, so the sample and this can never drift. */
 const SPEC_NOTE_USED = SPEC_NOTE
   .replace('Supplies used (opened) - ', 'Supplies used (opened) - 2,940')
-  .replace('Short - 2,000', 'Short - 4,940');
+  .replace('Short - 1,000', 'Short - 3,940');
 
 const SPEC_PERIOD = { start: '2025-07-01', end: '2025-07-15' };
 const SPEC_EXPENSE_SUPPLIES = 5440;   // Supplies is Expenses(Supplies) ALONE now
@@ -1819,7 +1833,7 @@ test('the Supplies figure is Expenses(Supplies) ALONE, exactly', () => {
   // prove is unchanged: the drop came from the opened stock, not from the
   // Supplies line, which is still 5,440 exactly.
   assert.strictEqual(f.supplies_used, 2940, 'the fixture prices its opened stock');
-  assert.strictEqual(f.remaining, -2000 - 2940, 'the residual, negative and shown');
+  assert.strictEqual(f.remaining, -1000 - 2940, 'the residual, negative and shown');
   assert.strictEqual(f.total, f.cash + f.gcash);
   assert.strictEqual(f.total,
     f.mama + f.split + f.supplies_minor + f.supplies_used + f.salary +
@@ -1845,13 +1859,13 @@ test('the SERVER note is character-identical to the SPEC sample', () => {
   assert.deepStrictEqual([lines[1], lines[3], lines[6], lines[13]], ['', '', '', ''],
     'blank-line placement, including the one before the residual');
   assert.strictEqual(lines[8], 'Split - 3,000(1,500 each)', 'no space before the bracket');
-  assert.strictEqual(lines[9], 'Supplies (minor) - 6,857',
-    'EVERYTHING paid on the Expenses screen: 5,440 + 0 octopus + 1,417 other');
+  assert.strictEqual(lines[9], 'Supplies (minor) - 5,857',
+    'EVERYTHING paid on the Expenses screen: 5,440 + 0 octopus + 417 other — the 1,000 backlog payment is not money spent, it is debt settled');
   // Directly beneath the Supplies line it belongs with — the owner's placement.
   assert.strictEqual(lines[10], 'Supplies used (opened) - 2,940', 'the value OPENED');
   assert.strictEqual(lines[11], 'Salary - 3,000');
   assert.strictEqual(lines[12], 'Electric bill - 500');
-  assert.strictEqual(lines[14], 'Short - 4,940',
+  assert.strictEqual(lines[14], 'Short - 3,940',
     'the label carries the sign, never "- -4,940" — and it is 2,940 lower than ' +
     'it was before v2.22.0 deducted the opened stock');
   assert.ok(!/^Octopus - /m.test(SP.cutoff.note_text), 'the folded lines are GONE, not blank');
@@ -1960,8 +1974,8 @@ test('stock QUANTITIES never reach the cutoff figures — only their COST does',
   assert.strictEqual(f.salary, 3000);
   // The residual carries the COST of those 5 units, never the count of them.
   assert.strictEqual(f.supplies_used, 2940, 'their cost, not their number');
-  assert.strictEqual(f.remaining, -2000 - 2940);
-  assert.notStrictEqual(f.remaining, -2000 - stockUnits,
+  assert.strictEqual(f.remaining, -1000 - 2940);
+  assert.notStrictEqual(f.remaining, -1000 - stockUnits,
     'a quantity must never be spent as if it were pesos');
   assert.ok(!has(f, 'stock') && !has(f, 'stock_total'), 'the note figures gained a stock line');
 
@@ -2100,7 +2114,7 @@ test('MIGRATION: setupSheet appends the new columns and moves no existing cell',
     'the new DailyCounts columns must be APPENDED, in schema order');
   const log = ss.getSheetByName('DailyLog').getDataRange().getValues();
   assert.deepStrictEqual(log[0],
-    OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes', 'photo_url']));
+    OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes', 'photo_url', 'entered_by']));
   assert.deepStrictEqual(counts[1].slice(9), ['', '', '', '', '', '', '', ''],
     'the appended cells start blank on a historical row: "that day was all cash", ' +
     'an in_cutoff with no snapshot (which reads TRUE — the money was inside the ' +
@@ -2113,9 +2127,9 @@ test('MIGRATION: setupSheet appends the new columns and moves no existing cell',
   // no lids were counted on a day saved before the columns existed.
   // PIN MOVED (v2.9.0, deliberate): photo_url is appended after lid_boxes and
   // stays blank on every historical row — those nights were typed in by hand.
-  assert.deepStrictEqual(log[1].slice(10), ['', 200, '', '', '', ''],
-    'salary backfilled at the current rate; the other appended cells stay blank');
-  assert.deepStrictEqual(log[2].slice(10), ['', 200, '', '', '', ''],
+  assert.deepStrictEqual(log[1].slice(10), ['', 200, '', '', '', '', ''],
+    'salary backfilled at the current rate; the other appended cells stay blank (entered_by too, v2.23.0)');
+  assert.deepStrictEqual(log[2].slice(10), ['', 200, '', '', '', '', ''],
     'every non-closed historical row gets the backfill');
   // The one appended column whose BLANK means TRUE. Asserted here, at the
   // migration itself, because this is the moment every live price row gets one.
@@ -2135,7 +2149,7 @@ test('MIGRATION: setupSheet appends the new columns and moves no existing cell',
     [['box4', 0.375], ['box6', 3], ['box10', 4.6]],
     'box_cost is backfilled onto the live rows — his bundle price per container');
   assert.deepStrictEqual(ss.getSheetByName('Expenses').getDataRange().getValues()[0].slice(8),
-    ['stock_product', 'stock_qty', 'paid_from']);
+    ['stock_product', 'stock_qty', 'paid_from', 'entered_by']);
 
   // Nothing that existed before may have moved, changed or disappeared.
   for (const tab in before) {
@@ -5578,20 +5592,231 @@ test('THE OPENED VALUE IS AN ALLOCATION, and the block adds to Total (v2.22.0)',
   assert.strictEqual(app.noteUsedFig(bumped), 720, 'the opened value survived the split');
 });
 
-test('SOURCE PIN: the backlog overlap is SAID on the card, only when it exists (v2.22.0)', () => {
+test('SOURCE PIN: a backlog payment is REPORTED on the card as settled debt (v2.23.0)', () => {
+  // v2.22.0 warned about an overlap here; v2.23.0 removed the overlap (backlog
+  // payments left every allocation on the owner's decision), so the card now
+  // simply says what went out and that it is outside every figure. Money that
+  // left the tin must never be simply absent from the screen.
   const src = fs.readFileSync(INDEX_HTML, 'utf8');
   const at = src.indexOf("'<div class=\"co-row\"><span>Supplies (major)</span>'");
   assert.ok(at > 0);
   const card = src.slice(at, at + 1400);
-  assert.match(card, /num\(f\.backlogInMinor\) > 0 && num\(f\.suppliesUsed\) > 0/,
-    'drawn only when BOTH figures exist — with either at zero there is no overlap');
-  assert.match(card, /deducted twice/, 'and it names the consequence');
-  // The sentence is split across a string concatenation in the source, so it is
-  // matched in its two halves rather than as one run of text.
-  assert.match(card, /once when it was ' \+/, 'and the mechanism (first half)');
-  assert.match(card, /'opened, once when it was paid\./, 'and the mechanism (second half)');
-  assert.match(card, /esc\(peso\(f\.backlogInMinor\)\)/, 'with the amount, escaped');
-  assert.match(card, /color:var\(--alert\)/, 'in the colour the app reserves for money problems');
+  assert.match(card, /num\(f\.backlogPaid\) > 0/, 'drawn only when a payment was made');
+  assert.match(card, /esc\(peso\(f\.backlogPaid\)\)/, 'with the amount, escaped');
+  assert.match(card, /settled debt, not in the figures above or in the note/,
+    'and it SAYS the payment is outside every figure');
+  assert.ok(card.indexOf('backlogInMinor') < 0, 'the overlap warning is gone with the overlap');
+  assert.ok(card.indexOf('deducted twice') < 0, 'and so is its sentence — there is no double-count left to name');
+});
+
+test('OPENED-EQUALS-SHELF: a card filled in as a stock count is challenged (v2.23.0)', () => {
+  /* Owner, 2026-09-03: "I think my mom made the entry, and she input it as
+     remaining not used." Two nights running the person closing typed what was
+     LEFT into the card that asks what was OPENED — 12/4/3/1 the night the
+     delivery arrived, 9/3/2/1 the next — and the app took both as consumption.
+     The tell is the shape: "opened" equal to the whole shelf for several
+     products at once. */
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
+  const D = app.todayStr();
+  const onHand = {};
+  for (const s of app.stockStatusList()) onHand[s.product] = s.on_hand;
+  const stocked = Object.keys(onHand).filter(k => onHand[k] > 0);
+  assert.ok(stocked.length >= 3, 'the fixture has stock on at least three products');
+  const [A, B, C] = stocked;
+  const day = (stock, closed) => ({ date: D, closed: !!closed, staff: 'Mama', customAmount: 0,
+    customGcash: 0, notes: '', counts: [], stock, entryId: 'sh-1' });
+
+  // A CLOSED DAY has nothing to challenge.
+  assert.deepStrictEqual(app.shelfAsUsage(day([{ product: A, qty: onHand[A] }], true)), []);
+  // AN ORDINARY NIGHT — less than the shelf — is left alone.
+  assert.deepStrictEqual(app.shelfAsUsage(day([{ product: A, qty: onHand[A] - 1 }])), []);
+  // EXACTLY THE SHELF, for several products: every one is named, with what was there.
+  const hits = app.shelfAsUsage(day([{ product: A, qty: onHand[A] }, { product: B, qty: onHand[B] },
+    { product: C, qty: onHand[C] - 1 }]));
+  assert.deepStrictEqual(hits.map(h => h.product).sort(), [A, B].sort(), 'the two that equal the shelf');
+  const hA = hits.find(h => h.product === A);
+  assert.strictEqual(hA.qty, onHand[A]);
+  assert.strictEqual(hA.before, onHand[A], 'before = what the shelf held tonight');
+  // MORE than the shelf is caught too — it cannot have been opened either.
+  assert.strictEqual(app.shelfAsUsage(day([{ product: A, qty: onHand[A] + 5 }])).length, 1);
+  // A RE-SAVE: what this same night already logged has come OFF on-hand, so the
+  // shelf "before tonight" is on-hand plus that — or a corrected night would be
+  // challenged against a shelf it had already emptied.
+  app.state.stockUsage[D] = [{ date: D, product: A, qty: 2, entry_id: 'sh-1', updated_at: '', unit_cost: '' }];
+  const afterSave = app.stockStatusList().find(s => s.product === A).on_hand;
+  assert.strictEqual(afterSave, onHand[A] - 2, 'precondition: the saved 2 came off');
+  assert.deepStrictEqual(app.shelfAsUsage(day([{ product: A, qty: 2 }])), [],
+    're-saving the same 2 is not "everything on the shelf"');
+  assert.strictEqual(app.shelfAsUsage(day([{ product: A, qty: onHand[A] }]))[0].before, onHand[A],
+    'the shelf before tonight is what it was before tonight');
+  delete app.state.stockUsage[D];
+  // A PRODUCT WITH NOTHING ON THE SHELF cannot trigger it — there is no shelf to equal.
+  const empty = Object.keys(onHand).find(k => !(onHand[k] > 0));
+  if (empty) assert.deepStrictEqual(app.shelfAsUsage(day([{ product: empty, qty: 3 }])), []);
+
+  // THE WORDS name every figure, say which way round the card is, and end on a
+  // question whose safe answer is "no".
+  const w = app.shelfAsUsageWarning(hits);
+  assert.match(w, /OPENED everything on the shelf tonight/);
+  assert.ok(w.indexOf(A) >= 0 && w.indexOf(B) >= 0, 'names the products');
+  assert.match(w, /\(all [^)]* you had\)/, 'and what was there');
+  assert.match(w, /this card asks what was opened, not what remains/, 'the misreading, named');
+  assert.match(w, /More → Stock on hand/, 'and where "what is left" actually lives');
+  assert.match(w, /Was all of it really opened tonight\?$/);
+});
+
+test('SOURCE PIN: the opened card says what it is not, and the save asks (v2.23.0)', () => {
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+  const card = src.slice(src.indexOf('function stockCardHTML(){'), src.indexOf('function stockCardHTML(){') + 2600);
+  assert.match(card, /collapseCardHTML\('stock', 'Opened today',/, 'the title says OPENED, not "used"');
+  assert.match(card, /<b>Not what is left on the shelf<\/b>/, 'and the hint names the misreading outright');
+  assert.match(card, /More → Stock on hand/, 'and where the shelf count lives');
+  assert.ok(src.indexOf('“Stock used today”') < 0, 'the old title is gone from every sentence');
+  // The question is asked at the save, from two products up, BEFORE the softer
+  // questions — behind them it would be second in a queue of dialogs.
+  const save = src.slice(src.indexOf('function saveBenta(){'), src.indexOf('function saveBenta(){') + 3200);
+  const ask = save.indexOf('shelfAsUsage(p)');
+  assert.ok(ask > 0, 'saveBenta consults it');
+  assert.match(save, /if \(shelf\.length >= 2 && !confirm\(shelfAsUsageWarning\(shelf\)\)\) return;/,
+    'from TWO products up — one product going to zero is an ordinary last-bag night');
+  assert.ok(ask < save.indexOf('No sales are entered'), 'and before the no-sales question');
+  assert.ok(ask > save.indexOf('daySaveRisk(p)'), 'but after the destruction question, which outranks it');
+});
+
+test('OUT is a badge only when the product is KNOWN to be gone (v2.23.0)', () => {
+  /* Nori and chili sat at 0 for days with no badge, because their reorder point
+     was 0 and 0 used to mean "never warn". But a product nobody has ever counted
+     or moved reads 0 by ABSENCE of data — badging it would assert what nobody
+     knows. Blank is never zero. */
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const D = '2026-08-31';
+  // Known and gone: counted at 0.
+  app.state.stockItems.push({ product: 'Aonori', unit: 'Bag', active: true, sort: 90, opening_qty: '',
+    opening_date: '', reorder_at: 0, unit_cost: 600, baseline_qty: '', baseline_date: '',
+    delivered_since: 0, used_since: 0, delivered_before: 0, used_before: 0 });
+  app.state.stockCounts[D] = [{ date: D, product: 'Aonori', counted_qty: 0, entry_id: 'k', updated_at: '' }];
+  // Unknown: never counted, never moved.
+  app.state.stockItems.push({ product: 'Ghost', unit: 'Bag', active: true, sort: 91, opening_qty: '',
+    opening_date: '', reorder_at: 0, unit_cost: '', baseline_qty: '', baseline_date: '',
+    delivered_since: 0, used_since: 0, delivered_before: 0, used_before: 0 });
+  const by = {}; for (const s of app.stockStatusList()) by[s.product] = s;
+  assert.strictEqual(by['Aonori'].on_hand, 0);
+  assert.strictEqual(by['Aonori'].out, true, 'counted at zero is KNOWN gone');
+  assert.strictEqual(by['Aonori'].low, true, 'and out always warns, threshold 0 or not');
+  assert.strictEqual(by['Ghost'].on_hand, 0);
+  assert.strictEqual(by['Ghost'].out, false, 'never counted, never moved: unknown, not out');
+  assert.strictEqual(by['Ghost'].low, false, 'and no badge — blank is never zero');
+  // Movement alone makes it known: a delivery, then all of it used, is gone.
+  app.state.stockDeliveries['2026-08-20'] = [{ date: '2026-08-20', product: 'Ghost', qty: 2, entry_id: 'g1', updated_at: '' }];
+  app.state.stockUsage['2026-08-21'] = [{ date: '2026-08-21', product: 'Ghost', qty: 2, entry_id: 'g2', updated_at: '', unit_cost: '' }];
+  const g2 = app.stockStatusList().find(s => s.product === 'Ghost');
+  assert.strictEqual(g2.on_hand, 0);
+  assert.strictEqual(g2.out, true, 'two in, two out: known to be gone');
+  // Below zero with usage on record is out too — the app already flags it as a
+  // data problem; it is certainly not "in stock".
+  app.state.stockUsage['2026-08-22'] = [{ date: '2026-08-22', product: 'Ghost', qty: 1, entry_id: 'g3', updated_at: '', unit_cost: '' }];
+  const g3 = app.stockStatusList().find(s => s.product === 'Ghost');
+  assert.ok(g3.on_hand < 0); assert.strictEqual(g3.out, true);
+  // The low BAND above zero still needs a threshold, and does not say out.
+  const flour = by['Takoyaki Flour'];
+  assert.ok(flour.on_hand > 0, 'precondition');
+  const it = app.state.stockItems.find(x => x.product === 'Takoyaki Flour');
+  it.reorder_at = flour.on_hand + 1;
+  const f2 = app.stockStatusList().find(s => s.product === 'Takoyaki Flour');
+  assert.strictEqual(f2.low, true, 'at or below the threshold is low');
+  assert.strictEqual(f2.out, false, 'but not out — there is stock');
+  it.reorder_at = 0;
+  const f3 = app.stockStatusList().find(s => s.product === 'Takoyaki Flour');
+  assert.strictEqual(f3.low, false, 'reorder_at 0 disarms the band; with stock on hand nothing warns');
+  // The badge markup prefers OUT over LOW.
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+  assert.match(src, /s\.out \? '<span class="badge-low">Out<\/span>' : \(s\.low \? '<span class="badge-low">Low<\/span>' : ''\)/,
+    'Out is drawn first; Low only when there is still some');
+});
+
+test('THE ONE-TAP CHIPS SAY THE MONEY CAME FROM THE TIN (v2.23.0)', () => {
+  // Mama's share and the electric bill come out of the night's cash. Leaving
+  // paid_from blank put ₱1,000 a fortnight into the tin card's "does not say
+  // where the money came from" — the owner's own figure was ₱16,993 when the
+  // tin held ₱15,993.
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+  const fn = src.slice(src.indexOf('function addSuggestedExpense('), src.indexOf('function addSuggestedExpense(') + 1400);
+  assert.match(fn, /paidFrom:'tin'/, 'the chip payload names the tin');
+  // And the server files it as such — the whitelist accepts it and the row says so.
+  const srv = loadServer();
+  const D = ymdDaysAgo(1);
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveExpense', payload: {
+    date: D, category: 'Mama', item: 'Mama', amount: 500, backlogRef: '', notes: '',
+    paidFrom: 'tin', entryId: 'chip-mama' } }).ok, true);
+  const rows = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data.expenses
+    .filter(e => e.entry_id === 'chip-mama');
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].paid_from, 'tin');
+  // payBacklog is deliberately UNCHANGED — "dont touch the backlogs".
+  const pb = src.slice(src.indexOf('function payBacklog(){'), src.indexOf('function payBacklog(){') + 2200);
+  assert.ok(pb.indexOf('paidFrom') < 0, 'a backlog payment still says nothing about where the money came from');
+});
+
+test('THE NAME SURVIVES A RELOAD, trimmed and capped (v2.23.0)', () => {
+  // config is read back through sanitizeConfig on every boot. A name that did
+  // not survive that would be set once and gone by the next morning — and every
+  // row that phone saved would be blank again, silently.
+  const app = loadClient();
+  assert.strictEqual(app.sanitizeConfig({ apiUrl: 'u', token: 't', enteredBy: '  Mama  ' }).enteredBy, 'Mama',
+    'kept, and trimmed');
+  assert.strictEqual(app.sanitizeConfig({ enteredBy: 'x'.repeat(200) }).enteredBy.length, 40,
+    'capped at 40 — it is written into cells');
+  assert.strictEqual(app.sanitizeConfig({ apiUrl: 'u' }).enteredBy, '',
+    'a config written by an older build has no name, which reads blank');
+  assert.strictEqual(app.sanitizeConfig(null).enteredBy, '', 'and nothing at all is blank, never undefined');
+  assert.strictEqual(app.sanitizeConfig({ enteredBy: 42 }).enteredBy, '42', 'coerced to text, like every field');
+});
+
+test('THE PHONE SENDS ITS NAME BESIDE THE TOKEN, on every request (v2.23.0)', async () => {
+  // The name rides in the ENVELOPE, not inside the payload: a payload queued
+  // days ago never has to carry it, and a replay stamps whoever is replaying —
+  // which is the truthful author of a row written today.
+  const srv = loadServer();
+  const app = loadSyncClient();
+  app.cfg.apiUrl = 'https://example.test/exec';
+  app.cfg.token = srv.token;
+  app.cfg.enteredBy = 'Mama';
+  const bodies = [];
+  app.hooks.fetch = (url, opts) => {
+    bodies.push(JSON.parse(opts.body));
+    const reply = srv.ctx.doPost({ postData: { contents: opts.body } }).getContent();
+    return Promise.resolve({ ok: true, text: async () => reply });
+  };
+  assert.strictEqual(await app.doBootstrap(), true, 'the bootstrap landed');
+  assert.ok(bodies.length >= 1, 'a request left');
+  const env = bodies[0];
+  assert.strictEqual(env.enteredBy, 'Mama', 'the name is in the envelope');
+  assert.strictEqual(env.token, srv.token, 'beside the token');
+  assert.ok(!('enteredBy' in env.payload), 'and NOT inside the payload');
+
+  // A queued save carries it too — and it is the name at SEND time.
+  app.enqueue('saveExpense', { date: ymdDaysAgo(1), category: 'Supplies', item: 'Veggies', amount: 40,
+    backlogRef: '', notes: '', entryId: 'env-1' });
+  app.cfg.enteredBy = 'Nayt';                 // renamed between queue and send
+  bodies.length = 0;
+  await app.drainQueue();
+  const sent = bodies.find(b => b.action === 'saveExpense');
+  assert.ok(sent, 'the queued save was sent');
+  assert.strictEqual(sent.enteredBy, 'Nayt', 'stamped with the name at the moment it was sent');
+  // ...and the sheet row says so.
+  const rows = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data.expenses
+    .filter(e => e.entry_id === 'env-1');
+  assert.strictEqual(rows.length, 1);
+
+  // NO NAME: an empty string, never undefined — the server trims a blank to
+  // a blank cell, and JSON must not drop the key so the contract stays one shape.
+  app.cfg.enteredBy = '';
+  bodies.length = 0;
+  await app.doBootstrap();
+  assert.strictEqual(bodies[0].enteredBy, '', 'a phone never named sends a blank name');
 });
 
 test('A COST EDITED LATER DOES NOT RESTATE A SAVED CUTOFF (v2.22.0)', () => {
@@ -5759,15 +5984,14 @@ test('A COST EDIT DROPS THE NOTE ON SCREEN (v2.22.0)', () => {
   assert.strictEqual(app.lastNote, null, 'and setting a cost where there was none drops it');
 });
 
-test('THE BACKLOG OVERLAP IS REPORTED, not silently double-counted (v2.22.0)', () => {
-  /* A Backlog payment folds into `other`, and so into supplies_minor. If the
-     backlog being paid is for bulk stock whose consumption is already in
-     supplies_used, that money comes off twice — in two different cutoffs.
-
-     The owner's instruction was explicit: "dont touch the backlogs I tell when
-     to pay backlogs." So the behaviour is UNCHANGED and the figure is REPORTED
-     instead, which is the honest middle: he keeps control, and the app stops
-     being quietly wrong about it. */
+test('A BACKLOG PAYMENT SETTLES A DEBT — it is in NO allocation (v2.23.0)', () => {
+  /* v2.22.0 made the opened stock a deduction, which exposed a double-count: a
+     Backlog payment folded into `other`, and so into supplies_minor, so the same
+     flour came off Remaining once when opened and again when paid for. The
+     owner's decision, 2026-09-03: "Keep backlog payments out of the note." The
+     cost is recognised the night the stock is opened; the payment settles what
+     is owed and moves nothing. It is REPORTED as backlog_paid so money that left
+     the tin is never simply absent from the screen. */
   const srv = loadServer();
   const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data;
   const app0 = syncedClient(boot);
@@ -5776,38 +6000,48 @@ test('THE BACKLOG OVERLAP IS REPORTED, not silently double-counted (v2.22.0)', (
 
   const clean = post(srv.ctx, { token: srv.token, action: 'cutoff',
     payload: { start: per.start, end: per.end, dryRun: true } }).data.figures;
-  assert.strictEqual(clean.backlog_in_minor, 0, 'no backlog payments, nothing to report');
+  assert.strictEqual(clean.backlog_paid, 0, 'no backlog payments, nothing to report');
+  assert.ok(!('backlog_in_minor' in clean), 'the old overlap figure is gone — there is no overlap');
 
   const name = boot.backlogs && boot.backlogs.length ? boot.backlogs[0].name : '';
   assert.ok(name, 'the fixture has a backlog to pay');
   assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveExpense', payload: {
     date: D, category: 'Backlog', item: 'Backlog payment', amount: 900,
     backlogRef: name, notes: '', entryId: 'bl-1' } }).ok, true);
-  // AND an ordinary Supplies row on the same night, so a report that swept up
-  // every category would read 1,150 and be caught — a fixture with only the
-  // backlog row cannot tell "Backlog" from "everything".
+  // AND an ordinary Supplies row on the same night, so a bucket that swept the
+  // payment into minor by mistake reads 1,150 and is caught — a fixture with
+  // only the backlog row cannot tell "Backlog" from "everything".
   assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveExpense', payload: {
     date: D, category: 'Supplies', item: 'Veggies', amount: 250,
     backlogRef: '', notes: '', entryId: 'bl-veg' } }).ok, true);
 
   const after = post(srv.ctx, { token: srv.token, action: 'cutoff',
     payload: { start: per.start, end: per.end, dryRun: true } }).data.figures;
-  assert.strictEqual(after.backlog_in_minor, 900, 'the overlap is the BACKLOG part only, to the peso');
-  // IT IS STILL INSIDE minor — behaviour deliberately unchanged.
-  assert.strictEqual(after.supplies_minor, clean.supplies_minor + 900 + 250,
-    'a backlog payment still counts as money paid, exactly as before');
-  assert.strictEqual(after.remaining, clean.remaining - 900 - 250);
-  // And the identity closes either way.
+  assert.strictEqual(after.backlog_paid, 900, 'reported, to the peso');
+  // THE PAYMENT IS IN NO ALLOCATION: minor grew by the veggies alone.
+  assert.strictEqual(after.supplies_minor, clean.supplies_minor + 250,
+    'a backlog payment is not money spent on the fortnight — only the 250 of veggies is');
+  assert.strictEqual(after.other, clean.other, 'and it is not hiding in "other" either');
+  // SO REMAINING MOVED BY THE VEGGIES ALONE. Before v2.23.0 it fell by 1,150.
+  assert.strictEqual(after.remaining, clean.remaining - 250,
+    'paying a debt does not lower what the fortnight has left — the cost was taken when the stock was opened');
+  // And the identity closes either way, with the payment nowhere in it.
   for (const g of [clean, after]){
     assert.strictEqual(g.total,
       g.mama + g.split + g.supplies_minor + g.supplies_used + g.salary +
       g.electric + g.remaining);
   }
+  // The note has NO line for it: what his partner reads is unchanged by a payment.
+  const noteAfter = post(srv.ctx, { token: srv.token, action: 'cutoff',
+    payload: { start: per.start, end: per.end, dryRun: true } }).data.note_text;
+  assert.ok(!/[Bb]acklog/.test(noteAfter), 'the note never mentions backlogs');
 
-  // THE PHONE COMPUTES THE SAME FIGURE from its own rows.
+  // THE PHONE COMPUTES THE SAME FIGURES from its own rows.
   const app = syncedClient(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
-  assert.strictEqual(app.computeCutoff(per).backlogInMinor, 900,
-    'the phone agrees, so a warning drawn from it cannot contradict the sheet');
+  const local = app.computeCutoff(per);
+  assert.strictEqual(local.backlogPaid, 900, 'the phone reports the same payment');
+  assert.strictEqual(local.suppliesMinor, after.supplies_minor, 'and keeps it out of minor');
+  assert.strictEqual(local.remaining, after.remaining, 'and out of the residual');
 });
 
 test('THE CUTOFF STOCK BLOCK SHOWS WHAT IT STARTED WITH (v2.21.0)', () => {

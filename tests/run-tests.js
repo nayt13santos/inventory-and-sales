@@ -96,7 +96,7 @@ const SPEC_NOTE = [
   // screen — Supplies 5,440 + Octopus 0 + Other 1,417 = 6,857. The Octopus and
   // "Other payments" lines are GONE: printing them as well would show the same
   // money twice and stop the block adding up.
-  'Supplies (minor) - 6,857',
+  'Supplies (minor) - 5,857',
   // v2.15.1, owner-directed: beside the Supplies line it belongs with, and it
   // ALWAYS prints — blank when there is nothing, exactly as a zero category.
   // It is in no sum; the identity is asserted with it present.
@@ -104,7 +104,7 @@ const SPEC_NOTE = [
   'Salary - 3,000',
   'Electric bill - 500',
   '',
-  'Short - 2,000'
+  'Short - 1,000'
 ].join('\n');
 
 /* The same note when the period's stock usage CAN be priced (v2.15.0,
@@ -130,13 +130,17 @@ function noteSums(text) {
    exactly that much. Derived, so the sample and this cannot drift. */
 const SPEC_NOTE_USED = SPEC_NOTE
   .replace('Supplies used (opened) - ', 'Supplies used (opened) - 240')
-  .replace('Short - 2,000', 'Short - 2,240');
+  .replace('Short - 1,000', 'Short - 1,240');
 
 const SPEC_FIGURES = {
   total: 11857, cash: 10530, gcash: 1327,
   mama: 500, split: 3000, per_partner: 1500,
-  supplies: 5440, octopus: 0, salary: 3000, other: 1417, electric: 500,
-  remaining: -2000
+  // v2.23.0: the fixture's 1,000 Backlog payment is in NO allocation now — it
+  // settles a debt whose stock is deducted as it is opened — so `other` is the
+  // 417 of genuine Other and the residual is 1,000 better off.
+  supplies: 5440, octopus: 0, salary: 3000, other: 417, electric: 500,
+  backlog_paid: 1000,
+  remaining: -1000
 };
 
 test('buildNoteText reproduces the spec sample EXACTLY', () => {
@@ -150,20 +154,20 @@ test('buildNoteText reproduces the spec sample EXACTLY', () => {
   assert.deepStrictEqual([lines[1], lines[3], lines[6], lines[13]], ['', '', '', ''],
     'blank-line placement, including the one before the residual');
   assert.strictEqual(lines[8], 'Split - 3,000(1,500 each)', 'no space before the bracket');
-  assert.strictEqual(lines[9], 'Supplies (minor) - 6,857',
+  assert.strictEqual(lines[9], 'Supplies (minor) - 5,857',
     'EVERYTHING paid on the Expenses screen: 5,440 supplies + 0 octopus + 1,417 other');
   assert.strictEqual(lines[10], 'Supplies used (opened) - ',
     'the value OPENED sits directly beneath it, blank like any empty category');
   assert.strictEqual(lines[11], 'Salary - 3,000');
   assert.strictEqual(lines[12], 'Electric bill - 500');
-  assert.strictEqual(lines[14], 'Short - 2,000', 'the LABEL carries the sign');
+  assert.strictEqual(lines[14], 'Short - 1,000', 'the LABEL carries the sign');
   // THE TWO FOLDED LINES ARE GONE, not merely blank — printing them beside the
   // merged figure would show the same money twice.
   assert.ok(!/^Octopus - /m.test(note), 'no Octopus line');
   assert.ok(!/^Other payments - /m.test(note), 'no Other payments line');
   // AND THE BLOCK ADDS UP: the five allocations plus the residual are the Total.
   assert.strictEqual(
-    SPEC_FIGURES.mama + SPEC_FIGURES.split + 6857 + SPEC_FIGURES.salary +
+    SPEC_FIGURES.mama + SPEC_FIGURES.split + 5857 + SPEC_FIGURES.salary +
     SPEC_FIGURES.electric + SPEC_FIGURES.remaining, SPEC_FIGURES.total,
     'total = mama + split + supplies(minor) + salary + electric + remaining');
   assert.ok(!/- -/.test(note), 'a note must never print a minus sign after "- "');
@@ -202,6 +206,59 @@ test('minorVal: the merged figure wins, the three parts are the fallback (v2.20.
   assert.strictEqual(ctx.minorVal({ supplies: 244 }), 244, 'missing parts are 0');
   assert.strictEqual(ctx.minorVal({}), 0);
   assert.strictEqual(ctx.minorVal(null), 0, 'and nothing at all is 0, never NaN');
+});
+
+test('WHO SAVED THIS: every writer stamps the name the phone was given (v2.23.0)', () => {
+  // Owner, 2026-09-03: "would you know who entered the sept 2 numbers?" The
+  // sheet could not say — no accounts, a shared token. Now each phone carries a
+  // name (More → API setup), sent beside the token on every request, and every
+  // row it writes says so. A label the phone chose, not an identity the server
+  // verified — and recorded as exactly that.
+  const { ctx, ss, token } = freshSetup();
+  const D = '2026-07-20';
+  const who = 'Mama';
+  const send = (action, payload, enteredBy) => {
+    const r = post(ctx, { token, action, payload, enteredBy });
+    assert.strictEqual(r.ok, true, action + ': ' + r.error);
+    return r;
+  };
+  send('saveDay', { date: D, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box4', sod: 20, eod: 10, entryId: 'w-c' }],
+    stock: [{ product: 'Takoyaki Flour', qty: 2 }], entryId: 'w-day' }, who);
+  send('saveExpense', { date: D, category: 'Supplies', item: 'Veggies', amount: 100,
+    backlogRef: '', notes: '', entryId: 'w-exp' }, who);
+  send('saveStockCount', { date: D, product: 'Takoyaki Flour', qty: 7, entryId: 'w-cnt' }, who);
+  send('saveStockDelivery', { date: D, product: 'Takoyaki Sauce', qty: 3, entryId: 'w-dlv' }, who);
+
+  const col = (tab, header, match) => {
+    const v = ss.getSheetByName(tab).getDataRange().getValues();
+    const h = v[0].indexOf(header), id = v[0].indexOf('entry_id');
+    assert.ok(h >= 0, tab + ' has an ' + header + ' column');
+    const row = v.slice(1).find(r => String(r[id]) === match);
+    assert.ok(row, tab + ' has the row ' + match);
+    return row[h];
+  };
+  assert.strictEqual(col('DailyLog', 'entered_by', 'w-day'), who, 'the day');
+  assert.strictEqual(col('StockUsage', 'entered_by', 'w-day'), who, 'the night\'s opened stock');
+  assert.strictEqual(col('Expenses', 'entered_by', 'w-exp'), who, 'the expense');
+  assert.strictEqual(col('StockCounts', 'entered_by', 'w-cnt'), who, 'the count');
+  assert.strictEqual(col('StockDeliveries', 'entered_by', 'w-dlv'), who, 'the delivery');
+
+  // NO NAME SET: blank, never a placeholder — a phone that was never named must
+  // not write "undefined" or "unknown" into a column a person reads.
+  send('saveExpense', { date: D, category: 'Other', item: '', amount: 5, backlogRef: '', notes: '',
+    entryId: 'w-anon' }, undefined);
+  assert.strictEqual(col('Expenses', 'entered_by', 'w-anon'), '');
+  // A NAME IS TRIMMED HARD — it is written into cells, and a stray paste of a
+  // paragraph must not become the author of a row.
+  send('saveExpense', { date: D, category: 'Other', item: '', amount: 6, backlogRef: '', notes: '',
+    entryId: 'w-long' }, 'x'.repeat(200));
+  assert.strictEqual(String(col('Expenses', 'entered_by', 'w-long')).length, 40);
+  // A RE-SAVE STAMPS THE LAST WRITER, not the first: a correction is the
+  // correcting hand's, and that is the honest answer to "who entered this".
+  send('saveExpense', { date: D, category: 'Supplies', item: 'Veggies', amount: 100,
+    backlogRef: '', notes: '', entryId: 'w-exp' }, 'Nayt');
+  assert.strictEqual(col('Expenses', 'entered_by', 'w-exp'), 'Nayt');
 });
 
 test('a zero Salary blanks like the other categories, and never blanks Total', () => {
@@ -296,12 +353,15 @@ test('apiCutoff computes spec figures and the exact note text', () => {
   assert.strictEqual(f.mama, 500);
   assert.strictEqual(f.supplies, 5440);
   assert.strictEqual(f.octopus, 0);
-  assert.strictEqual(f.other, 1417); // Backlog 1000 + Other 417
+  // v2.23.0: the 1,000 Backlog payment is in NO allocation — it settles a debt
+  // whose stock is deducted as it is opened — so `other` is the genuine 417.
+  assert.strictEqual(f.other, 417);
+  assert.strictEqual(f.backlog_paid, 1000, 'reported, never summed');
   assert.strictEqual(f.electric, 500);
   assert.strictEqual(f.salary, 3000, '15 open days at the seeded ₱200');
   assert.strictEqual(f.split, 3000, 'the Settings default, NOT the residual');
   assert.strictEqual(f.per_partner, 1500);
-  assert.strictEqual(f.remaining, -2000, 'the residual, negative and unclamped');
+  assert.strictEqual(f.remaining, -1000, 'the residual, negative and unclamped');
   // Accounting identity
   assert.strictEqual(f.total, f.cash + f.gcash);
   assert.strictEqual(f.total,
@@ -320,15 +380,15 @@ test('Remaining is shown, never clamped: a good cutoff reads "Remaining"', () =>
   assert.strictEqual(r.ok, true, r.error);
   const f = r.data.figures;
   assert.strictEqual(f.supplies, 0);
-  assert.strictEqual(f.remaining, 3440, '−2,000 + the 5,440 that left');
+  assert.strictEqual(f.remaining, 4440, '−1,000 + the 5,440 that left');
   assert.strictEqual(f.split, 3000, 'Split is entered, so it does NOT absorb the difference');
   // v2.20.0: minor is supplies + octopus + other, so removing the 5,440 leaves
   // the 1,417 of "Other" — the line does NOT blank, which is the whole point of
   // the merge: money he entered still shows, whichever bucket he tapped.
-  assert.strictEqual(r.data.figures.supplies_minor, 1417);
+  assert.strictEqual(r.data.figures.supplies_minor, 417);
   assert.strictEqual(r.data.note_text, SPEC_NOTE
-    .replace('Supplies (minor) - 6,857', 'Supplies (minor) - 1,417')
-    .replace('Short - 2,000', 'Remaining - 3,440'));
+    .replace('Supplies (minor) - 5,857', 'Supplies (minor) - 417')
+    .replace('Short - 1,000', 'Remaining - 4,440'));
 });
 
 // ---------------------------------------------------------------------------
@@ -362,8 +422,8 @@ test('regenerating after new data UPDATES the same row in place', () => {
   assert.strictEqual(rows[1][9], 800, 'octopus column updated in place');
   assert.strictEqual(rows[1][6], 3000, 'split is ENTERED, so a late expense cannot move it');
   // The residual is what moved, and the archived note says so.
-  assert.strictEqual(r.data.figures.remaining, -2800);
-  assert.match(rows[1][12], /\nShort - 2,800$/, 'the archived note text was rewritten too');
+  assert.strictEqual(r.data.figures.remaining, -1800);
+  assert.match(rows[1][12], /\nShort - 1,800$/, 'the archived note text was rewritten too');
 });
 
 test('a different period still APPENDS a new row', () => {
@@ -860,8 +920,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.22.1', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.22.1');
+  assert.strictEqual(g.data.version, '2.23.0', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.23.0');
 });
 
 // ---------------------------------------------------------------------------
@@ -971,7 +1031,7 @@ test('setupSheet APPENDS the new columns and moves nothing', () => {
   assert.deepStrictEqual(counts[1].slice(9), ['', '', '', '', '', '', '', ''], 'new cells start blank');
 
   const log = ss.getSheetByName('DailyLog').getDataRange().getValues();
-  assert.deepStrictEqual(log[0], OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes', 'photo_url']));
+  assert.deepStrictEqual(log[0], OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes', 'photo_url', 'entered_by']));
   assert.deepStrictEqual(log[1].slice(0, 10), OLD_LOG_ROW);
   // PIN MOVED (v2.5.0, deliberate): the migration BACKFILLS the salary cell of
   // every non-closed row with the current daily_salary — before it, those rows
@@ -982,12 +1042,13 @@ test('setupSheet APPENDS the new columns and moves nothing', () => {
   // PIN MOVED (v2.9.0, deliberate): photo_url is appended after lid_boxes and
   // stays BLANK on a historical row — a night saved before the column existed
   // was typed in from the paper by hand and has no photograph anywhere.
-  assert.deepStrictEqual(log[1].slice(10), ['', 200, '', '', '', ''],
+  // v2.23.0 appends entered_by after photo_url; a historical row has no author.
+  assert.deepStrictEqual(log[1].slice(10), ['', 200, '', '', '', '', ''],
     'salary backfilled at the current rate; the other new cells start blank, not 0');
 
   const exp = ss.getSheetByName('Expenses').getDataRange().getValues();
   assert.deepStrictEqual(exp[0], ['date', 'category', 'item', 'amount', 'backlog_ref',
-    'notes', 'entry_id', 'updated_at', 'stock_product', 'stock_qty', 'paid_from']);
+    'notes', 'entry_id', 'updated_at', 'stock_product', 'stock_qty', 'paid_from', 'entered_by']);
   assert.deepStrictEqual(exp[1].slice(0, 8),
     ['2026-07-18', 'Supplies', 'flour', 300, '', '', 'old-exp-1', '2026-07-18 20:00:00']);
 
@@ -1051,10 +1112,10 @@ test('setupSheet creates and seeds the stock + cutoff tabs', () => {
     'only the three named products get a reorder point; all six get a unit cost'));
 
   assert.deepStrictEqual(ss.getSheetByName('StockUsage').getDataRange().getValues()[0],
-    ['date', 'product', 'qty', 'entry_id', 'updated_at', 'unit_cost'],
-    'v2.22.0: usage rows carry the cost they were priced at when saved');
+    ['date', 'product', 'qty', 'entry_id', 'updated_at', 'unit_cost', 'entered_by'],
+    'v2.22.0 cost snapshot, v2.23.0 who saved it');
   assert.deepStrictEqual(ss.getSheetByName('StockCounts').getDataRange().getValues()[0],
-    ['date', 'product', 'counted_qty', 'entry_id', 'updated_at']);
+    ['date', 'product', 'counted_qty', 'entry_id', 'updated_at', 'entered_by']);
   assert.deepStrictEqual(ss.getSheetByName('CutoffInputs').getDataRange().getValues()[0],
     ['start', 'end', 'split_amount', 'entry_id', 'updated_at', 'tin_counted']);
   // Newly appended/created date + timestamp columns get the plain-text format.
@@ -1166,7 +1227,7 @@ test('saveDay on a not-yet-migrated sheet self-heals instead of failing', () => 
   assert.deepStrictEqual(ss.getSheetByName('DailyCounts').getDataRange().getValues()[0],
     OLD_COUNT_HEADERS.concat(['gcash_qty', 'gcash_cheese_qty', 'gcash_amount', 'in_cutoff', 'price', 'cheese_price', 'custom_qty', 'free_qty']));
   assert.deepStrictEqual(ss.getSheetByName('DailyLog').getDataRange().getValues()[0],
-    OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes', 'photo_url']));
+    OLD_LOG_HEADERS.concat(['custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes', 'photo_url', 'entered_by']));
   const healed = ss.getSheetByName('DailyLog').getDataRange().getValues().slice(1)
     .find(x => x[0] === '2026-07-22');
   assert.strictEqual(healed[11], 200, 'the salary column was appended and written');
@@ -1487,7 +1548,7 @@ test('cutoff Supplies is Expenses(Supplies) ALONE — nothing else can inflate i
   // working — and it is precisely the point of this test that it came from the
   // opened stock and NOT from the Supplies line, which is still 5,440 exactly.
   assert.strictEqual(f.supplies_used, 240, '2 packs at 120');
-  assert.strictEqual(f.remaining, -2240, '-2,000 as before, less the 240 opened');
+  assert.strictEqual(f.remaining, -1240, '-1,000 as before, less the 240 opened');
   assert.strictEqual(f.total, f.cash + f.gcash);
   assert.strictEqual(f.total,
     f.mama + f.split + f.supplies_minor + f.supplies_used + f.salary +
@@ -2113,7 +2174,10 @@ test('on hand may be NEGATIVE before the first stocktake, and is shown as-is', (
   const it = onHand(ctx, token, 'Bonito');
   assert.strictEqual(it.on_hand, -3,
     'clamping to 0 would hide exactly the fact that a count is needed');
-  assert.strictEqual(it.low, false, 'with no reorder point there is no warning to give');
+  // v2.23.0: below zero with usage on record is KNOWN to be gone, so it warns —
+  // the reorder point governs the low band above zero, not this.
+  assert.strictEqual(it.out, true, 'below zero, with movement on record, is OUT');
+  assert.strictEqual(it.low, true, 'and OUT is always a warning, threshold or none');
 });
 
 test('a delivery with NO money raises on hand; the LATER payment touches Supplies and never stock', () => {
@@ -2242,9 +2306,11 @@ test('the reorder warning fires at or below the threshold, never without one', (
   assert.strictEqual(it.low, true, 'AT the threshold counts as low');
   assert.strictEqual(it.reorder_at, 2, 'the threshold reaches the phone');
 
-  // A product with no threshold never warns, however low it goes.
+  // A product with no threshold has no LOW band — but at zero it is OUT, which
+  // always warns (v2.23.0: nori and chili sat at 0 for days with no badge).
   useStock(ctx, token, '2026-07-22', 'Aonori', 9, 'use-f');
-  assert.strictEqual(onHand(ctx, token, 'Aonori').low, false);
+  assert.strictEqual(onHand(ctx, token, 'Aonori').out, true, 'gone, and known to be');
+  assert.strictEqual(onHand(ctx, token, 'Aonori').low, true);
 });
 
 test('deliveries and counts are CHECKED against the product list, unlike usage', () => {
@@ -2631,7 +2697,9 @@ test('a BLANK reorder point stays blank through a full round trip, never becomes
   assert.strictEqual(items.length, 6);
   items.filter(it => ['Bonito', 'Aonori', 'Togarashi'].indexOf(it.product) !== -1).forEach(it => {
     assert.strictEqual(it.reorder_at, '', it.product + ': a blank cell must arrive blank');
-    assert.strictEqual(it.low, false, it.product + ': a blank threshold warns about nothing');
+    // v2.23.0: a blank threshold disarms the low BAND only. At or below zero,
+    // with history, the product is OUT — and that warns regardless.
+    assert.strictEqual(it.low, it.out, it.product + ': with a blank threshold, low is exactly out');
   });
 
   // (2) The round trip the phone actually makes: the owner changes ONE unit and
@@ -4460,8 +4528,10 @@ test('reorder backfill: blank cells only — an explicit 0 and a hand-set figure
   // And the bootstrap tells the phone the same three facts.
   const items = post(ctx, { token, action: 'bootstrap', payload: {} }).data.stockItems;
   assert.strictEqual(items.find(x => x.product === 'Takoyaki Flour').reorder_at, 0);
-  assert.strictEqual(items.find(x => x.product === 'Takoyaki Flour').low, false,
-    '0 means no warning — reorder_at > 0 is the arming condition');
+  // v2.23.0: reorder_at 0 disarms the LOW band; at or below zero with history the
+  // product is OUT, and that is a warning whatever the threshold says.
+  { const fl = items.find(x => x.product === 'Takoyaki Flour');
+    assert.strictEqual(fl.low, fl.out, 'with reorder_at 0, low is exactly out'); }
   assert.strictEqual(items.find(x => x.product === 'Takoyaki Sauce').reorder_at, 9);
   assert.strictEqual(items.find(x => x.product === 'Bonito').reorder_at, '');
 });
@@ -6175,14 +6245,14 @@ test('an unknown action is refused by name, and doGet answers without a token', 
   assert.strictEqual(r.error, 'Unknown action: "saveDay".',
     'this app cannot save a day, and says so rather than pretending');
   const g = JSON.parse(ctx.doGet({}).getContent());
-  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.22.1' } });
+  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.23.0' } });
 });
 
 test('ping proves the setup WITHOUT spending a unit of quota — even with no key yet', () => {
   const ctx = loadVision({ keepKeyPlaceholder: true });
   const r = vpost(ctx, { token: VISION_TOK, action: 'ping', payload: {} });
   assert.strictEqual(r.ok, true, r.error);
-  assert.strictEqual(r.data.version, '2.22.1', 'the vision project ships with the release it belongs to');
+  assert.strictEqual(r.data.version, '2.23.0', 'the vision project ships with the release it belongs to');
   assert.strictEqual(r.data.model, 'gemini-3.6-flash');
   assert.strictEqual(r.data.key_configured, false, 'a yes/no — never the key itself');
   keepsSecrets(JSON.stringify(r));

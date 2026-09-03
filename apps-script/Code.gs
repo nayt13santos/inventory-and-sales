@@ -279,7 +279,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.22.1';
+var VERSION = '2.23.0';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -352,7 +352,7 @@ var SCHEMA = [
   // phone a URL, and the phone passes that URL through on the ordinary saveDay.
   // Blank is the normal state (a night typed in by hand has no photo, and every
   // row written before this column existed has none either).
-  { name: TAB.DAILY_LOG, headers: ['date', 'closed', 'staff', 'gcash', 'total', 'cash', 'custom_amount', 'notes', 'entry_id', 'updated_at', 'custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes', 'photo_url'], textCols: ['date', 'updated_at', 'photo_url'] },
+  { name: TAB.DAILY_LOG, headers: ['date', 'closed', 'staff', 'gcash', 'total', 'cash', 'custom_amount', 'notes', 'entry_id', 'updated_at', 'custom_gcash', 'salary', 'excluded_total', 'gcash_converted', 'lid_boxes', 'photo_url', 'entered_by'], textCols: ['date', 'updated_at', 'photo_url', 'entered_by'] },
   // gcash_qty / gcash_cheese_qty / gcash_amount were appended in v2.1.0.
   // in_cutoff was appended in v2.4.1: the SNAPSHOT of the sku's flag as it stood
   // when the day was saved, so flipping "counts in the cutoff" later can never
@@ -393,10 +393,10 @@ var SCHEMA = [
   // exactly as `price` on DailyCounts and `salary` on DailyLog do. Blank on rows
   // written before the column existed, or when no cost was on file at the time;
   // apiCutoff falls back to the current cost for those.
-  { name: TAB.STOCK_USAGE, headers: ['date', 'product', 'qty', 'entry_id', 'updated_at', 'unit_cost'], textCols: ['date', 'updated_at'] },
+  { name: TAB.STOCK_USAGE, headers: ['date', 'product', 'qty', 'entry_id', 'updated_at', 'unit_cost', 'entered_by'], textCols: ['date', 'updated_at', 'entered_by'] },
   // A physical stocktake. It BECOMES the new baseline, which is what stops
   // estimation drift (spoilage, breakage, miscounts) accumulating forever.
-  { name: TAB.STOCK_COUNTS, headers: ['date', 'product', 'counted_qty', 'entry_id', 'updated_at'], textCols: ['date', 'updated_at'] },
+  { name: TAB.STOCK_COUNTS, headers: ['date', 'product', 'counted_qty', 'entry_id', 'updated_at', 'entered_by'], textCols: ['date', 'updated_at', 'entered_by'] },
   // Goods ARRIVING, with no money anywhere near them (v2.6.0 — owner,
   // 2026-08-11: "supplies adding must be separate… it's not paid yet"). His
   // suppliers deliver on credit, so goods arriving and money leaving are two
@@ -407,11 +407,11 @@ var SCHEMA = [
   // the past) — but saveExpense no longer ACCEPTS new stock fields, so from now
   // on there is one door in (here), one door out (StockUsage), and one door for
   // money (Expenses).
-  { name: TAB.STOCK_DELIVERIES, headers: ['date', 'product', 'qty', 'entry_id', 'updated_at'], textCols: ['date', 'updated_at'] },
+  { name: TAB.STOCK_DELIVERIES, headers: ['date', 'product', 'qty', 'entry_id', 'updated_at', 'entered_by'], textCols: ['date', 'updated_at', 'entered_by'] },
   // stock_product / stock_qty were appended in v2.3.0: a delivery is an
   // ordinary expense row that additionally names what arrived. Money stays in
   // exactly one place (`amount`); the quantity rides along on the same row.
-  { name: TAB.EXPENSES, headers: ['date', 'category', 'item', 'amount', 'backlog_ref', 'notes', 'entry_id', 'updated_at', 'stock_product', 'stock_qty', 'paid_from'], textCols: ['date', 'updated_at', 'paid_from'] },
+  { name: TAB.EXPENSES, headers: ['date', 'category', 'item', 'amount', 'backlog_ref', 'notes', 'entry_id', 'updated_at', 'stock_product', 'stock_qty', 'paid_from', 'entered_by'], textCols: ['date', 'updated_at', 'paid_from', 'entered_by'] },
   { name: TAB.BACKLOGS, headers: ['name', 'description', 'total_amount', 'start_date', 'active'], textCols: ['start_date'] },
   // The Split is an ENTERED amount per cutoff (v2.3.0), no longer the residual.
   { name: TAB.CUTOFF_INPUTS, headers: ['start', 'end', 'split_amount', 'entry_id', 'updated_at', 'tin_counted'], textCols: ['start', 'end', 'updated_at'] },
@@ -489,6 +489,12 @@ function doPost(e) {
     }
     var action = asStr(body.action);
     var payload = (body.payload && typeof body.payload === 'object') ? body.payload : {};
+    /* WHO SAVED THIS (v2.23.0). The name a phone was given under More → API
+       setup rides beside the token on every request. Copied onto the payload
+       here so each writer stamps it without every caller changing shape. It is
+       a label the phone chose, not an identity the server verified — the sheet
+       records it as exactly that. Trimmed hard: it is written into cells. */
+    payload.enteredBy = asStr(body.enteredBy).slice(0, 40);
 
     var ss = SpreadsheetApp.getActive();
     var settings = readSettings(ss);
@@ -1184,7 +1190,7 @@ function apiSaveDay(ss, settings, payload) {
   rewriteDateBlock(ss, TAB.STOCK_USAGE, date, stockRows.map(function (r) {
     var uc = costByName[asStr(r.product).toLowerCase()];
     return { date: date, product: r.product, qty: r.qty, entry_id: entryId, updated_at: stamp,
-             unit_cost: usableCost(uc) ? asNum(uc) : '' };
+             unit_cost: usableCost(uc) ? asNum(uc) : '', entered_by: asStr(payload.enteredBy) };
   }));
 
   // --- Upsert DailyLog by date (one row per date => replays cannot duplicate),
@@ -1204,7 +1210,8 @@ function apiSaveDay(ss, settings, payload) {
     entry_id: entryId, updated_at: stamp, salary: salary,
     excluded_total: excludedTotal,
     gcash_converted: gcashConverted, lid_boxes: lidBoxes,
-    photo_url: photoUrl
+    photo_url: photoUrl,
+    entered_by: asStr(payload.enteredBy)
   };
   var logRow = buildRow(log, logWidth, logObj, found > 0 ? padRow(log.values[found - 1], logWidth) : null);
   if (found > 0) {
@@ -1360,7 +1367,7 @@ function apiSaveExpense(ss, payload) {
   var obj = {
     date: date, category: category, item: item, amount: amount,
     backlog_ref: backlogRef, notes: notes, entry_id: entryId, updated_at: nowStamp(),
-    paid_from: paidFrom
+    paid_from: paidFrom, entered_by: asStr(payload.enteredBy)
   };
 
   // Upsert by entry_id: replaying the same mutation rewrites the same row.
@@ -1422,7 +1429,7 @@ function apiSaveStockCount(ss, payload) {
   // Upsert by entry_id: replaying the same queued mutation rewrites its row.
   upsertRows(ss, TAB.STOCK_COUNTS, [{
     date: date, product: product, counted_qty: qty,
-    entry_id: entryId, updated_at: nowStamp()
+    entry_id: entryId, updated_at: nowStamp(), entered_by: asStr(payload.enteredBy)
   }], ['entry_id']);
 
   // The figure the phone should now show. Recomputed from the sheet rather than
@@ -1469,7 +1476,7 @@ function apiSaveStockDelivery(ss, payload) {
 
   upsertRows(ss, TAB.STOCK_DELIVERIES, [{
     date: date, product: product, qty: qty,
-    entry_id: entryId, updated_at: nowStamp()
+    entry_id: entryId, updated_at: nowStamp(), entered_by: asStr(payload.enteredBy)
   }], ['entry_id']);
 
   // The figure the phone should now show — recomputed from the sheet, exactly
@@ -2005,14 +2012,20 @@ function apiCutoff(ss, settings, payload, dryRun) {
   salary = round2(salary);
   var cash = round2(total - gcash);
 
-  var mama = 0, supplies = 0, octopus = 0, electric = 0, other = 0;
+  var mama = 0, supplies = 0, octopus = 0, electric = 0, other = 0, backlogPaid = 0;
   expenses.forEach(function (x) {
     switch (x.category) {
       case 'Mama': mama += x.amount; break;
       case 'Supplies': supplies += x.amount; break;
       case 'Octopus': octopus += x.amount; break;
       case 'Electric': electric += x.amount; break;
-      case 'Backlog': // Backlog payments + misc = the note's "Other payments".
+      /* BACKLOG PAYMENTS ARE IN NO ALLOCATION (v2.23.0). Owner: "Keep backlog
+         payments out of the note." Since v2.22.0 the stock a backlog bought is
+         deducted the night it is OPENED (supplies_used); a payment on that debt
+         merely settles what is owed, and counting it here as well took the same
+         flour off Remaining twice, in two different cutoffs. Reported as
+         backlog_paid so the screen can still say what went out; never summed. */
+      case 'Backlog': backlogPaid += x.amount; break;
       case 'Other':
       default: // Unknown categories (hand-edited typos) fold into "other" so
         other += x.amount; // the accounting identity still balances.
@@ -2024,7 +2037,7 @@ function apiCutoff(ss, settings, payload, dryRun) {
   // cannot be counted twice.
 
   mama = round2(mama); supplies = round2(supplies); octopus = round2(octopus);
-  electric = round2(electric); other = round2(other);
+  electric = round2(electric); other = round2(other); backlogPaid = round2(backlogPaid);
 
   // A NEGATIVE category sum is a data error, full stop — saveExpense refuses
   // amounts <= 0, so only a hand-edited row can produce one — and a note built
@@ -2150,20 +2163,13 @@ function apiCutoff(ss, settings, payload, dryRun) {
      Every line from Mama to the bottom now adds up to Total, which is what he
      asked for and what makes the note checkable by hand.
 
-     A DOUBLE-COUNT TO KNOW ABOUT: a Backlog payment folds into `other`, and so
-     into supplies_minor. If the backlog being paid is for bulk stock whose
-     consumption is already in supplies_used, that money is deducted twice — in
-     two different cutoffs. Left as it is on the owner's instruction ("dont touch
-     the backlogs I tell when to pay backlogs"); `backlog_in_minor` below reports
-     it so the screen can say so rather than the figure being quietly wrong. */
+     BACKLOG PAYMENTS ARE OUTSIDE THIS (v2.23.0). They used to fold into `other`
+     and so into supplies_minor — which, once the stock they bought was deducted
+     as it was opened, took the same money off twice in two cutoffs. Now they
+     settle a debt and touch no allocation; `backlog_paid` reports them. */
   var remaining = round2(total - mama - split - supplies - octopus - salary -
     other - electric - suppliesUsed);
 
-  // How much of `other` is Backlog payments, so the cutoff can warn when they
-  // overlap with a priced supplies_used. Reported, never subtracted.
-  var backlogInMinor = 0;
-  expenses.forEach(function (x) { if (x.category === 'Backlog') backlogInMinor += x.amount; });
-  backlogInMinor = round2(backlogInMinor);
 
   /* SUPPLIES (MINOR) — ONE LINE FOR EVERYTHING PAID (v2.20.0). The owner, after
      his ₱3,957 of daily buying went in under the "Other" bucket and so never
@@ -2197,8 +2203,9 @@ function apiCutoff(ss, settings, payload, dryRun) {
     // total = mama + split + supplies_minor + supplies_used + salary
     //       + electric + remaining, with `excluded` nowhere in it.
     supplies_used: suppliesUsed, supplies_used_unpriced: suppliesUsedUnpriced,
-    // Reported so the screen can warn about the overlap described above.
-    backlog_in_minor: backlogInMinor
+    // Backlog payments this period — settled debt, in NO allocation (v2.23.0).
+    // Reported so the screen can say what went out.
+    backlog_paid: backlogPaid
   };
 
   // Branch is read CLEANED (CR/LF -> space, v2.5.0): a line break pasted into
@@ -3627,7 +3634,16 @@ function stockStatusFor(items, ss, expensesAll, usageAll, countsAll, deliveriesA
       delivered_before: round2(deliveredBefore),
       used_before: round2(usedBefore),
       on_hand: onHand,
-      low: threshold > 0 && onHand <= threshold
+      // OUT (v2.23.0): the product is KNOWN to be gone — it has a baseline or some
+      // movement, and on-hand is at or below zero. A product nobody has ever
+      // counted or moved reads 0 by ABSENCE of data, not by knowledge, and badging
+      // it "Out" would assert what nobody knows: blank is never zero. `low`
+      // includes `out`, so a reorder point of 0 disarms only the low BAND — it
+      // used to mean "never warn", which left nori and chili at 0 with no badge.
+      // The phone's stockStatusOf applies the identical rule.
+      out: (!!base.date || delivered > 0 || used > 0) && onHand <= 0,
+      low: ((!!base.date || delivered > 0 || used > 0) && onHand <= 0) ||
+           (threshold > 0 && onHand <= threshold)
     };
   });
   return out;
@@ -3643,7 +3659,7 @@ function stockItemsWithStatus(ss, expensesAll, usageAll, countsAll, deliveriesAl
     var s = status[it.product] || {
       baseline_qty: 0, baseline_date: '', delivered_since: 0, used_since: 0,
       delivered_before: 0, used_before: 0,
-      on_hand: 0, low: false
+      on_hand: 0, out: false, low: false   // never counted, never moved: unknown, not out
     };
     return {
       product: it.product,
@@ -3659,6 +3675,7 @@ function stockItemsWithStatus(ss, expensesAll, usageAll, countsAll, deliveriesAl
       unit_cost: it.unit_cost,
       on_hand: s.on_hand,
       low: s.low,
+      out: s.out,
       baseline_qty: s.baseline_qty,
       baseline_date: s.baseline_date,
       delivered_since: s.delivered_since,
