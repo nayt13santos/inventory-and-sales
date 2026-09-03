@@ -598,7 +598,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.21.0';
+const APP_VERSION = '2.22.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -980,10 +980,15 @@ function normStockUse(s, key){
   if (!isObj(s) || !txt(s.product)) return null;
   const date = isDateStr(s.date) ? txt(s.date) : (isDateStr(key) ? txt(key) : '');
   if (!date) return null;
+  // unit_cost (v2.22.0): the cost this row was priced at when saved. Kept RAW —
+  // a blank must stay blank so the fallback can tell "no snapshot" from
+  // "snapshotted at zero". Rows from before the column existed arrive blank.
+  const uc = pick(s, 'unit_cost', 'unitCost');
   return {
     date, product: txt(s.product), qty: num(s.qty),
     entry_id: txt(pick(s, 'entry_id', 'entryId')),
-    updated_at: txt(pick(s, 'updated_at', 'updatedAt'))
+    updated_at: txt(pick(s, 'updated_at', 'updatedAt')),
+    unit_cost: usableCostVal(uc) ? num(uc) : ''
   };
 }
 // StockDeliveries — WHOLE UNITS ARRIVED per product per day (v2.6.0). NEVER
@@ -1849,6 +1854,27 @@ function excludedForPeriod(per){
   return { lines, total: r2(total) };
 }
 
+/** A unit cost that can price something: non-blank, finite, ZERO OR MORE. The
+ *  same rule as Code.gs's usableCost, byte for byte in effect — the phone used
+ *  to require > 0, so a cost of exactly 0 was "priced at nothing" on the sheet
+ *  and "no cost set" on the phone, and the two notes disagreed on the suffix.
+ *  Blank is unknown; 0 is a figure. Blank is never zero. */
+function usableCostVal(v){
+  if (v === '' || v === null || v === undefined) return false;
+  const n = Number(v);
+  return isFinite(n) && n >= 0;
+}
+
+/** The unit cost on file for a product NOW, by case-folded name — the same
+ *  lookup Code.gs makes — or '' when none. Used to SNAPSHOT a cost onto a usage
+ *  row as it is saved, and as the fallback for rows that carry no snapshot. */
+function costOnFile(product){
+  const want = txt(product).toLowerCase();
+  const it = asArr(state.stockItems).find(x => isObj(x) && txt(x.product).toLowerCase() === want);
+  const uc = isObj(it) ? it.unit_cost : '';
+  return usableCostVal(uc) ? num(uc) : '';
+}
+
 function computeCutoff(per){
   let rawTotal = 0, rawGcash = 0, rawSalary = 0, daysWithSales = 0, openDays = 0;
   const days = asObj(state.days);
@@ -1895,19 +1921,27 @@ function computeCutoff(per){
      supplies cost thats been used in the cutoff tab, I want to see it in
      realtime, or every time the used supplies has been logged."
 
-     DISPLAY ONLY, and deliberately so. The note's `supplies` line is money
-     PAID (Expenses → Supplies) and settles the fortnight with his partner;
-     this is the value of stock OPENED, which is a different number — a sack
-     paid for in this cutoff may be opened across the next two. Nothing here
-     touches `total`, `remaining` or any allocation, so no figure that has
-     already been sent can move.
+     AN ALLOCATION SINCE v2.22.0, at the owner's instruction: "just focus on the
+     front numbers, from mama to the bottom of the list, the total should be the
+     total sales." His suppliers deliver on credit, so the stock he OPENS is a
+     cost the fortnight has genuinely incurred whether or not the bill has been
+     paid — and leaving it out made `remaining` read as money he was free to
+     take when part of it was already owed. It is subtracted in `remaining`
+     below, and Code.gs subtracts it identically.
 
      Priced from each product's own unit_cost, and a product with no cost on
      file is LISTED rather than costed at nothing — the same rule the costing
      screen follows. It recomputes on every render, so it is current the moment
      a night with stock on it is saved. */
   let usedCost = 0;
-  const usedRows = Object.create(null);
+  /* PRICED PER ROW (v2.22.0), exactly as Code.gs prices: each usage row at the
+     cost it was SAVED with, and only a row carrying no snapshot at the cost on
+     file now. So a settled fortnight keeps its figure when a cost is corrected
+     later, while stock that was never priced is valued the moment a cost is
+     entered. A product is "unpriced" if ANY of its rows could not be priced;
+     money from its priced rows still counts — known cost is never thrown away
+     because another row's is unknown. */
+  const usedRows = Object.create(null);   // product -> { qty, cost, anyUnpriced }
   const usedUnpriced = [];
   const usageByDate = asObj(state.stockUsage);
   for (const d in usageByDate){
@@ -1917,19 +1951,22 @@ function computeCutoff(per){
       const name = txt(row.product);
       const qty = num(row.qty);
       if (!name || !(qty > 0)) continue;
-      usedRows[name] = (usedRows[name] || 0) + qty;
+      const acc = usedRows[name] || (usedRows[name] = { qty: 0, cost: 0, anyUnpriced: false });
+      acc.qty += qty;
+      const uc = usableCostVal(row.unit_cost) ? row.unit_cost : costOnFile(name);
+      if (usableCostVal(uc)){ acc.cost += qty * num(uc); usedCost += qty * num(uc); }
+      else acc.anyUnpriced = true;
     }
   }
   const usedList = [];
   for (const name in usedRows){
-    const it = asArr(state.stockItems).find(x => isObj(x) && txt(x.product) === name);
-    const uc = isObj(it) ? it.unit_cost : '';
-    const priced = !(uc === '' || uc == null) && num(uc) > 0;
-    const qty = r2(usedRows[name]);
-    if (priced) usedCost += qty * num(uc);
-    else usedUnpriced.push(name);
-    usedList.push({ product: name, qty: qty, unit: txt(isObj(it) ? it.unit : ''),
-                    cost: priced ? r2(qty * num(uc)) : null });
+    const acc = usedRows[name];
+    const it = asArr(state.stockItems).find(x => isObj(x) && txt(x.product).toLowerCase() === name.toLowerCase());
+    if (acc.anyUnpriced) usedUnpriced.push(name);
+    usedList.push({ product: name, qty: r2(acc.qty), unit: txt(isObj(it) ? it.unit : ''),
+                    // null only when NOTHING of it could be priced; a partly
+                    // priced product shows what is known and is also named above.
+                    cost: (acc.anyUnpriced && acc.cost === 0) ? null : r2(acc.cost) });
   }
   usedList.sort((a, b) => (b.cost || 0) - (a.cost || 0) || b.qty - a.qty);
 
@@ -1951,7 +1988,22 @@ function computeCutoff(per){
   // figure backlog payments are funded from. It MAY BE NEGATIVE (a short
   // cutoff) and is never clamped — a clamp would hide exactly the fortnight
   // the owner most needs to see.
-  const remaining = r2(total - mama - split - supplies - octopus - salary - other - electric);
+  /* THE RESIDUAL (v2.22.0): what is left after everything the fortnight actually
+     COST — including the stock it consumed, not only the bills it happened to
+     pay. Never clamped; a short cutoff is the one he most needs to see.
+
+       total = mama + split + supplies_minor + supplies_used + salary
+             + electric + remaining
+
+     usedCost is computed above precisely so it can be subtracted here. */
+  // ROUNDED BEFORE IT IS SUBTRACTED, exactly as Code.gs does (round2 on
+  // suppliesUsed, then round2 on the residual). Subtracting the raw sum and
+  // rounding once at the end can land a centavo away from the sheet when a unit
+  // cost has more than two decimals — and the seam test now carries such a cost
+  // precisely so this cannot drift back.
+  const usedRounded = r2(usedCost);
+  const remaining = r2(total - mama - split - supplies - octopus - salary - other -
+    electric - usedRounded);
   // --- Excluded skus (nori): DISPLAY ONLY, and deliberately computed AFTER the
   // residual so it is obvious that nothing above can depend on it. It enters no
   // figure here and buildNote() never reads it — the note the owner sends his
@@ -1971,10 +2023,14 @@ function computeCutoff(per){
        parts stay on this object and in the Cutoffs archive, so nothing is lost.
        `remaining` does not move: it was already total minus all seven. */
     suppliesMinor: r2(supplies + octopus + other),
+    // How much of minor is Backlog payments (v2.22.0). A backlog for bulk stock
+    // whose consumption is already in suppliesUsed is deducted twice, in two
+    // different cutoffs. Reported so the screen can say so; never subtracted.
+    backlogInMinor: r2(b.Backlog),
     split, perPartner: r2(split / 2), splitEntered: sp.entered,
     remaining,
     // Supplies OPENED, in money (v2.14.0) — display only, never an allocation.
-    suppliesUsed: r2(usedCost), suppliesUsedRows: usedList, suppliesUsedUnpriced: usedUnpriced,
+    suppliesUsed: usedRounded, suppliesUsedRows: usedList, suppliesUsedUnpriced: usedUnpriced,
     // The tin (v2.12.0): what went in as cash, what she took back out of it,
     // and what this app cannot say either way.
     tinOut: r2(tinOut), tinUnknown: r2(unknownOut), tinExpected: r2(cash - tinOut),
@@ -1988,7 +2044,9 @@ function computeCutoff(per){
 function cutoffWithSplit(f, rawSplit){
   const split = r2(Math.max(0, num(rawSplit)));
   const remaining = r2(num(f.total) - num(f.mama) - split - num(f.supplies) -
-    num(f.octopus) - num(f.salary) - num(f.other) - num(f.electric));
+    num(f.octopus) - num(f.salary) - num(f.other) - num(f.electric) -
+    // v2.22.0: an allocation now, so a typed Split must not un-deduct it.
+    num(noteUsedFig(f)));
   // suppliesMinor rides along untouched — it is the same three parts under one
   // name, and the split cannot move it. Object.assign carries it, but naming it
   // here is what stops a future edit from quietly dropping it.
@@ -2085,6 +2143,12 @@ function buildNote(f, per){
     '',
     residual
   ].join('\n');
+}
+
+/** The supplies-OPENED figure, from either side's casing. The formatter below
+ *  turns it into note text; this is the number the arithmetic uses. */
+function noteUsedFig(f){
+  return num(pick(asObj(f), 'suppliesUsed', 'supplies_used'));
 }
 
 /** The minor figure, from either side's casing — buildNote is handed the phone's
@@ -2575,9 +2639,9 @@ function catchLandsText(night){
   return 'The value lands in the ' + monthName(per.start) + ' ' + d2parts(per.start).d + '–' +
     d2parts(per.end).d + ' cutoff' + (here ? ' — the one running now.' : ', which has already ended.') +
     ' It changes what that cutoff says under “Supplies used” and what the costing prices, ' +
-    'and it changes the “Supplies used (opened)” line of that cutoff\'s note. ' +
-    'It changes no total and no share — every figure you settle on is built from money PAID, ' +
-    'not from stock opened.';
+    'and it changes that cutoff\'s “Supplies used (opened)” line AND its Remaining — ' +
+    'what was opened is deducted now. ' +
+    'It changes no Total and no Split: sales and your partner\'s share are untouched.';
 }
 
 /** The night to file it under: the most recent OPEN night IN THIS CUTOFF that
@@ -2982,7 +3046,10 @@ function applyLocalDay(p){
   // and the server ignores it too. Purchases live in Expenses and nowhere else.)
   state.stockUsage[p.date] = (p.closed ? [] : asArr(p.stock))
     .filter(s => isObj(s) && txt(s.product) && num(s.qty) > 0)
-    .map(s => ({ date:p.date, product:txt(s.product), qty:num(s.qty), entry_id:p.entryId, updated_at:stamp }));
+    .map(s => ({ date:p.date, product:txt(s.product), qty:num(s.qty), entry_id:p.entryId, updated_at:stamp,
+                 // SNAPSHOT (v2.22.0), the same lookup apiSaveDay makes, so the
+                 // phone's figure for this night cannot differ from the sheet's.
+                 unit_cost: costOnFile(s.product) }));
 }
 function applyLocalExpense(p){
   ensureShape();
@@ -3133,6 +3200,11 @@ function applyLocalStockItems(p){
     // same reason) as `boxCost` in applyLocalPrices. A batch queued by a build
     // that knew nothing about costs must leave every cost exactly as it is.
     if (!(row.unitCost === null || row.unitCost === undefined || row.unitCost === '')){
+      // A CHANGED COST INVALIDATES THE NOTE ON SCREEN (v2.22.0). The opened value
+      // is an allocation now, so this moves Remaining for any period whose rows
+      // fall back to the current cost — and a note generated a moment ago would
+      // sit under figures that no longer add up to it. Found by the review.
+      if (it.unit_cost === '' || num(it.unit_cost) !== num(row.unitCost)) lastNote = null;
       it.unit_cost = num(row.unitCost);
     }
     // `sort`, the opening baseline and the ledger figures are never touched here.
@@ -6775,10 +6847,10 @@ function renderCutoff(){
     // sentence has to name the rows that are actually on screen, or it sends him
     // looking for a line that no longer exists.
     h += '<p class="hint" style="margin-top:8px;">This is what was <b>opened</b>, priced at what each unit costs you. ' +
-      'It shows below as <b>Supplies (major)</b>. It is not <b>Supplies (minor)</b> — that one is money you ' +
-      '<b>paid</b> for the daily buying, and the two are different figures: a sack bought this fortnight may be ' +
-      'opened across the next two, so counting both would charge you twice for the one sack. ' +
-      'Nothing here is added to any total.</p>' +
+      'It shows below as <b>Supplies (major)</b> and it IS deducted from Remaining (v2.22.0) — ' +
+      'your suppliers deliver on credit, so what you opened is a cost this cutoff has already run up ' +
+      'whether the bill is paid or not. It is not <b>Supplies (minor)</b>: that one is money you ' +
+      '<b>paid</b> for the daily buying.</p>' +
     '</div>';
   }
 
@@ -6840,9 +6912,21 @@ function renderCutoff(){
     // place he settles from, and in NO sum. The row is marked so the block still
     // reads as arithmetic that closes.
     '<div class="co-row"><span>Supplies (minor)</span><span class="v">' + peso(sup.minor) + '</span></div>' +
-    '<div class="co-row aside"><span>Supplies (major) <span class="hint">not in the total</span></span>' +
+    '<div class="co-row"><span>Supplies (major)</span>' +
       '<span class="v">' + (sup.majorKnown ? peso(sup.major) : '—') + '</span></div>' +
     (sup.why ? '<p class="hint" style="margin:2px 0 6px 14px;">' + esc(sup.why) + '</p>' : '') +
+    // THE BACKLOG OVERLAP (v2.22.0), said rather than fixed — his instruction was
+    // "dont touch the backlogs I tell when to pay backlogs". A Backlog payment
+    // sits inside Supplies (minor); if it settles bulk stock whose consumption
+    // is already in Supplies (major), the same money is deducted twice. Drawn
+    // only when BOTH figures are present, because with either at zero there is
+    // no overlap to speak of.
+    (num(f.backlogInMinor) > 0 && num(f.suppliesUsed) > 0
+      ? '<p class="hint" style="margin:2px 0 6px 14px;color:var(--alert);">' +
+        esc(peso(f.backlogInMinor)) + ' of Supplies (minor) is backlog payments. If that backlog is for ' +
+        'bulk stock already counted in Supplies (major), that money is deducted twice — once when it was ' +
+        'opened, once when it was paid.</p>'
+      : '') +
     // Octopus and Other payments are inside Supplies (minor) now (v2.20.0), so
     // they are not shown again here — the column has to add up.
     '<div class="co-row"><span>Salary</span><span class="v">' + peso(f.salary) + '</span></div>' +
@@ -7091,14 +7175,22 @@ function suppliesSplit(f){
   const rows = asArr(o.suppliesUsedRows);
   const unpriced = asArr(o.suppliesUsedUnpriced);
   const anyPriced = rows.some(r => asObj(r).cost !== null);
+  /* WHAT TO SAY (v2.22.0). The major is an ALLOCATION now, so the stakes of a
+     missing cost changed completely: an unvalued product no longer just makes a
+     display figure small, it makes the DEDUCTION small and Remaining too big —
+     money he might take out of the business that is already spoken for. Every
+     sentence below now says that consequence, not just the gap. */
   let why;
   if (!rows.length){
-    why = 'Nothing is logged as opened this cutoff, so the major is not worked out.';
+    why = 'Nothing is logged as opened this cutoff, so nothing is deducted for it ' +
+      'and Remaining may be too high.';
   } else if (!anyPriced){
-    why = 'No product has a cost set, so what was opened cannot be valued. ' +
-      'Set it under More → Maintenance.';
+    why = 'No product has a cost set, so what was opened cannot be valued and NOTHING ' +
+      'is deducted for it — Remaining is too high by whatever it was worth. ' +
+      'Set the costs under More → Maintenance.';
   } else if (unpriced.length){
-    why = listPhrase(unpriced) + ' has no cost set, so it is counted but not valued.';
+    why = listPhrase(unpriced) + ' has no cost set, so it is counted but not valued — ' +
+      'the deduction is short by whatever that was worth.';
   } else {
     why = '';
   }

@@ -279,7 +279,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.21.0';
+var VERSION = '2.22.0';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -388,7 +388,12 @@ var SCHEMA = [
   // is listed under `unpriced`, because a total that is quietly too low is
   // worse than one that is visibly absent. Read RAW like reorder_at.
   { name: TAB.STOCK_ITEMS, headers: ['product', 'unit', 'active', 'sort', 'opening_qty', 'opening_date', 'reorder_at', 'unit_cost'], textCols: ['opening_date'] },
-  { name: TAB.STOCK_USAGE, headers: ['date', 'product', 'qty', 'entry_id', 'updated_at'], textCols: ['date', 'updated_at'] },
+  // unit_cost (v2.22.0): the cost this row was priced at WHEN IT WAS SAVED — the
+  // snapshot that stops a later cost edit restating a settled cutoff's Remaining,
+  // exactly as `price` on DailyCounts and `salary` on DailyLog do. Blank on rows
+  // written before the column existed, or when no cost was on file at the time;
+  // apiCutoff falls back to the current cost for those.
+  { name: TAB.STOCK_USAGE, headers: ['date', 'product', 'qty', 'entry_id', 'updated_at', 'unit_cost'], textCols: ['date', 'updated_at'] },
   // A physical stocktake. It BECOMES the new baseline, which is what stops
   // estimation drift (spoilage, breakage, miscounts) accumulating forever.
   { name: TAB.STOCK_COUNTS, headers: ['date', 'product', 'counted_qty', 'entry_id', 'updated_at'], textCols: ['date', 'updated_at'] },
@@ -1159,8 +1164,27 @@ function apiSaveDay(ss, settings, payload) {
       custom_qty: l.custom_qty, free_qty: l.free_qty
     };
   }));
+  /* SNAPSHOT THE COST (v2.22.0). The opened value is an allocation now, so a
+     unit cost edited after a cutoff was settled would otherwise restate that
+     cutoff's Remaining on regeneration — the class of restatement every other
+     snapshot here (price, cheese_price, salary, in_cutoff) exists to prevent.
+     Found by the adversarial review, reproduced against this file: 120 → 130
+     moved a generated period's residual and Generate overwrote the archive.
+
+     Looked up by case-folded name, the same way apiCutoff prices, so the row and
+     the fallback can never disagree about which product it is. Blank when no
+     cost is on file yet — then apiCutoff prices it at whatever is on file when it
+     is read, so setting the cost later still values the stock. Correcting a
+     WRONG cost on a saved night means re-saving that night, exactly as it does
+     for a wrong price. */
+  var costByName = Object.create(null);
+  readStockItems(ss).list.forEach(function (it) {
+    costByName[asStr(it.product).toLowerCase()] = it.unit_cost;
+  });
   rewriteDateBlock(ss, TAB.STOCK_USAGE, date, stockRows.map(function (r) {
-    return { date: date, product: r.product, qty: r.qty, entry_id: entryId, updated_at: stamp };
+    var uc = costByName[asStr(r.product).toLowerCase()];
+    return { date: date, product: r.product, qty: r.qty, entry_id: entryId, updated_at: stamp,
+             unit_cost: usableCost(uc) ? asNum(uc) : '' };
   }));
 
   // --- Upsert DailyLog by date (one row per date => replays cannot duplicate),
@@ -2056,11 +2080,8 @@ function apiCutoff(ss, settings, payload, dryRun) {
   }
   var perPartner = round2(split / 2);
 
-  // REMAINING is the residual now — what is left in the business after
-  // everything, and the figure backlog payments are funded from. It MAY BE
-  // NEGATIVE (a short cutoff); it is never clamped, because a clamp would hide
-  // exactly the fortnight the owner most needs to see.
-  var remaining = round2(total - mama - split - supplies - octopus - salary - other - electric);
+  // REMAINING is computed further down now (v2.22.0), because it depends on the
+  // supplies OPENED — which has to be worked out first. See "THE RESIDUAL".
 
   // --- Excluded skus: DISPLAY ONLY, and deliberately computed AFTER `remaining`
   // so it is obvious that nothing above can depend on it.
@@ -2082,33 +2103,67 @@ function apiCutoff(ss, settings, payload, dryRun) {
   /* SUPPLIES USED, IN MONEY (v2.15.0). Owner, 2026-09-01: "theres a breakdown in
      the cutoff, but its still not shown in note."
 
-     It is NOT an allocation and must never become one: the seven lines above sum
-     with `remaining` to `total`, and that identity is what his partner checks.
-     This is the value of stock OPENED, which answers a different question from
-     the "Supplies" line (money PAID). So it is computed here, printed BELOW the
-     residual, and left out of every sum.
+     IT IS AN ALLOCATION SINCE v2.22.0, at the owner's instruction: "just focus
+     on the front numbers, from mama to the bottom of the list, the total should
+     be the total sales." Before that it was display-only, and he was right that
+     it could not stay that way — his suppliers deliver on credit, so the stock
+     he OPENS is a cost the fortnight has genuinely incurred whether or not the
+     bill has been paid yet. Leaving it out made `remaining` read as money he was
+     free to take, when part of it was already owed.
 
      A product with no unit_cost on file is not costed at nothing — it is left
      out and the line says how many products it could not price, exactly as the
      costing screen does. */
-  var usedByProduct = Object.create(null);
+  /* PRICED PER ROW (v2.22.0): each usage row at the cost it was SAVED with, and
+     only when a row carries no snapshot (written before the column existed, or
+     before a cost was on file) at the cost on file now. So a settled fortnight
+     keeps its figure when a cost is corrected later, while a fortnight whose
+     stock was never priced still gets valued the moment a cost is entered.
+
+     `supplies_used_unpriced` stays a count of PRODUCTS, as before: a product
+     with any row nobody could price. Money from its priced rows still counts —
+     known cost is never thrown away because another row's is unknown. */
+  var stockList = readStockItems(ss).list;
+  var costOf = Object.create(null);
+  stockList.forEach(function (it) { costOf[asStr(it.product).toLowerCase()] = it.unit_cost; });
+  var suppliesUsed = 0, unpricedProducts = Object.create(null);
   readStockUsage(ss).forEach(function (u) {
     if (!inPeriod(u)) return;
     var name = asStr(u.product);
     var q = asNum(u.qty);
     if (!name || !(q > 0)) return;
-    usedByProduct[name] = (usedByProduct[name] || 0) + q;
+    var uc = usableCost(u.unit_cost) ? u.unit_cost : costOf[name.toLowerCase()];
+    if (usableCost(uc)) suppliesUsed += q * asNum(uc);
+    else unpricedProducts[name] = true;
   });
-  var stockList = readStockItems(ss).list;
-  var costOf = Object.create(null);
-  stockList.forEach(function (it) { costOf[asStr(it.product).toLowerCase()] = it.unit_cost; });
-  var suppliesUsed = 0, suppliesUsedUnpriced = 0;
-  for (var pname in usedByProduct) {
-    var uc = costOf[pname.toLowerCase()];
-    if (usableCost(uc)) suppliesUsed += usedByProduct[pname] * asNum(uc);
-    else suppliesUsedUnpriced++;
-  }
+  var suppliesUsedUnpriced = Object.keys(unpricedProducts).length;
   suppliesUsed = round2(suppliesUsed);
+
+  /* THE RESIDUAL (v2.22.0). What is left in the business after everything the
+     fortnight actually cost — including the stock it consumed, not only the
+     bills it happened to pay. MAY BE NEGATIVE (a short cutoff); never clamped,
+     because a clamp would hide exactly the fortnight he most needs to see.
+
+     THE IDENTITY HIS PARTNER CHECKS, and the reason this figure moved:
+       total = mama + split + supplies_minor + supplies_used + salary
+             + electric + remaining
+     Every line from Mama to the bottom now adds up to Total, which is what he
+     asked for and what makes the note checkable by hand.
+
+     A DOUBLE-COUNT TO KNOW ABOUT: a Backlog payment folds into `other`, and so
+     into supplies_minor. If the backlog being paid is for bulk stock whose
+     consumption is already in supplies_used, that money is deducted twice — in
+     two different cutoffs. Left as it is on the owner's instruction ("dont touch
+     the backlogs I tell when to pay backlogs"); `backlog_in_minor` below reports
+     it so the screen can say so rather than the figure being quietly wrong. */
+  var remaining = round2(total - mama - split - supplies - octopus - salary -
+    other - electric - suppliesUsed);
+
+  // How much of `other` is Backlog payments, so the cutoff can warn when they
+  // overlap with a priced supplies_used. Reported, never subtracted.
+  var backlogInMinor = 0;
+  expenses.forEach(function (x) { if (x.category === 'Backlog') backlogInMinor += x.amount; });
+  backlogInMinor = round2(backlogInMinor);
 
   /* SUPPLIES (MINOR) — ONE LINE FOR EVERYTHING PAID (v2.20.0). The owner, after
      his ₱3,957 of daily buying went in under the "Other" bucket and so never
@@ -2136,12 +2191,14 @@ function apiCutoff(ss, settings, payload, dryRun) {
     other: other, electric: electric, remaining: remaining,
     // The one line the note and the Cutoff card print (v2.20.0).
     supplies_minor: suppliesMinor,
-    // Display only. See above; and see the identity asserted in the tests:
-    // total = mama + split + supplies_minor + salary + electric + remaining,
-    // with `excluded` and `supplies_used` nowhere in it.
+    // Display only, and outside the identity: nori is not part of this cutoff.
     excluded: excluded, excluded_lines: excludedLines,
-    // Display only, like `excluded`, and outside the identity above.
-    supplies_used: suppliesUsed, supplies_used_unpriced: suppliesUsedUnpriced
+    // AN ALLOCATION since v2.22.0. The identity asserted in the tests:
+    // total = mama + split + supplies_minor + supplies_used + salary
+    //       + electric + remaining, with `excluded` nowhere in it.
+    supplies_used: suppliesUsed, supplies_used_unpriced: suppliesUsedUnpriced,
+    // Reported so the screen can warn about the overlap described above.
+    backlog_in_minor: backlogInMinor
   };
 
   // Branch is read CLEANED (CR/LF -> space, v2.5.0): a line break pasted into
@@ -3404,7 +3461,10 @@ function readStockUsage(ss) {
       product: asStr(cellOf(r, t, 'product')),
       qty: asNum(cellOf(r, t, 'qty')),
       entry_id: asStr(cellOf(r, t, 'entry_id')),
-      updated_at: asStr(cellOf(r, t, 'updated_at'))
+      updated_at: asStr(cellOf(r, t, 'updated_at')),
+      // Raw, not asNum: a blank must stay blank so the fallback can tell "no
+      // snapshot" from "snapshotted at zero". Blank is never zero.
+      unit_cost: cellOf(r, t, 'unit_cost')
     });
   }
   return out;

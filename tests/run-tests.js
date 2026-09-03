@@ -118,12 +118,19 @@ const SPEC_NOTE = [
  *  allocations and the residual are made of, which is what his partner does
  *  arithmetic on. Removed BY NAME, not by position, since v2.15.1 puts that line
  *  inside the category block at the owner's direction. */
+/** Two decimals, for comparing figures the server has already rounded. */
+function r2(n) { return Math.round(Number(n) * 100) / 100; }
+
 function noteSums(text) {
   return String(text).split('\n').filter(l => l.indexOf('Supplies used (opened)') !== 0).join('\n');
 }
 
-const SPEC_NOTE_USED = SPEC_NOTE.replace('Supplies used (opened) - ',
-  'Supplies used (opened) - 240');
+/* The spec note when the period's usage CAN be priced. Since v2.22.0 the opened
+   value is an ALLOCATION, so it lands on its own line AND lowers the residual by
+   exactly that much. Derived, so the sample and this cannot drift. */
+const SPEC_NOTE_USED = SPEC_NOTE
+  .replace('Supplies used (opened) - ', 'Supplies used (opened) - 240')
+  .replace('Short - 2,000', 'Short - 2,240');
 
 const SPEC_FIGURES = {
   total: 11857, cash: 10530, gcash: 1327,
@@ -853,8 +860,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.21.0', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.21.0');
+  assert.strictEqual(g.data.version, '2.22.0', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.22.0');
 });
 
 // ---------------------------------------------------------------------------
@@ -1044,7 +1051,8 @@ test('setupSheet creates and seeds the stock + cutoff tabs', () => {
     'only the three named products get a reorder point; all six get a unit cost'));
 
   assert.deepStrictEqual(ss.getSheetByName('StockUsage').getDataRange().getValues()[0],
-    ['date', 'product', 'qty', 'entry_id', 'updated_at']);
+    ['date', 'product', 'qty', 'entry_id', 'updated_at', 'unit_cost'],
+    'v2.22.0: usage rows carry the cost they were priced at when saved');
   assert.deepStrictEqual(ss.getSheetByName('StockCounts').getDataRange().getValues()[0],
     ['date', 'product', 'counted_qty', 'entry_id', 'updated_at']);
   assert.deepStrictEqual(ss.getSheetByName('CutoffInputs').getDataRange().getValues()[0],
@@ -1474,19 +1482,32 @@ test('cutoff Supplies is Expenses(Supplies) ALONE — nothing else can inflate i
   assert.strictEqual(f.supplies, 5440, 'ONLY the Expenses(Supplies) rows');
   assert.strictEqual(f.total, 11857);
   assert.strictEqual(f.salary, 3000, 're-saving two days must not change the salary total');
-  assert.strictEqual(f.remaining, -2000);
+  // v2.22.0: the 2 packs of flour this day opens are now DEDUCTED, at 120 each,
+  // so the residual is 240 lower than the spec sample's. That is the change
+  // working — and it is precisely the point of this test that it came from the
+  // opened stock and NOT from the Supplies line, which is still 5,440 exactly.
+  assert.strictEqual(f.supplies_used, 240, '2 packs at 120');
+  assert.strictEqual(f.remaining, -2240, '-2,000 as before, less the 240 opened');
   assert.strictEqual(f.total, f.cash + f.gcash);
   assert.strictEqual(f.total,
-    f.mama + f.split + f.supplies + f.octopus + f.salary + f.other + f.electric + f.remaining,
+    f.mama + f.split + f.supplies_minor + f.supplies_used + f.salary +
+    f.electric + f.remaining,
     'the accounting identity must still hold');
-  // The note is byte-identical to the sample: nothing leaked in.
-  // The note now carries the supplies-used footer, because this fixture's usage
-  // CAN be priced. Everything above the footer is byte-identical to the spec
-  // sample — the assertions above already pin Supplies at 5,440 and the
-  // total/remaining identity, which is what "Supplies is Expenses ALONE" means.
+  // ...and the OLD seven-way identity does too, with supplies_used added: proof
+  // this is one extra allocation and not a re-derivation of the others.
+  assert.strictEqual(f.total,
+    f.mama + f.split + f.supplies + f.octopus + f.salary + f.other + f.electric +
+    f.supplies_used + f.remaining,
+    'the seven parts plus the opened value still add to Total');
+  // THE NOTE: the supplies-used line carries the 240, and the residual carries
+  // it too. Every OTHER line is the spec sample byte for byte — which is what
+  // "Supplies is Expenses(Supplies) ALONE" means.
   assert.strictEqual(r.data.note_text, SPEC_NOTE_USED);
-  assert.strictEqual(noteSums(r.data.note_text), noteSums(SPEC_NOTE),
-    'every other line is unchanged, byte for byte — only the supplies-used value differs');
+  const strip = (t) => String(t).split('\n')
+    .filter(l => l.indexOf('Supplies used (opened') !== 0 && !/^(Remaining|Short) - /.test(l))
+    .join('\n');
+  assert.strictEqual(strip(r.data.note_text), strip(SPEC_NOTE),
+    'every line but the opened value and the residual is unchanged, byte for byte');
 });
 
 // ---------------------------------------------------------------------------
@@ -5104,37 +5125,81 @@ test('THE FENCE: the cutoff note and its figures are byte-identical with and wit
   assert.strictEqual(costing(ctx, token).ok, true);
   assert.strictEqual(JSON.stringify(snapshot(ss)), sheetBefore, 'the read wrote nothing');
 
-  // Now empty both cost columns — the sheet exactly as it stood before v2.8.0
-  // backfilled it — by hand, so no writer's side effects are in play.
-  [['Prices', 'box_cost'], ['StockItems', 'unit_cost']].forEach(pair => {
-    const sh = ss.getSheetByName(pair[0]);
+  const blank = (tab, header) => {
+    const sh = ss.getSheetByName(tab);
     const v = sh.getDataRange().getValues();
-    const col = v[0].indexOf(pair[1]);
-    assert.ok(col >= 0, pair[0] + ' must have a ' + pair[1] + ' column');
+    const col = v[0].indexOf(header);
+    assert.ok(col >= 0, tab + ' must have a ' + header + ' column');
     for (let i = 1; i < v.length; i++) sh.getRange(i + 1, col + 1).setValue('');
-  });
+  };
+
+  /* STAGE 1 — THE CASE THE SNAPSHOT EXISTS FOR (v2.22.0). Blank the CURRENT
+     costs only, exactly what an edit under More → Maintenance does after a
+     fortnight has been saved. The usage rows carry the cost they were saved at,
+     so NOTHING in this period may move: a cost edited later must never restate a
+     settled cutoff's Remaining. This is the adversarial review's finding,
+     reproduced against Code.gs before the snapshot existed — 120 → 130 moved a
+     generated period's residual and Generate overwrote the archive. */
+  blank('Prices', 'box_cost');
+  blank('StockItems', 'unit_cost');
+  const afterEdit = cutoffFor(ctx, token, '2026-07-16', '2026-07-31');
+  assert.strictEqual(afterEdit.ok, true, afterEdit.error);
+  assert.strictEqual(afterEdit.data.figures.supplies_used, withCosts.data.figures.supplies_used,
+    'a cost edited AFTER the fortnight was saved does not reprice it — the rows carry their own');
+  assert.strictEqual(afterEdit.data.figures.remaining, withCosts.data.figures.remaining,
+    'so a settled Remaining cannot be restated by a later Maintenance edit');
+  assert.strictEqual(afterEdit.data.note_text, withCosts.data.note_text,
+    'and the note is byte-identical — money that has moved is never restated');
+
+  /* STAGE 2 — NO COST WAS EVER ON FILE. Blank the snapshots too: the sheet as it
+     stood before anyone priced anything. This is the comparison the fence has
+     always made, and the rest of the test is about it. */
+  blank('StockUsage', 'unit_cost');
   const noCosts = cutoffFor(ctx, token, '2026-07-16', '2026-07-31');
   assert.strictEqual(noCosts.ok, true, noCosts.error);
 
-  /* FENCE MOVED, DELIBERATELY (v2.15.0, owner-directed). This asserted that
-     setting a unit cost changed the note by not one byte. The owner has now
-     asked for the value of what was opened to appear IN the note, so that can
-     no longer hold — and pretending otherwise would mean refusing him a figure
-     he asked for twice.
+  /* FENCE TURNED AROUND, DELIBERATELY (v2.22.0, owner-directed) — the third
+     time this one has moved, and this time it asserts the OPPOSITE of what it
+     began as.
 
-     What the fence still protects, and what actually matters, is narrower and
-     stated here explicitly: every ALLOCATION, the total, and the residual are
-     untouched by costs. The only difference a cost may make is the footer BELOW
-     the residual, and the note up to that point stays byte-identical — so the
-     arithmetic his partner checks cannot move when a cost is typed. */
-  const ALLOC = ['total', 'cash', 'gcash', 'mama', 'split', 'per_partner',
-    'supplies', 'octopus', 'salary', 'other', 'electric', 'remaining'];
-  for (const k of ALLOC){
+       v2.8.0  a unit cost changes the note by not one byte.
+       v2.15.0 ...except a footer below the residual, which he asked for.
+       v2.22.0 ...and it now moves the RESIDUAL, which he also asked for:
+               "just focus on the front numbers, from mama to the bottom of the
+               list, the total should be the total sales."
+
+     Deleting it each time would have been easier and would have thrown away
+     real protection. What it protects now is exactly as strong as before and
+     far more useful: a cost may move `remaining` and NOTHING ELSE, and it must
+     move it by EXACTLY the supplies-used figure. That pins the arithmetic in
+     both directions — no drift, no double count, no rounding creep — where the
+     old version only pinned that nothing happened at all. */
+  const UNMOVED = ['total', 'cash', 'gcash', 'mama', 'split', 'per_partner',
+    'supplies', 'supplies_minor', 'octopus', 'salary', 'other', 'electric'];
+  for (const k of UNMOVED){
     assert.deepStrictEqual(noCosts.data.figures[k], withCosts.data.figures[k],
-      'a unit cost moved the note figure ' + k);
+      'a unit cost moved the note figure ' + k + ', which it must never touch');
   }
-  assert.strictEqual(noteSums(noCosts.data.note_text), noteSums(withCosts.data.note_text),
-    'every line except supplies-used is byte-identical');
+  // THE RESIDUAL MOVES BY EXACTLY THE COST, and in the right direction.
+  assert.ok(withCosts.data.figures.supplies_used > 0, 'precondition: costs are set');
+  assert.strictEqual(noCosts.data.figures.supplies_used, 0, 'and cleared in the other run');
+  assert.strictEqual(
+    r2(noCosts.data.figures.remaining - withCosts.data.figures.remaining),
+    withCosts.data.figures.supplies_used,
+    'pricing the stock lowers Remaining by precisely what was opened — no more, no less');
+  // AND THE BLOCK STILL CLOSES, both ways.
+  for (const r of [noCosts.data, withCosts.data]){
+    const f = r.figures;
+    assert.strictEqual(f.total,
+      r2(f.mama + f.split + f.supplies_minor + f.supplies_used + f.salary +
+         f.electric + f.remaining),
+      'total = mama + split + minor + used + salary + electric + remaining');
+  }
+  // Every line ABOVE the supplies-used line is byte-identical either way; the
+  // two that may differ are that line and the residual.
+  const upTo = (t) => String(t).split('\n').slice(0, 10).join('\n');
+  assert.strictEqual(upTo(noCosts.data.note_text), upTo(withCosts.data.note_text),
+    'nothing above the supplies-used line may move');
   assert.match(withCosts.data.note_text, /Supplies used \(opened\) - [0-9]/,
     'with costs, the value is there — which is the point of the change');
   // With usage logged but NO costs, the line does not blank and does not print a
@@ -6110,14 +6175,14 @@ test('an unknown action is refused by name, and doGet answers without a token', 
   assert.strictEqual(r.error, 'Unknown action: "saveDay".',
     'this app cannot save a day, and says so rather than pretending');
   const g = JSON.parse(ctx.doGet({}).getContent());
-  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.21.0' } });
+  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.22.0' } });
 });
 
 test('ping proves the setup WITHOUT spending a unit of quota — even with no key yet', () => {
   const ctx = loadVision({ keepKeyPlaceholder: true });
   const r = vpost(ctx, { token: VISION_TOK, action: 'ping', payload: {} });
   assert.strictEqual(r.ok, true, r.error);
-  assert.strictEqual(r.data.version, '2.21.0', 'the vision project ships with the release it belongs to');
+  assert.strictEqual(r.data.version, '2.22.0', 'the vision project ships with the release it belongs to');
   assert.strictEqual(r.data.model, 'gemini-3.6-flash');
   assert.strictEqual(r.data.key_configured, false, 'a yes/no — never the key itself');
   keepsSecrets(JSON.stringify(r));

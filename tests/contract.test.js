@@ -221,6 +221,9 @@ return {
   get queue(){ return queue; },
   get attention(){ return attention; },
   set attention(v){ attention = v; },
+  // v2.22.0: the note on screen, so a test can prove a cost edit drops it.
+  get lastNote(){ return lastNote; },
+  set lastNote(v){ lastNote = v; },
   get splitEdits(){ return splitEdits; },
   pick, normPrice, normBacklog, normDay, normCount, normExpense, normStockItem,
   normStockDelivery, sanitizeQueue, sanitizeState,
@@ -251,6 +254,8 @@ return {
   // v2.17.0: the Expenses screen can be stepped back to a cutoff that has ended,
   // and a new entry lands in the cutoff on screen rather than always today.
   gastosFor, cutoffExpenseDate, gastosWords, periodLabel,
+  // v2.22.0: the opened value as an allocation, and the raw figure behind it.
+  noteUsedFig,
   // v2.20.0: minor is EVERYTHING entered on the Expenses screen.
   noteMinorVal,
   // v2.18.0: a list of dated amounts, typed once instead of ten at a time.
@@ -264,7 +269,7 @@ return {
   // v2.11.0: how the nights compare.
   trendNights, trendByWeekday, trendBySku, trendCutoffs, trendHTML, weekdayName,
   trendState(v){ if (v && 'open' in v) trendOpen = v.open; },
-  currentPeriod, shiftPeriod, periodKey, num, fmt, fmtShort, activePrices,
+  currentPeriod, shiftPeriod, periodKey, num, r2, fmt, fmtShort, activePrices,
   // v2.3.1: the Split field's one reading, the note guard, what may be said
   // about a refused day, the two collapsible cards, and the price rule.
   splitFieldAmount, liveCutoff, pendingSplit, splitDefault, cutoffWithSplit,
@@ -1148,7 +1153,20 @@ console.log('\n--- 6. Cutoff figures + note text agree across the seam ---');
 // cutoff (CutoffInputs, else Settings split_default) and Salary is summed from
 // each day's snapshot — so those three are asserted against the server, and the
 // phone is required to READ them rather than invent them.
-const SHARED_FIGURES = ['total', 'cash', 'gcash', 'mama', 'supplies', 'octopus', 'other', 'electric'];
+const SHARED_FIGURES = ['total', 'cash', 'gcash', 'mama', 'supplies', 'octopus', 'other',
+  'electric', 'salary', 'split', 'remaining'];
+/* Figures the two sides spell DIFFERENTLY (requests camelCase, responses
+   snake_case — the asymmetry pinned throughout). Compared by pair, because a
+   seam that only checks same-spelled keys quietly skips exactly the ones added
+   most recently. `remaining` was never in the seam until v2.22.0 — the note
+   comparison covered it only as formatted text, which fmt() can round into
+   agreement when the raw figures are a centavo apart. */
+const SHARED_FIGURES_MAPPED = [
+  ['supplies_used', 'suppliesUsed'],
+  ['supplies_minor', 'suppliesMinor'],
+  ['backlog_in_minor', 'backlogInMinor'],
+  ['per_partner', 'perPartner']
+];
 
 /**
  * The cutoff seam, in the only form that is true of BOTH halves at once:
@@ -1165,6 +1183,15 @@ const SHARED_FIGURES = ['total', 'cash', 'gcash', 'mama', 'supplies', 'octopus',
  *  arithmetic on. From v2.15.1 that line sits INSIDE the category block (his
  *  instruction), so it can no longer be split off by position; it is removed by
  *  name instead, which keeps "the sums cannot move" checkable in one place. */
+/** The note minus the ONLY two lines a unit cost may move (v2.22.0): the
+ *  supplies-used line and the residual. Everything else must be byte-identical
+ *  whatever the costs are, and that is what this compares. */
+function noteFixed(text) {
+  return String(text).split('\n')
+    .filter(l => l.indexOf('Supplies used (opened') !== 0 && !/^(Remaining|Short) - /.test(l))
+    .join('\n');
+}
+
 function noteSums(text) {
   return String(text).split('\n').filter(l => l.indexOf('Supplies used (opened)') !== 0).join('\n');
 }
@@ -1175,6 +1202,10 @@ function assertCutoffSeam(app, per, served) {
   SHARED_FIGURES.forEach(k => {
     assert.strictEqual(local[k], f[k],
       'the phone and the note disagree about "' + k + '": ' + local[k] + ' vs ' + f[k]);
+  });
+  SHARED_FIGURES_MAPPED.forEach(([snake, camel]) => {
+    assert.strictEqual(local[camel], f[snake],
+      'the phone and the note disagree about "' + snake + '": ' + local[camel] + ' vs ' + f[snake]);
   });
   const note = app.pick(served, 'note_text', 'noteText');
   assert.ok(note, 'the client would fall back to the on-phone note (server note_text unread)');
@@ -1674,8 +1705,13 @@ const SPEC_NOTE = [
    and is in no sum — the seven lines above still add with the residual to Total, which
    is the identity his partner checks and which is asserted separately. Derived
    from SPEC_NOTE rather than retyped, so the two can never drift. */
-const SPEC_NOTE_USED = SPEC_NOTE.replace('Supplies used (opened) - ',
-  'Supplies used (opened) - 2,940');
+/* THE SPEC NOTE WHEN THE PERIOD'S USAGE CAN BE PRICED. Since v2.22.0 the opened
+   value is an ALLOCATION, so it shows in two places: on its own line, and in a
+   residual that is lower by exactly that much. Derived from SPEC_NOTE rather
+   than written out, so the sample and this can never drift. */
+const SPEC_NOTE_USED = SPEC_NOTE
+  .replace('Supplies used (opened) - ', 'Supplies used (opened) - 2,940')
+  .replace('Short - 2,000', 'Short - 4,940');
 
 const SPEC_PERIOD = { start: '2025-07-01', end: '2025-07-15' };
 const SPEC_EXPENSE_SUPPLIES = 5440;   // Supplies is Expenses(Supplies) ALONE now
@@ -1778,19 +1814,30 @@ test('the Supplies figure is Expenses(Supplies) ALONE, exactly', () => {
   assert.strictEqual(f.salary, 3000, '15 open days at ₱200');
   assert.strictEqual(f.split, 3000, 'the Settings default, entered not derived');
   assert.strictEqual(f.per_partner, 1500);
-  assert.strictEqual(f.remaining, -2000, 'the residual, negative and shown');
+  // v2.22.0: the fixture's opened stock is DEDUCTED now, so the residual is
+  // lower than the -2,000 it read for four releases. What this test exists to
+  // prove is unchanged: the drop came from the opened stock, not from the
+  // Supplies line, which is still 5,440 exactly.
+  assert.strictEqual(f.supplies_used, 2940, 'the fixture prices its opened stock');
+  assert.strictEqual(f.remaining, -2000 - 2940, 'the residual, negative and shown');
   assert.strictEqual(f.total, f.cash + f.gcash);
   assert.strictEqual(f.total,
-    f.mama + f.split + f.supplies + f.octopus + f.salary + f.other + f.electric + f.remaining,
+    f.mama + f.split + f.supplies_minor + f.supplies_used + f.salary +
+    f.electric + f.remaining,
     'the accounting identity must still hold');
+  // ...and the seven parts plus the opened value do too — proof this is one
+  // extra allocation, not a re-derivation of the others.
+  assert.strictEqual(f.total,
+    f.mama + f.split + f.supplies + f.octopus + f.salary + f.other + f.electric +
+    f.supplies_used + f.remaining);
 });
 
 test('the SERVER note is character-identical to the SPEC sample', () => {
-  // The spec sample is still the note's opening, byte for byte; the fixture's
-  // usage is priceable, so the v2.15.0 footer follows it.
+  // v2.22.0: the opened value is an allocation, so it moves the residual too.
+  // SPEC_NOTE_USED carries the value; the residual it implies is 2,940 lower.
   assert.strictEqual(SP.cutoff.note_text, SPEC_NOTE_USED);
-  assert.strictEqual(noteSums(SP.cutoff.note_text), noteSums(SPEC_NOTE),
-    'every line except supplies-used is the note it always was, byte for byte');
+  assert.strictEqual(noteFixed(SP.cutoff.note_text), noteFixed(SPEC_NOTE),
+    'every line but the opened value and the residual is the note it always was');
   // Spelled out, so a future edit cannot "tidy" one of these away unnoticed.
   const lines = SP.cutoff.note_text.split('\n');
   assert.strictEqual(lines.length, 15,
@@ -1804,7 +1851,9 @@ test('the SERVER note is character-identical to the SPEC sample', () => {
   assert.strictEqual(lines[10], 'Supplies used (opened) - 2,940', 'the value OPENED');
   assert.strictEqual(lines[11], 'Salary - 3,000');
   assert.strictEqual(lines[12], 'Electric bill - 500');
-  assert.strictEqual(lines[14], 'Short - 2,000', 'the label carries the sign, never "- -2,000"');
+  assert.strictEqual(lines[14], 'Short - 4,940',
+    'the label carries the sign, never "- -4,940" — and it is 2,940 lower than ' +
+    'it was before v2.22.0 deducted the opened stock');
   assert.ok(!/^Octopus - /m.test(SP.cutoff.note_text), 'the folded lines are GONE, not blank');
   assert.ok(!/^Other payments - /m.test(SP.cutoff.note_text));
   assert.ok(!/₱|PHP/.test(SP.cutoff.note_text), 'the note never carries a peso sign');
@@ -1896,16 +1945,24 @@ test('stock quantities never touch the day total, cash or GCash', () => {
     'usage against a zero baseline reads honestly negative');
 });
 
-test('stock never reaches the cutoff figures or the note, on either side', () => {
-  // Server: the SPEC period carries real stock rows and the note is still
-  // byte-identical (asserted in section 10) — pin the figures explicitly too.
+test('stock QUANTITIES never reach the cutoff figures — only their COST does', () => {
+  /* v2.22.0 renamed and re-pointed this. It began as "stock never reaches the
+     cutoff figures or the note" and that is no longer true: the COST of what was
+     opened is an allocation now, at the owner's instruction. What was always the
+     real danger, and still is, is a stock QUANTITY leaking into a money figure —
+     5 packs turning up as ₱5 somewhere, or Supplies swelling by a delivery. That
+     is what this pins. */
   const f = SP.cutoff.figures;
   const stockUnits = SP.range.stockUsage.reduce((s, r) => s + r.qty, 0);
   assert.strictEqual(stockUnits, 5, 'the fixture must actually carry stock rows');
-  assert.strictEqual(f.total, 11857);
+  assert.strictEqual(f.total, 11857, 'quantities are not sales');
   assert.strictEqual(f.supplies, 5440, 'stock quantities were added to Supplies');
   assert.strictEqual(f.salary, 3000);
-  assert.strictEqual(f.remaining, -2000);
+  // The residual carries the COST of those 5 units, never the count of them.
+  assert.strictEqual(f.supplies_used, 2940, 'their cost, not their number');
+  assert.strictEqual(f.remaining, -2000 - 2940);
+  assert.notStrictEqual(f.remaining, -2000 - stockUnits,
+    'a quantity must never be spent as if it were pesos');
   assert.ok(!has(f, 'stock') && !has(f, 'stock_total'), 'the note figures gained a stock line');
 
   // Client: pile absurd usage onto the local mirror; nothing may move.
@@ -1922,12 +1979,19 @@ test('stock never reaches the cutoff figures or the note, on either side', () =>
   // every total, and the residual. The display keys are asserted separately,
   // and the note is still compared byte for byte below, which is the line that
   // actually protects what his partner receives.
-  const MONEY = ['total', 'cash', 'gcash', 'mama', 'supplies', 'octopus', 'electric',
-    'other', 'salary', 'split', 'perPartner', 'remaining', 'excluded',
+  // `remaining` LEFT this list in v2.22.0 — usage is an allocation now, and the
+  // assertion below pins the exact amount it may move it by, which is stricter
+  // than simply forbidding it. Everything else here still may not budge.
+  const MONEY = ['total', 'cash', 'gcash', 'mama', 'supplies', 'suppliesMinor',
+    'octopus', 'electric', 'other', 'salary', 'split', 'perPartner', 'excluded',
     'daysWithSales', 'openDays', 'tinOut', 'tinUnknown', 'tinExpected'];
   for (const k of MONEY){
     assert.deepStrictEqual(after[k], before[k], 'stock usage moved ' + k);
   }
+  assert.strictEqual(app.r2(before.remaining - after.remaining),
+    app.r2(after.suppliesUsed - before.suppliesUsed),
+    'the residual moved by exactly the change in the value opened, to the centavo — ' +
+    '99,999 packs at 120 is a monstrous figure, and it is the RIGHT monstrous figure');
   assert.ok(!has(after, 'stock') && !has(after, 'stock_total'),
     'and it still adds no stock line to the figures the note is built from');
   // The display keys DO move, which is the point of them.
@@ -1937,10 +2001,10 @@ test('stock never reaches the cutoff figures or the note, on either side', () =>
      it is no longer byte-identical — and it should not be. What still cannot
      move is the part his partner does arithmetic on: every allocation above,
      and the note down to and including the residual. */
-  assert.strictEqual(noteSums(app.buildNote(after, SPEC_PERIOD)), noteSums(note),
-    'every other line is byte-identical — the sums cannot move');
+  assert.strictEqual(noteFixed(app.buildNote(after, SPEC_PERIOD)), noteFixed(note),
+    'every line but the opened value and the residual is byte-identical');
   assert.match(app.buildNote(after, SPEC_PERIOD), /Supplies used \(opened\) - [0-9]/,
-    'and the supplies-used line is the only thing usage may change');
+    'the supplies-used line carries it');
   // ...and the SERVER note the phone actually shows is unchanged too.
   const again = post(SP.ctx, { token: SP.token, action: 'cutoff',
     payload: { start: SPEC_PERIOD.start, end: SPEC_PERIOD.end, dryRun: true } });
@@ -5172,16 +5236,24 @@ test('SUPPLIES USED shows on the Cutoff tab, and moves nothing (v2.14.0)', () =>
   const withUsage = app.computeCutoff(per);
   for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
   const without = app.computeCutoff(per);
-  for (const k of ['total', 'cash', 'gcash', 'supplies', 'octopus', 'remaining', 'split']){
+  /* v2.22.0 TURNED THIS AROUND. It asserted that usage "moves nothing" — the
+     owner has since asked for exactly the opposite, because his suppliers
+     deliver on credit and stock he has opened is a cost the fortnight has run
+     up. What still holds, and is now pinned more tightly than "nothing moved"
+     ever was: usage may move the RESIDUAL and nothing else, by EXACTLY the
+     value opened. */
+  for (const k of ['total', 'cash', 'gcash', 'supplies', 'suppliesMinor',
+                   'octopus', 'other', 'mama', 'electric', 'salary', 'split']){
     assert.deepStrictEqual(withUsage[k], without[k], 'usage moved ' + k);
   }
-  // v2.15.0: usage now adds a FOOTER to the note, at his request. What still
-  // cannot move is the part that sums — pinned here, and the footer's presence
-  // pinned beside it.
-  assert.strictEqual(noteSums(app.buildNote(withUsage, per)), noteSums(app.buildNote(without, per)),
-    'the sums his partner checks are byte-identical either way');
+  assert.ok(withUsage.suppliesUsed > 0, 'precondition: this fixture prices its usage');
+  assert.strictEqual(without.suppliesUsed, 0);
+  assert.strictEqual(app.r2(without.remaining - withUsage.remaining), withUsage.suppliesUsed,
+    'the residual falls by precisely what was opened — no more, no less');
+  assert.strictEqual(noteFixed(app.buildNote(withUsage, per)), noteFixed(app.buildNote(without, per)),
+    'and every line but those two is byte-identical either way');
   assert.match(app.buildNote(withUsage, per), /Supplies used \(opened\) - [0-9]/,
-    'and the value of what was opened is now IN the note, beside Supplies');
+    'the value of what was opened is IN the note, beside Supplies');
   assert.match(app.buildNote(without, per), /Supplies used \(opened\) - \n/,
     'while a period with no usage blanks it, exactly as an empty category blanks');
 });
@@ -5201,7 +5273,11 @@ test('SOURCE PIN: the Cutoff card separates opened from paid, and a negative exp
   assert.match(card, /may be opened across the next two/, 'and why they differ');
   assert.ok(!/It is not the “Supplies” line below/.test(card),
     'and it no longer points at a label the total card stopped printing');
-  assert.match(card, /Nothing here is added to any total/, 'and that it is not an allocation');
+  assert.match(card, /it IS deducted from Remaining/,
+    'v2.22.0: the card no longer claims this is outside the totals — it is one of them');
+  assert.match(card, /deliver on credit/, 'and says WHY a cost you have not paid still counts');
+  assert.ok(!/Nothing here is added to any total/.test(card),
+    'the old promise is gone, not merely softened');
 
   // The below-zero message must no longer send him at the door that hides the
   // difference — that advice predates the catch-up entirely.
@@ -5344,6 +5420,394 @@ test('SOURCE PIN: the Expenses screen steps, and every rule follows the shown cu
   const submit = src.slice(src.indexOf('function submitGasto(){'), src.indexOf('function deleteGasto('));
   assert.match(submit, /const here = gastosPer \|\| currentPeriod\(todayStr\(\)\)/,
     'the comparison follows the stepper');
+});
+
+test('the residual agrees to the CENTAVO with a fractional unit cost (v2.22.0)', () => {
+  /* Found while reviewing, not by a failure: Code.gs rounds the opened value
+     (round2) and THEN subtracts it; the phone was subtracting the raw sum and
+     rounding once at the end. With a unit cost of more than two decimals those
+     can land a centavo apart — and the note's fmt() would have hidden it. The
+     phone now rounds before it subtracts, and this test carries such a cost
+     precisely so the two cannot drift back. */
+  const srv = loadServer();
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data;
+  const app0 = syncedClient(boot);
+  const D = ymdDaysAgo(2);
+  const per = app0.currentPeriod(D);
+
+  /* 3 packs at 120.375: raw 361.125, which is EXACT in binary (a multiple of
+     1/8), so this cannot flake on float representation. round2 takes it to
+     361.13. Subtracting the raw figure from an integer leaves .875, which rounds
+     to .88 — i.e. a residual ending in .12 — where subtracting the rounded one
+     leaves .13. That is the centavo of drift, forced into the open.
+
+     (The first draft of this test used 33.333 x 3 = 99.999; the .001 simply
+     rounded away and the buggy code passed. A fixture has to be built so the
+     wrong answer is a DIFFERENT number, not a number that rounds to the same.) */
+  const items = boot.stockItems.map(x => ({ product: x.product, unit: x.unit, active: x.active,
+    reorderAt: x.reorder_at, unitCost: x.product === 'Takoyaki Flour' ? 120.375 : '' }));
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveStockItems',
+    payload: { rows: items } }).ok, true);
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
+    date: D, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box4', sod: 40, eod: 10, entryId: 'frac-n' }],
+    stock: [{ product: 'Takoyaki Flour', qty: 3 }], entryId: 'frac-day' } }).ok, true);
+
+  const cut = post(srv.ctx, { token: srv.token, action: 'cutoff',
+    payload: { start: per.start, end: per.end, dryRun: true } });
+  assert.strictEqual(cut.ok, true, cut.error);
+  const f = cut.data.figures;
+  assert.strictEqual(f.supplies_used, 361.13, '361.125 rounds to 361.13 on the sheet');
+
+  const app = syncedClient(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+  // THE FULL SEAM, raw figures included — this is the assertion that would have
+  // failed before the fix.
+  assertCutoffSeam(app, per, cut.data);
+  const local = app.computeCutoff(per);
+  assert.strictEqual(local.suppliesUsed, 361.13, 'the phone rounds the same way');
+  assert.strictEqual(local.remaining, f.remaining, 'and the residual matches to the centavo');
+  // The residual is built from the ROUNDED figure: total minus everything else
+  // minus exactly 361.13, never 361.125.
+  assert.strictEqual(local.remaining,
+    app.r2(local.total - local.mama - local.split - local.suppliesMinor - 361.13 -
+           local.salary - local.electric));
+  assert.notStrictEqual(local.remaining,
+    app.r2(local.total - local.mama - local.split - local.suppliesMinor - 361.125 -
+           local.salary - local.electric),
+    'and it is provably NOT the unrounded subtraction — the two differ by a centavo here');
+});
+
+test('THE OPENED VALUE IS AN ALLOCATION, and the block adds to Total (v2.22.0)', () => {
+  /* Owner, 2026-09-02: "all has been paid and I still got 12,933 remaining?
+     thats impossible, because where will I get the money for supplies major?"
+     Then: "just focus on the front numbers, from mama to the bottom of the list,
+     the total should be the total sales."
+
+     He was right. His suppliers deliver on credit, so stock he has OPENED is a
+     cost the fortnight has already run up whether the bill is paid or not.
+     Leaving it out made Remaining read as money he was free to take when part
+     of it was already spoken for. */
+  const srv = loadServer();
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data;
+  const app0 = syncedClient(boot);
+  const D = ymdDaysAgo(2);
+  const per = app0.currentPeriod(D);
+
+  // Price one product, open some of it, and buy something on the same night.
+  const items = boot.stockItems.map(x => ({ product: x.product, unit: x.unit, active: x.active,
+    reorderAt: x.reorder_at, unitCost: x.product === 'Takoyaki Flour' ? 120 : '' }));
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveStockItems',
+    payload: { rows: items } }).ok, true);
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveExpense', payload: {
+    date: D, category: 'Supplies', item: 'Veggies', amount: 300,
+    backlogRef: '', notes: '', entryId: 'alloc-min' } }).ok, true);
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
+    date: D, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box4', sod: 60, eod: 10, entryId: 'alloc-n' }],
+    stock: [{ product: 'Takoyaki Flour', qty: 6 }], entryId: 'alloc-day' } }).ok, true);
+
+  const cut = post(srv.ctx, { token: srv.token, action: 'cutoff',
+    payload: { start: per.start, end: per.end, dryRun: true } });
+  assert.strictEqual(cut.ok, true, cut.error);
+  const f = cut.data.figures;
+  assert.strictEqual(f.supplies_used, 720, '6 packs at 120');
+
+  // THE BLOCK ADDS TO TOTAL — from Mama to the bottom, which is what he asked for.
+  assert.strictEqual(f.total,
+    f.mama + f.split + f.supplies_minor + f.supplies_used + f.salary +
+    f.electric + f.remaining,
+    'total = mama + split + minor + used + salary + electric + remaining');
+
+  // AND IT IS DEDUCTED, not merely displayed. Proving that means comparing with
+  // the same period costed at nothing — but the rows now carry the cost they
+  // were saved at (see the snapshot test below), so blanking the CURRENT cost
+  // must NOT move this period. To get the never-priced figure, the night is
+  // re-saved with no cost on file, which re-snapshots it blank.
+  const bare = boot.stockItems.map(x => ({ product: x.product, unit: x.unit,
+    active: x.active, reorderAt: x.reorder_at, unitCost: '' }));
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveStockItems',
+    payload: { rows: bare } }).ok, true);
+  const afterEdit = post(srv.ctx, { token: srv.token, action: 'cutoff',
+    payload: { start: per.start, end: per.end, dryRun: true } }).data.figures;
+  assert.strictEqual(afterEdit.supplies_used, 720,
+    'blanking the current cost does not un-price a night already saved at 120');
+  assert.strictEqual(afterEdit.remaining, f.remaining, 'so the settled residual holds');
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
+    date: D, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box4', sod: 60, eod: 10, entryId: 'alloc-n' }],
+    stock: [{ product: 'Takoyaki Flour', qty: 6 }], entryId: 'alloc-day' } }).ok, true);
+  const noCost = post(srv.ctx, { token: srv.token, action: 'cutoff',
+    payload: { start: per.start, end: per.end, dryRun: true } }).data.figures;
+  assert.strictEqual(noCost.supplies_used, 0, 'nothing priceable, nothing priced');
+  assert.strictEqual(noCost.supplies_used_unpriced, 1, 'and the product is COUNTED as unpriced');
+  assert.strictEqual(noCost.remaining - f.remaining, 720,
+    'pricing the stock lowered Remaining by exactly its cost');
+  // Every OTHER figure is untouched by the costing.
+  for (const k of ['total', 'cash', 'gcash', 'mama', 'split', 'supplies',
+                   'supplies_minor', 'octopus', 'other', 'salary', 'electric']){
+    assert.strictEqual(noCost[k], f[k], 'costing moved ' + k);
+  }
+  // Restore the cost for the phone comparison below: the rows are blank, so
+  // they fall back to the current 120 and price again — setting a cost LATER
+  // still values stock that was never priced.
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveStockItems',
+    payload: { rows: items } }).ok, true);
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'cutoff',
+    payload: { start: per.start, end: per.end, dryRun: true } }).data.figures.supplies_used, 720,
+    'a blank snapshot falls back to the cost on file now');
+
+  // THE PHONE AGREES, byte for byte and figure for figure.
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveStockItems',
+    payload: { rows: items } }).ok, true);
+  const app = syncedClient(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+  const local = app.computeCutoff(per);
+  assert.strictEqual(local.suppliesUsed, 720);
+  assert.strictEqual(local.remaining, f.remaining, 'the residual matches the sheet exactly');
+  assert.strictEqual(app.buildNote(local, per), cut.data.note_text);
+
+  // A TYPED SPLIT MUST NOT UN-DEDUCT IT. cutoffWithSplit rebuilds the residual
+  // from scratch, and forgetting the opened value there would hand the money
+  // back the moment he touched the Split field.
+  const bumped = app.cutoffWithSplit(local, app.num(local.split) + 500);
+  assert.strictEqual(bumped.remaining, app.r2(local.remaining - 500),
+    'only the split moved it, by exactly the split');
+  assert.strictEqual(bumped.total,
+    bumped.mama + bumped.split + bumped.suppliesMinor + app.noteUsedFig(bumped) +
+    bumped.salary + bumped.electric + bumped.remaining,
+    'and the identity still closes with a typed split');
+  assert.strictEqual(app.noteUsedFig(bumped), 720, 'the opened value survived the split');
+});
+
+test('SOURCE PIN: the backlog overlap is SAID on the card, only when it exists (v2.22.0)', () => {
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+  const at = src.indexOf("'<div class=\"co-row\"><span>Supplies (major)</span>'");
+  assert.ok(at > 0);
+  const card = src.slice(at, at + 1400);
+  assert.match(card, /num\(f\.backlogInMinor\) > 0 && num\(f\.suppliesUsed\) > 0/,
+    'drawn only when BOTH figures exist — with either at zero there is no overlap');
+  assert.match(card, /deducted twice/, 'and it names the consequence');
+  // The sentence is split across a string concatenation in the source, so it is
+  // matched in its two halves rather than as one run of text.
+  assert.match(card, /once when it was ' \+/, 'and the mechanism (first half)');
+  assert.match(card, /'opened, once when it was paid\./, 'and the mechanism (second half)');
+  assert.match(card, /esc\(peso\(f\.backlogInMinor\)\)/, 'with the amount, escaped');
+  assert.match(card, /color:var\(--alert\)/, 'in the colour the app reserves for money problems');
+});
+
+test('A COST EDITED LATER DOES NOT RESTATE A SAVED CUTOFF (v2.22.0)', () => {
+  /* Found by the adversarial review, reproduced against Code.gs before this
+     existed: the opened value became an allocation, apiCutoff priced usage at
+     the CURRENT unit_cost, so editing Flour 120 → 130 under Maintenance moved a
+     generated period's Remaining and Generate overwrote the archive. Money that
+     has moved was being restated — the one thing every other snapshot here
+     (price, cheese_price, salary, in_cutoff) exists to prevent.
+
+     Usage rows now carry the cost they were priced at WHEN SAVED. */
+  const srv = loadServer();
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data;
+  const app0 = syncedClient(boot);
+  const D = ymdDaysAgo(2);
+  const per = app0.currentPeriod(D);
+  const setCost = (c) => assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveStockItems',
+    payload: { rows: boot.stockItems.map(x => ({ product: x.product, unit: x.unit, active: x.active,
+      reorderAt: x.reorder_at, unitCost: x.product === 'Takoyaki Flour' ? c : '' })) } }).ok, true);
+  const cut = () => post(srv.ctx, { token: srv.token, action: 'cutoff',
+    payload: { start: per.start, end: per.end, dryRun: true } }).data;
+  const saveNight = () => assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
+    date: D, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box4', sod: 60, eod: 10, entryId: 'snap-n' }],
+    stock: [{ product: 'Takoyaki Flour', qty: 6 }], entryId: 'snap-day' } }).ok, true);
+
+  setCost(120);
+  saveNight();
+  const settled = cut();
+  assert.strictEqual(settled.figures.supplies_used, 720);
+
+  // THE EDIT THAT USED TO RESTATE. Nothing about this period may move.
+  setCost(130);
+  const afterEdit = cut();
+  assert.strictEqual(afterEdit.figures.supplies_used, 720, 'the rows keep the 120 they were saved at');
+  assert.strictEqual(afterEdit.figures.remaining, settled.figures.remaining, 'Remaining holds');
+  assert.strictEqual(afterEdit.note_text, settled.note_text, 'the note is byte-identical');
+
+  // THE ROW CARRIES IT, on the sheet and into the phone.
+  const rows = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data.stockUsage
+    .filter(u => u.date === D && u.product === 'Takoyaki Flour');
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(Number(rows[0].unit_cost), 120, 'the snapshot rides in the bootstrap');
+  const app = syncedClient(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+  assert.strictEqual(app.state.stockUsage[D][0].unit_cost, 120, 'and the phone keeps it');
+  assert.strictEqual(app.computeCutoff(per).suppliesUsed, 720,
+    'so the phone prices the night at 120 too, though its StockItems now say 130');
+  assert.strictEqual(app.computeCutoff(per).remaining, afterEdit.figures.remaining,
+    'and the two sides agree on the residual');
+
+  // CORRECTING A WRONG COST ON A SAVED NIGHT MEANS RE-SAVING THE NIGHT — the same
+  // door a wrong price has, and the app already says so for prices.
+  saveNight();
+  assert.strictEqual(cut().figures.supplies_used, 780, 'the re-save snapshots the 130');
+
+  // A ROW SAVED WITH NO COST ON FILE gets valued the moment a cost is entered:
+  // its snapshot is blank, so it falls back to whatever is on file when read.
+  setCost('');
+  saveNight();
+  // A SECOND unpriced night of the same product, so the unpriced figure is
+  // provably a count of PRODUCTS and not of rows — with one row either reads 1.
+  const D2 = D !== per.start ? per.start : app0.addDays(D, 1);
+  assert.ok(D2 >= per.start && D2 <= per.end && D2 !== D, 'precondition: another night in period');
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
+    date: D2, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
+    counts: [{ sku: 'box4', sod: 30, eod: 10, entryId: 'snap-n2' }],
+    stock: [{ product: 'Takoyaki Flour', qty: 2 }], entryId: 'snap-day2' } }).ok, true);
+  assert.strictEqual(cut().figures.supplies_used, 0);
+  assert.strictEqual(cut().figures.supplies_used_unpriced, 1,
+    'one PRODUCT nobody could price, though two of its nights are in the period');
+  setCost(125);
+  assert.strictEqual(cut().figures.supplies_used, 8 * 125, 'both nights valued at the cost entered later');
+  assert.strictEqual(cut().figures.supplies_used_unpriced, 0);
+});
+
+test('THE PHONE SNAPSHOTS AS IT SAVES, and prices rows exactly as the sheet does (v2.22.0)', () => {
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
+  const D = '2026-08-20';
+  const per = app.currentPeriod(D);
+  const flour = app.state.stockItems.find(x => x.product === 'Takoyaki Flour');
+  const sauce = app.state.stockItems.find(x => x.product === 'Takoyaki Sauce');
+  const mayo  = app.state.stockItems.find(x => x.product === 'Japanese Mayo');
+  flour.unit_cost = 120; sauce.unit_cost = ''; mayo.unit_cost = 0;
+
+  // SAVING A NIGHT LOCALLY SNAPSHOTS THE COST ON FILE — the same lookup
+  // apiSaveDay makes — so the mirror agrees with the sheet before the sync lands.
+  app.applyLocalDay({ date: D, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0,
+    notes: '', counts: [], stock: [{ product: 'Takoyaki Flour', qty: 6 },
+    { product: 'Takoyaki Sauce', qty: 2 }, { product: 'Japanese Mayo', qty: 1 }], entryId: 'loc-1' });
+  const byName = {};
+  for (const r of app.state.stockUsage[D]) byName[r.product] = r;
+  assert.strictEqual(byName['Takoyaki Flour'].unit_cost, 120, 'snapshotted');
+  assert.strictEqual(byName['Takoyaki Sauce'].unit_cost, '', 'no cost on file → blank, never 0');
+  assert.strictEqual(byName['Japanese Mayo'].unit_cost, 0, 'a cost of ZERO is a figure, and is kept');
+
+  // THE SNAPSHOT WINS over a later edit.
+  flour.unit_cost = 130;
+  let f = app.computeCutoff(per);
+  assert.strictEqual(f.suppliesUsed, 720, 'priced at the 120 it was saved with, not today\'s 130');
+
+  // A BLANK SNAPSHOT FALLS BACK to the cost on file now.
+  sauce.unit_cost = 490;
+  f = app.computeCutoff(per);
+  assert.strictEqual(f.suppliesUsed, 720 + 980, 'the sauce is valued the moment a cost exists');
+  assert.deepStrictEqual(f.suppliesUsedUnpriced, [], 'and nothing is unpriced');
+
+  // ZERO IS PRICED, not "no cost set" — the same rule as Code.gs's usableCost.
+  // The phone used to require > 0, so the two notes disagreed on the suffix.
+  const mayoRow = f.suppliesUsedRows.find(r => r.product === 'Japanese Mayo');
+  assert.strictEqual(mayoRow.cost, 0, 'priced at nothing, which is a price');
+  assert.ok(f.suppliesUsedUnpriced.indexOf('Japanese Mayo') < 0, 'not counted as unpriced');
+
+  // CASE-FOLDED FALLBACK, as the sheet does it. A hand-edited row may not match
+  // the product's case exactly; the two sides must still price it the same way.
+  app.state.stockUsage[D].push({ date: D, product: 'takoyaki flour', qty: 1, entry_id: 'x',
+    updated_at: '', unit_cost: '' });
+  f = app.computeCutoff(per);
+  assert.strictEqual(f.suppliesUsed, 720 + 980 + 130, 'the lowercase row prices at the current 130');
+
+  // PARTLY PRICED: known money counts, and the product is still NAMED.
+  sauce.unit_cost = '';
+  app.state.stockUsage[D].push({ date: D, product: 'Takoyaki Sauce', qty: 1, entry_id: 'y',
+    updated_at: '', unit_cost: 490 });
+  f = app.computeCutoff(per);
+  const sauceRow = f.suppliesUsedRows.find(r => r.product === 'Takoyaki Sauce');
+  assert.strictEqual(sauceRow.cost, 490, 'the snapshotted row is priced');
+  assert.ok(f.suppliesUsedUnpriced.indexOf('Takoyaki Sauce') >= 0,
+    'but the product is named, because the other 2 gal could not be');
+  assert.strictEqual(sauceRow.qty, 3, 'and the quantity is the whole of it');
+
+  // NOTHING OF IT PRICEABLE: null, never 0.
+  app.state.stockUsage[D] = app.state.stockUsage[D].filter(r => r.entry_id !== 'y');
+  f = app.computeCutoff(per);
+  assert.strictEqual(f.suppliesUsedRows.find(r => r.product === 'Takoyaki Sauce').cost, null);
+});
+
+test('A COST EDIT DROPS THE NOTE ON SCREEN (v2.22.0)', () => {
+  // Found by the review: lastNote was dropped for a day, expense or split edit,
+  // but never for a cost edit — and a cost edit now moves Remaining, so the
+  // figures card would show one residual with a "saved" note underneath showing
+  // another, which is exactly what invalidateNoteFor exists to prevent.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const flour = app.state.stockItems.find(x => x.product === 'Takoyaki Flour');
+  flour.unit_cost = 120;
+  const row = (c) => ({ rows: [{ product: 'Takoyaki Flour', unit: 'pack', reorderAt: '', active: true,
+    unitCost: c }] });
+
+  app.lastNote = { key: 'k', text: 'Remaining - 5,193', demo: false };
+  app.applyLocalStockItems(row(130));
+  assert.strictEqual(app.lastNote, null, 'a changed cost drops the note');
+
+  app.lastNote = { key: 'k', text: 'x', demo: false };
+  app.applyLocalStockItems(row(130));
+  assert.notStrictEqual(app.lastNote, null, 'the SAME cost re-saved changes nothing, and keeps it');
+
+  app.applyLocalStockItems({ rows: [{ product: 'Takoyaki Flour', unit: 'pack', reorderAt: 3,
+    active: true, unitCost: '' }] });
+  assert.notStrictEqual(app.lastNote, null, 'a batch that carries no cost leaves it alone too');
+
+  flour.unit_cost = '';
+  app.applyLocalStockItems(row(120));
+  assert.strictEqual(app.lastNote, null, 'and setting a cost where there was none drops it');
+});
+
+test('THE BACKLOG OVERLAP IS REPORTED, not silently double-counted (v2.22.0)', () => {
+  /* A Backlog payment folds into `other`, and so into supplies_minor. If the
+     backlog being paid is for bulk stock whose consumption is already in
+     supplies_used, that money comes off twice — in two different cutoffs.
+
+     The owner's instruction was explicit: "dont touch the backlogs I tell when
+     to pay backlogs." So the behaviour is UNCHANGED and the figure is REPORTED
+     instead, which is the honest middle: he keeps control, and the app stops
+     being quietly wrong about it. */
+  const srv = loadServer();
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data;
+  const app0 = syncedClient(boot);
+  const D = ymdDaysAgo(2);
+  const per = app0.currentPeriod(D);
+
+  const clean = post(srv.ctx, { token: srv.token, action: 'cutoff',
+    payload: { start: per.start, end: per.end, dryRun: true } }).data.figures;
+  assert.strictEqual(clean.backlog_in_minor, 0, 'no backlog payments, nothing to report');
+
+  const name = boot.backlogs && boot.backlogs.length ? boot.backlogs[0].name : '';
+  assert.ok(name, 'the fixture has a backlog to pay');
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveExpense', payload: {
+    date: D, category: 'Backlog', item: 'Backlog payment', amount: 900,
+    backlogRef: name, notes: '', entryId: 'bl-1' } }).ok, true);
+  // AND an ordinary Supplies row on the same night, so a report that swept up
+  // every category would read 1,150 and be caught — a fixture with only the
+  // backlog row cannot tell "Backlog" from "everything".
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveExpense', payload: {
+    date: D, category: 'Supplies', item: 'Veggies', amount: 250,
+    backlogRef: '', notes: '', entryId: 'bl-veg' } }).ok, true);
+
+  const after = post(srv.ctx, { token: srv.token, action: 'cutoff',
+    payload: { start: per.start, end: per.end, dryRun: true } }).data.figures;
+  assert.strictEqual(after.backlog_in_minor, 900, 'the overlap is the BACKLOG part only, to the peso');
+  // IT IS STILL INSIDE minor — behaviour deliberately unchanged.
+  assert.strictEqual(after.supplies_minor, clean.supplies_minor + 900 + 250,
+    'a backlog payment still counts as money paid, exactly as before');
+  assert.strictEqual(after.remaining, clean.remaining - 900 - 250);
+  // And the identity closes either way.
+  for (const g of [clean, after]){
+    assert.strictEqual(g.total,
+      g.mama + g.split + g.supplies_minor + g.supplies_used + g.salary +
+      g.electric + g.remaining);
+  }
+
+  // THE PHONE COMPUTES THE SAME FIGURE from its own rows.
+  const app = syncedClient(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+  assert.strictEqual(app.computeCutoff(per).backlogInMinor, 900,
+    'the phone agrees, so a warning drawn from it cannot contradict the sheet');
 });
 
 test('THE CUTOFF STOCK BLOCK SHOWS WHAT IT STARTED WITH (v2.21.0)', () => {
@@ -5967,6 +6431,8 @@ test('SUPPLIES IN TWO LINES: major is opened, minor is the daily buying (v2.16.0
   assert.strictEqual(sup.majorKnown, false, 'blank is never zero');
   assert.strictEqual(sup.major, null);
   assert.match(sup.why, /Nothing is logged as opened this cutoff/);
+  assert.match(sup.why, /Remaining may be too high/,
+    'v2.22.0: nothing logged means nothing DEDUCTED, which is the part that matters');
 
   // OPENED: six packs and two gallons across two nights of the cutoff.
   app.state.stockUsage['2026-08-20'] = [
@@ -5997,9 +6463,10 @@ test('SUPPLIES IN TWO LINES: major is opened, minor is the daily buying (v2.16.0
   // opened; a sum of both would charge the business twice for one bag.
   assert.notStrictEqual(sup.minor, sup.minor + sup.major,
     'precondition: the two figures differ, so a mix-up would show');
-  assert.strictEqual(f.total, f.mama + f.split + f.supplies + f.octopus + f.salary +
-    f.other + f.electric + f.remaining,
-    'the identity closes on the SEVEN allocations, with the major on screen');
+  // v2.22.0: the major is an allocation, so the identity carries it.
+  assert.strictEqual(f.total, f.mama + f.split + f.suppliesMinor + f.suppliesUsed +
+    f.salary + f.electric + f.remaining,
+    'total = mama + split + minor + used + salary + electric + remaining');
   // AND THE ROW ITSELF CARRIES THE STATEMENT, not this sentence. With everything
   // priced there is NOTHING to say here: the row's own "not in the total" tag
   // answers it, and the long paid-versus-opened reasoning is one card up. A
@@ -6014,6 +6481,9 @@ test('SUPPLIES IN TWO LINES: major is opened, minor is the daily buying (v2.16.0
   assert.strictEqual(sup.majorKnown, false, 'not ₱0 — unknown');
   assert.strictEqual(sup.major, null);
   assert.match(sup.why, /No product has a cost set/);
+  assert.match(sup.why, /NOTHING\s*' \+\s*'?\s*is deducted|NOTHING is deducted/,
+    'and that nothing is deducted for it');
+  assert.match(sup.why, /Remaining is too high/, 'naming the consequence');
   assert.match(sup.why, /More → Maintenance/, 'and the door that fixes it');
 
   // PARTLY PRICED: the major is the priceable part, and the rest is NAMED
@@ -6024,7 +6494,11 @@ test('SUPPLIES IN TWO LINES: major is opened, minor is the daily buying (v2.16.0
   assert.strictEqual(sup.majorKnown, true);
   assert.match(sup.why, /^Takoyaki Sauce has no cost set/, 'the unpriced product is named');
   assert.match(sup.why, /counted but not valued/);
-  assert.ok(sup.why.length < 90, 'and it stays one short line, inside a column of figures');
+  // v2.22.0: it also has to name the CONSEQUENCE, which is new and serious — an
+  // unvalued product now makes the DEDUCTION short and Remaining too high, i.e.
+  // money he might take out that is already spoken for. Worth the extra words.
+  assert.match(sup.why, /the deduction is short/, 'and what that costs him');
+  assert.ok(sup.why.length < 160, 'still one sentence, inside a column of figures');
 
   // A TYPED SPLIT MUST NOT LOSE IT. liveCutoff runs the figures back through
   // cutoffWithSplit, and a merged field dropped there would blank the minor line
@@ -6036,13 +6510,18 @@ test('SUPPLIES IN TWO LINES: major is opened, minor is the daily buying (v2.16.0
     'and the note still prints it');
   assert.strictEqual(withSplit.split, 4000, 'precondition: the split really changed');
 
-  // AND THE MAJOR MOVES NOTHING, on either figure or the note.
+  // THE MAJOR MOVES THE RESIDUAL AND NOTHING ELSE (v2.22.0) — and by exactly
+  // its own value, which is a tighter statement than the "moves nothing" this
+  // asserted for six releases.
   const withUsage = app.computeCutoff(per);
   for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
   const without = app.computeCutoff(per);
-  for (const k of ['total', 'cash', 'gcash', 'supplies', 'octopus', 'remaining', 'split']){
+  for (const k of ['total', 'cash', 'gcash', 'supplies', 'suppliesMinor',
+                   'octopus', 'other', 'mama', 'electric', 'salary', 'split']){
     assert.deepStrictEqual(withUsage[k], without[k], 'the major moved ' + k);
   }
+  assert.strictEqual(app.r2(without.remaining - withUsage.remaining), withUsage.suppliesUsed,
+    'the residual falls by precisely the value opened');
   assert.strictEqual(app.suppliesSplit(without).minor, app.suppliesSplit(withUsage).minor,
     'and the minor does not move when what was opened changes');
 });
@@ -6067,8 +6546,12 @@ test('SOURCE PIN: the total card carries both supplies lines, and only one sums 
   // MAJOR comes from the helper, prints '—' when unknown, and says on its face
   // that it is not in the total. A muted style alone is not a statement.
   assert.match(card, /Supplies \(major\)/, 'and the MAJOR line beside it');
-  assert.match(card, /class="co-row aside"/, 'set apart from the rows that sum');
-  assert.match(card, /not in the total/, 'in words, not only in styling');
+  // v2.22.0: major IS one of the summing rows now, so it is drawn as one — no
+  // aside styling and no "not in the total", both of which would now be lies.
+  assert.ok(card.indexOf('class="co-row aside"') < 0,
+    'the major row is an ordinary summing row now');
+  assert.ok(card.indexOf('not in the total') < 0,
+    'and must not still claim otherwise');
   assert.match(card, /sup\.majorKnown \? peso\(sup\.major\) : '—'/,
     "unknown prints an em dash, never ₱0");
   assert.match(card, /esc\(sup\.why\)/, 'and the explanation is escaped');
@@ -6123,16 +6606,20 @@ test('CATCH UP can target a cutoff that has ENDED (v2.14.1)', () => {
   // made false when it put the supplies-used line INTO the note. It is the
   // sentence that tells him a settled cutoff is safe to touch, so a false
   // reassurance here is worse than no sentence at all.
+  // v2.22.0 changed it again: the opened value is DEDUCTED now, so this sentence
+  // has to admit the Remaining moves too. What genuinely cannot move — and is
+  // what makes a past night safe to choose — is the Total and the Split.
   const lands = app.catchLandsText(lastPer.end);
   assert.match(lands, /cutoff, which has already ended/, 'it names the fortnight and its state');
   assert.match(lands, /Supplies used/, 'and what changes there');
-  assert.match(lands, /changes the “Supplies used \(opened\)” line of that cutoff's note/,
-    'it admits the note line DOES move — v2.15.0 made the old promise false');
-  assert.match(lands, /no total and no share/,
+  assert.match(lands, /AND its Remaining/, 'it admits the RESIDUAL moves — that is the deduction');
+  assert.match(lands, /what was opened is deducted now/, 'and says why in plain words');
+  assert.match(lands, /no Total and no Split/,
     'and what still cannot change, which is what makes choosing a past night safe');
-  assert.match(lands, /money PAID, not from stock opened/, 'saying why');
-  assert.ok(!/nothing in the note/.test(lands),
-    'the false promise is gone, not merely softened');
+  assert.ok(!/money PAID, not from stock opened/.test(lands),
+    'the v2.19.0 wording claimed every settled figure was money PAID — false since v2.22.0');
+  assert.ok(!/nothing in the note/.test(lands) && !/no total and no share/.test(lands),
+    'neither earlier false promise survives');
 
   // A night in THIS cutoff says so instead.
   assert.match(app.catchLandsText(auto), /the one running now/);
@@ -6166,9 +6653,10 @@ test('CATCH UP can target a cutoff that has ENDED (v2.14.1)', () => {
   const f = app.computeCutoff(lastPer);
   const noteWith = app.buildNote(f, lastPer);
   for (const k in app.state.stockUsage) delete app.state.stockUsage[k];
-  // v2.15.0: the footer DOES change — that is what he asked for. The sums do not.
-  assert.strictEqual(noteSums(noteWith), noteSums(app.buildNote(app.computeCutoff(lastPer), lastPer)),
-    'logging usage into a finished cutoff cannot change the sums his partner checked');
+  // v2.22.0: the opened value AND the residual both change — that is what he
+  // asked for. Every other line of a settled fortnight's note stays put.
+  assert.strictEqual(noteFixed(noteWith), noteFixed(app.buildNote(app.computeCutoff(lastPer), lastPer)),
+    'logging usage into a finished cutoff changes only the opened value and the residual');
 });
 
 test('THE NOTE CARRIES THE SUPPLIES USED, and the two builders agree (v2.15.1)', () => {
@@ -6210,9 +6698,13 @@ test('THE NOTE CARRIES THE SUPPLIES USED, and the two builders agree (v2.15.1)',
 
   // THE ALLOCATIONS ARE UNTOUCHED — nothing was added to any sum.
   const f = cut.data.figures;
-  assert.strictEqual(f.total, f.mama + f.split + f.supplies + f.octopus + f.salary +
-    f.other + f.electric + f.remaining,
+  // v2.22.0: the line is an allocation, so it is IN the identity now.
+  assert.strictEqual(f.total, f.mama + f.split + f.supplies_minor + f.supplies_used +
+    f.salary + f.electric + f.remaining,
     'the identity his partner checks still holds with the line present');
+  assert.strictEqual(f.total, f.mama + f.split + f.supplies + f.octopus + f.salary +
+    f.other + f.electric + f.supplies_used + f.remaining,
+    'and so does the seven-part version with the opened value added');
 
   // THE PHONE BUILDS THE SAME NOTE, byte for byte — the two builders must never
   // drift, and this figure is computed independently on each side.
