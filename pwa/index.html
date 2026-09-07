@@ -610,7 +610,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.23.0';
+const APP_VERSION = '2.23.1';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -2167,6 +2167,26 @@ function buildNote(f, per){
  *  turns it into note text; this is the number the arithmetic uses. */
 function noteUsedFig(f){
   return num(pick(asObj(f), 'suppliesUsed', 'supplies_used'));
+}
+
+/** WHAT THIS CUTOFF STILL HAS TO PAY A BACKLOG WITH (v2.23.1). Owner: "the pay a
+ *  backlog card, auto place the value equal to the remaining."
+ *
+ *  Remaining is what the fortnight has left after everything it cost — and since
+ *  v2.23.0 a backlog payment does NOT lower it (the cost was taken when the stock
+ *  was opened). So the figure to offer is Remaining LESS what has already been
+ *  paid down this cutoff, or the card would offer the same ₱5,193 again the
+ *  moment he had paid it. Capped at the chosen debt's balance when one is
+ *  chosen: nobody pays more than is owed by default. '' when nothing is left —
+ *  a short cutoff has nothing to pay from, and blank is never zero. */
+function backlogPayable(f, balance){
+  const o = asObj(f);
+  let avail = r2(num(o.remaining) - num(pick(o, 'backlogPaid', 'backlog_paid')));
+  if (!(avail > 0)) return '';
+  if (balance !== undefined && balance !== null && balance !== '' && num(balance) > 0){
+    avail = Math.min(avail, r2(num(balance)));
+  }
+  return avail;
 }
 
 /** The minor figure, from either side's casing — buildNote is handed the phone's
@@ -6525,7 +6545,9 @@ function deleteGasto(id){
 let cutoffPer = null;
 let lastNote = null; // { key, text, demo }
 // A backlog payment being entered on this screen: { ref, amount }.
-let payBl = { ref:'', amount:'' };
+// `touched` (v2.23.1): once she has typed in the amount, the pre-fill stops —
+// a re-render must never put a figure back into a field she just changed.
+let payBl = { ref:'', amount:'', touched:false };
 // periodKey(), splitEdits, splitFieldAmount(), liveCutoff() and pendingSplit()
 // all live with the period maths above — the cutoff FIGURES need them to find
 // the split entered for a period, not just this screen.
@@ -7032,10 +7054,19 @@ function renderCutoff(){
   if (!activeBl.length){
     h += '<p class="hint">No active backlogs. Add them in the Backlogs tab of the Google Sheet.</p>';
   } else {
+    // THE PRE-FILL (v2.23.1): what this cutoff still has to pay with — Remaining
+    // less what has already been paid down — capped at the chosen debt's
+    // balance. Written into payBl.amount so Save reads the same figure the field
+    // shows, and only while she has not typed: her figure always wins.
+    const chosen = payBl.ref ? activeBl.find(b => b.name === payBl.ref) : null;
+    const payable = backlogPayable(live, chosen ? backlogBalance(chosen) : '');
+    if (!payBl.touched) payBl.amount = payable === '' ? '' : String(payable);
+    const alreadyPaid = num(live.backlogPaid);
     h += '<p class="hint" style="margin-bottom:12px;">Paid out of what is left (' +
       esc(live.remaining < 0 ? 'nothing this cutoff — it is short ' + peso(-live.remaining)
-                             : peso(live.remaining) + ' remaining') +
-      '). It is logged as an expense and shows on the note under “Other payments”.</p>' +
+                             : peso(live.remaining) + ' remaining' +
+                               (alreadyPaid > 0 ? ', ' + peso(alreadyPaid) + ' of it already paid down' : '')) +
+      '). Since v2.23.0 a payment settles the debt and moves no figure above — it is not in the note.</p>' +
       '<div class="field"><label for="payBlRef">Which backlog?</label><select class="input" id="payBlRef">' +
         '<option value=""' + (payBl.ref === '' ? ' selected' : '') + '>Choose…</option>' +
         activeBl.map(b => '<option value="' + esc(b.name) + '"' + (payBl.ref === b.name ? ' selected' : '') + '>' +
@@ -7043,6 +7074,12 @@ function renderCutoff(){
       '</select></div>' +
       '<div class="field"><label for="payBlAmount">How much? (₱)</label>' +
         '<input class="input money" id="payBlAmount" inputmode="decimal" autocomplete="off" placeholder="0" value="' + esc(payBl.amount) + '">' +
+        (payable !== '' && !payBl.touched
+          ? '<p class="hint" style="margin-top:6px;">Filled in with what this cutoff still has to pay with' +
+            (chosen && num(backlogBalance(chosen)) > 0 && num(backlogBalance(chosen)) < r2(num(live.remaining) - alreadyPaid)
+              ? ', capped at what is owed on ' + esc(chosen.name) : '') +
+            '. Change it if you are paying less.</p>'
+          : '') +
         '<p class="err" id="err-paybl" hidden></p></div>' +
       '<button type="button" class="btn block" data-act="pay-backlog">Log this payment</button>';
   }
@@ -7538,7 +7575,7 @@ function payBacklog(){
   enqueue('saveExpense', payload);
   persistState();
   const name = payBl.ref;
-  payBl = { ref:'', amount:'' };
+  payBl = { ref:'', amount:'', touched:false };   // untouched again: the next pre-fill is what is STILL left
   renderCutoff();
   toast('Paid ' + peso(amount) + ' on ' + name + '.');
   drainQueue();
@@ -10054,7 +10091,7 @@ document.addEventListener('input', (ev) => {
     if (cutoffPer) splitEdits[periodKey(cutoffPer)] = ev.target.value;
     updateSplitLive();
   }
-  else if (id === 'payBlAmount') payBl.amount = ev.target.value;
+  else if (id === 'payBlAmount'){ payBl.amount = ev.target.value; payBl.touched = true; }
 
   // More: the stocktake field
   else if (id === 'stCountIn') countDraft = ev.target.value;
@@ -10098,7 +10135,14 @@ document.addEventListener('change', (ev) => {
     setErr('err-arrive', ev.target.value ? entryDateError(ev.target.value) : '');
     return;
   }
-  if (id === 'payBlRef'){ payBl.ref = ev.target.value; return; }
+  if (id === 'payBlRef'){
+    payBl.ref = ev.target.value;
+    // Re-drawn so the pre-fill can cap at the chosen debt's balance (v2.23.1). A
+    // select is a tap, not typing, so rebuilding the panel loses nothing; and
+    // a figure she has typed survives it through payBl.amount + touched.
+    renderCutoff();
+    return;
+  }
   // The camera came back with a picture (v2.9.0). The File is taken FIRST and
   // the input cleared at once: the object stays valid on its own, and clearing
   // it is what lets the same photograph be chosen twice.

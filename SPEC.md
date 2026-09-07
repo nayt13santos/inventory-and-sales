@@ -23,7 +23,7 @@ Locale: Philippines. Timezone **Asia/Manila** everywhere. Currency PHP. Dates ar
 - **Daily salary** ₱200 (`daily_salary`, Settings) is added automatically for every day NOT marked closed, snapshotted onto the day when it is saved so a later rate change never rewrites history. Editable per day for a half day. Subject to change once the owner finishes costing.
 - **Mama** ₱500 per cutoff is her **share** (she is a third person — not the partner the Split is divided with) and **Electric bill** ₱500 are per-cutoff amounts logged as expenses, each offered as a one-tap chip on the Cutoff screen.
 - **Octopus** is its own expense category (bulk purchase, paid per cutoff — kept separate from Supplies by owner's explicit request).
-- **Backlog payments**: owner maintains a list of debts/obligations ("backlogs"), each with a total amount and running balance; he pays variable amounts per cutoff depending on excess. These payments + misc = the note's "Other payments" line.
+- **Backlog payments**: owner maintains a list of debts/obligations ("backlogs"), each with a total amount and running balance; he pays variable amounts per cutoff depending on excess. Since v2.23.0 a backlog payment is **settled debt in no allocation**: it is not in the note and moves none of its figures (the cost was recognised when the stock was opened). The Cutoff screen's "Pay a backlog" card offers what the fortnight still has to pay with (v2.23.1).
 
 ### Cutoff note format (must match EXACTLY, including blank line placement; numbers use thousands separators, no ₱ sign, no decimals for whole numbers)
 
@@ -670,6 +670,35 @@ The tab bar is `position:fixed` at 100% width, so it is exactly as wide as the *
 What overflowed: the **"Stock this cutoff"** block put its per-product sentence in the `.co-row .v` column, which is `white-space:nowrap` — right for `₱1,200`, wrong for *"2 kgs at the start, 10 kgs came in, 9 kgs opened"*. v2.21.0's *"at the start"* took that sentence to ~390px, wider than a phone. Reproduced in the preview: document 498px wide in a 467px viewport, the `.v` span's right edge at 498.
 
 Two fixes, one structural. The sentence now has its own wrapping line under the product name (`.stk-line` / `.stk-line-what`, `overflow-wrap:anywhere`), and `.co-row .v` stays `nowrap` because money must never wrap mid-figure. And **`main` now carries `overflow-x:hidden; min-width:0`**, so no future element in any panel can widen the layout viewport — wide content scrolls inside its own container or wraps; the page itself never scrolls sideways. Verified at 467px and 375px: document width equals viewport width, all four tabs on screen.
+
+### v2.23.0 — five things the week asked for, and a browser in CI
+
+Owner, 2026-09-03, shown what the week's incidents pointed at: all of them, plus a decision on the backlog double-count v2.22.0 had left standing.
+
+**Backlog payments are in no allocation.** A `Backlog` payment used to fold into `other`, and so into `supplies_minor` and the note — money deducted twice when the debt was for bulk stock already costed under `supplies_used`. His decision: *"Keep backlog payments out of the note."* `apiCutoff` and `computeCutoff` now report it as its own figure, **`backlog_paid`**, in **no** allocation: `other` and `supplies_minor` no longer contain it, the note never prints it, and **Remaining does not move when a backlog is paid** — the cost was taken when the stock was opened. The Cutoff screen says what went out; that is all.
+
+**Who saved this.** Every writer stamps a new append-only **`entered_by`** column (DailyLog, StockUsage, StockCounts, StockDeliveries, Expenses) from `enteredBy`, which rides beside the token in every request envelope. The name is **per phone** — *"This phone is used by"* under More → API setup, in `config_v1`, never in the shared Settings tab — because the question it answers is *which phone typed the Sept 2 numbers*.
+
+**The card that was read as a shelf count.** Twice in two nights the person closing typed what was *left* into the Sales card that asks what was *opened*. The card is titled **"Opened today"**, its hint says outright that it is not what is left on the shelf, and the save asks first when a night's opened figure equals the whole shelf for **two or more** products (`shelfAsUsage` / `shelfAsUsageWarning`). One product going to zero is an ordinary last-bag night and is never challenged.
+
+**"Out" is a badge, when it is known.** `out = on_hand ≤ 0 AND (a baseline or some movement exists)`; `low = out OR (reorder_at > 0 AND on_hand ≤ reorder_at)`. A product nobody has ever counted or moved reads 0 by *absence* of data, and badging it "Out" would assert what nobody knows — so a fresh install stays quiet, and nori counted at zero says "Out".
+
+**A phone-size smoke test in CI** (`tests/smoke/phone.js`, job `smoke`; both deploy jobs need it): headless Chromium at 375×812 and 360×740 loads every tab and fails the deploy on sideways overflow, a tab off the screen, a console error or an empty panel — the class of bug v2.22.1 was, which 483 Node tests could not see.
+
+### v2.23.1 — the Pay-a-backlog card offers what is left
+
+Owner: *"under the cutoff tab, the pay a backlog card, auto place the value equal to the remaining."*
+
+The amount field is **pre-filled with what this cutoff still has to pay with** — `backlogPayable(figures, balance)`:
+
+```
+payable = remaining − backlog_paid          ('' when that is not > 0)
+          capped at the chosen backlog's balance, when one is chosen and it is > 0
+```
+
+Not plain Remaining, on purpose: since v2.23.0 a payment moves no figure above, so a card offering Remaining would offer the same ₱5,193 again the moment he had paid it. Less what has already been paid down this cutoff, it offers what is *still* there — and after a payment is logged the card resets and offers the new figure. The cap means nobody pays more than is owed by default; choosing a backlog re-draws the panel so the cap follows the choice (a select is a tap, not typing, so nothing is lost). A short cutoff offers **blank**, not ₱0 — blank is never zero.
+
+**Her figure always wins.** `payBl.touched` is set the moment she types in the amount; from then on no re-render puts a figure back into the field, and the pre-fill hint disappears. "Log this payment" reads `payBl.amount`, which is exactly what the field shows, filled or typed. The card's hint now says *"₱X remaining, ₱Y of it already paid down"* and that a payment settles the debt and is not in the note — replacing the pre-v2.23.0 sentence that promised it would show under "Other payments". Verified in the preview: untouched pre-fill equals Remaining; choosing a ₱135 debt caps it to 135 with the *"capped at what is owed on Mayo"* hint; a typed ₱1,000 survives a re-render; after logging it the card offers Remaining − 1,000.
 
 ### Editable Split per cutoff
 

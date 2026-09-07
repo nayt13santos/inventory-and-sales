@@ -255,7 +255,7 @@ return {
   suppliesSplit,
   // v2.17.0: the Expenses screen can be stepped back to a cutoff that has ended,
   // and a new entry lands in the cutoff on screen rather than always today.
-  gastosFor, cutoffExpenseDate, gastosWords, periodLabel,
+  gastosFor, cutoffExpenseDate, gastosWords, periodLabel, backlogPayable,
   // v2.22.0: the opened value as an allocation, and the raw figure behind it.
   noteUsedFig,
   // v2.20.0: minor is EVERYTHING entered on the Expenses screen.
@@ -5817,6 +5817,58 @@ test('THE PHONE SENDS ITS NAME BESIDE THE TOKEN, on every request (v2.23.0)', as
   bodies.length = 0;
   await app.doBootstrap();
   assert.strictEqual(bodies[0].enteredBy, '', 'a phone never named sends a blank name');
+});
+
+test('PAY A BACKLOG pre-fills with what the cutoff still has to pay with (v2.23.1)', () => {
+  // Owner, 2026-09-04: "auto place the value equal to the remaining." With one
+  // wrinkle that matters: since v2.23.0 a backlog payment does not lower
+  // Remaining, so "the remaining" straight would offer the same 5,193 again the
+  // moment he had paid it. The figure is Remaining LESS what this cutoff has
+  // already paid down — and never more than the chosen debt's balance.
+  const app = loadClient();
+  const P = (remaining, paid, balance) => app.backlogPayable(
+    { remaining, backlogPaid: paid }, balance);
+  assert.strictEqual(P(5193, 0), 5193, 'nothing paid yet: all of it');
+  assert.strictEqual(P(5193, 5000), 193, 'after paying 5,000, only 193 is left to offer');
+  assert.strictEqual(P(5193, 5193), '', 'all of it paid: nothing left, and blank rather than 0');
+  assert.strictEqual(P(5193, 6000), '', 'overpaid: blank, never a negative');
+  assert.strictEqual(P(-1000, 0), '', 'a short cutoff has nothing to pay from');
+  assert.strictEqual(P(0, 0), '', 'and zero is nothing, not "0" typed into a money field');
+  // THE CAP: nobody pays more than is owed by default.
+  assert.strictEqual(P(5193, 0, 700), 700, 'capped at the chosen debt');
+  assert.strictEqual(P(500, 0, 700), 500, 'unless less is available');
+  assert.strictEqual(P(5193, 0, ''), 5193, 'no debt chosen: no cap');
+  assert.strictEqual(P(5193, 0, 0), 5193, 'a debt with nothing owed does not cap to 0 — blank is never zero');
+  // Either casing of the paid figure, like every reader of a cutoff object.
+  assert.strictEqual(app.backlogPayable({ remaining: 5193, backlog_paid: 193 }), 5000);
+  assert.strictEqual(app.backlogPayable({ remaining: 1234.567, backlogPaid: 0 }), 1234.57, 'two decimals');
+});
+
+test('SOURCE PIN: the pre-fill yields to typing, resets after a payment, and tells the truth (v2.23.1)', () => {
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+  const card = src.slice(src.indexOf('Pay a backlog</div><div class="card">'),
+                         src.indexOf('Pay a backlog</div><div class="card">') + 2600);
+  assert.match(card, /const payable = backlogPayable\(live, chosen \? backlogBalance\(chosen\) : ''\);/,
+    'the LIVE figures, capped at the chosen debt');
+  assert.match(card, /if \(!payBl\.touched\) payBl\.amount = payable === '' \? '' : String\(payable\);/,
+    'written into state so Save reads what the field shows — and ONLY while untouched');
+  assert.match(card, /Change it if you are paying less/, 'and says it is a suggestion');
+  assert.ok(card.indexOf('shows on the note under “Other payments”') < 0,
+    'the v2.20.0-era sentence is gone: a payment has been outside the note since v2.23.0');
+  assert.match(card, /moves no figure above — it is not in the note/, 'replaced by the truth');
+  // Typing marks it touched and never re-renders (the v2.13.2 guard covers the
+  // second half; this pins the first).
+  const input = src.slice(src.indexOf("document.addEventListener('input'"), src.indexOf("document.addEventListener('change'"));
+  assert.match(input, /if \(id === 'payBlAmount'\)\{ payBl\.amount = ev\.target\.value; payBl\.touched = true; \}/);
+  // Choosing a debt re-draws (a tap, not typing) so the cap follows the choice.
+  const change = src.slice(src.indexOf("document.addEventListener('change'"), src.indexOf("document.addEventListener('change'") + 6000);
+  assert.match(change, /if \(id === 'payBlRef'\)\{\n\s*payBl\.ref = ev\.target\.value;[\s\S]*?renderCutoff\(\);/,
+    'picking a backlog re-renders so the pre-fill can cap at its balance');
+  // After a payment the field is untouched again, so the NEXT pre-fill is what
+  // is still left — smaller by what was just paid.
+  assert.match(src, /payBl = \{ ref:'', amount:'', touched:false \};\s*\/\/ untouched again/,
+    'the reset clears touched');
+  assert.match(src, /let payBl = \{ ref:'', amount:'', touched:false \};/, 'and the initial state is untouched');
 });
 
 test('A COST EDITED LATER DOES NOT RESTATE A SAVED CUTOFF (v2.22.0)', () => {
