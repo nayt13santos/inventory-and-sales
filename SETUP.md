@@ -52,7 +52,8 @@ Open the Google Sheet and edit these tabs directly — the app picks up changes 
 - **Mama, at closing:** open app → **Sales** tab and work down the screen, laid out the way the stall works:
   0. **📷 Read it from the paper** *(only if you set up the photo reader below — otherwise this button is not there at all)*. Photograph the page you have just written, and the app fills the rest of this screen in for you. Then **check every figure against the paper in your hand** and carry on down the screen exactly as before. It shows what it read, names anything it could **not** read (those stay **empty**, never 0), and compares the page's own total against what the form now adds up to — if the two agree, that is real evidence it read you right; if they differ it says by how many pesos and which lines to look at. **Nothing is saved by any of this.** Typing the night in by hand works exactly as it always did, and on a night with no signal it is the only way — the reader needs internet.
   1. **Box counts** per size — start of day is **already filled in from the last close** (it's just a suggestion; change it if it's wrong), end of day, and **"How many were cheese?"** — a fact about what was made, not how it was paid. The app works out how many sold.
-  2. **Sold with GCash** — one card for the whole payment question: per size, how many went through GCash, and of those how many were cheese. It stays closed on an all-cash night. At its bottom sits **Converted during the day**, with two buttons for the direction — tin cash swapped into a GCash transfer, or GCash paid out of the tin as cash — the day's total doesn't change, only the cash/GCash split moves.
+     Under the box counts sits a small **Given away or ruined** card that stays closed on an ordinary night. Open it only when something left the tray unpaid — a box given to someone, dropped, burnt; nori too — and count it there. It stays in "Sold" (it did leave the tray) and no money is added for it.
+  2. **Sold with GCash** — one card for the whole payment question: per size, two counts kept apart — how many **regular boxes** and how many **cheese boxes** were paid by GCash, each at its own whole price. A cheese box paid by GCash goes under Cheese boxes only, never under Regular boxes as well; it comes off the cheese you counted in step 1. It stays closed on an all-cash night. At its bottom sits **Converted during the day**, with two buttons for the direction — tin cash swapped into a GCash transfer, or GCash paid out of the tin as cash — the day's total doesn't change, only the cash/GCash split moves.
   3. **Sold with cash** — nothing to type here: the app shows what's left after GCash, with its arithmetic spelled out, so the figure you count the tin against explains itself.
   4. **Custom order** amount, **how much of it was GCash**, and — if the order physically used boxes from tonight's counted stack — **"Boxes the order used"** (they're not priced again; the amount you typed is the order's whole value). **"Lid boxes used"** is its own counter here too: just a count, no price, no money.
   5. **Wage for this day** — ₱200 already filled in. Lower it for a half day, or 0 if nobody was paid. It is not part of the day's sales; it comes out at the cutoff.
@@ -176,13 +177,13 @@ Nothing to do — the app updates itself. When a new version is published, the n
 
 It deliberately **waits** if Mama is mid-entry: a half-typed day is never interrupted, and the update applies after she saves or the next time the app is opened. Nothing queued is ever lost across an update.
 
-To confirm which version a phone is on: **More → About**. Current release: **app 2.23.1**, **script 2.23.1**.
+To confirm which version a phone is on: **More → About**. Current release: **app 2.24.0**, **script 2.24.0**.
 
 ## Updating by hand (if you skip the automation)
 
 The app has **two halves that must be updated separately** — the script in the sheet, and the files on the web host. A change to one usually needs the other, so do both. Takes about 5 minutes.
 
-Current versions: **script 2.23.1**, **app 2.23.1**. You can check what each phone is actually running under **More → About**.
+Current versions: **script 2.24.0**, **app 2.24.0**. You can check what each phone is actually running under **More → About**.
 
 ### 1. Update the script (in the sheet)
 

@@ -43,7 +43,7 @@
  * ========================================================================== */
 'use strict';
 
-var VERSION = '2.23.1';
+var VERSION = '2.24.0';
 var TZ = 'Asia/Manila';
 
 /** The Gemini API key, from aistudio.google.com. This project's only paid
@@ -395,6 +395,8 @@ function buildPrompt_(date, skus) {
     '  * "2 = 100" is TWO plain boxes at that product\'s plain price.',
     '  * "Gc" (also "GC", "gc", "gcash") marks a figure as PAID BY GCASH rather than cash.',
     '    "1c Gc" is one cheese box paid by GCash, so it counts in cheese AND in GCash cheese.',
+    '    A cheese box paid by GCash goes in gcash_cheese ONLY, never also in gcash: "gcash" counts',
+    '    the PLAIN (no cheese) boxes paid by GCash.',
     '  * A figure with a line THROUGH it is CANCELLED and is replaced by the figure written',
     '    below or beside it. Report only the figure that still stands. "2735 -> 2605" crossed',
     '    out means 2605.',
