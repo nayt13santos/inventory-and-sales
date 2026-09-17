@@ -281,6 +281,9 @@ return {
   trendNights, trendByWeekday, trendBySku, trendCutoffs, trendHTML, weekdayName,
   trendState(v){ if (v && 'open' in v) trendOpen = v.open; },
   currentPeriod, shiftPeriod, periodKey, num, r2, fmt, fmtShort, activePrices,
+  // v2.25.0: what a conversion may move — the cutoff's cash/GCash up to a day —
+  // and the config, so a test can set the window and the API the rule reads.
+  conversionRoom, cutoffConversionCheck, cutoffOtherNights, cfg: config,
   // v2.3.1: the Split field's one reading, the note guard, what may be said
   // about a refused day, the two collapsible cards, and the price rule.
   splitFieldAmount, liveCutoff, pendingSplit, splitDefault, cutoffWithSplit,
@@ -3808,7 +3811,7 @@ return {
   loadBentaForm, bentaPayload, computeDay, computeCutoff, validateBenta,
   entryDateError, cutoffExpenseDate, previewIncomplete, cutoffMissingDays,
   cutoffMissingMoney,
-  currentPeriod, periodKey, storedPricesFor, priceOnDay,
+  currentPeriod, periodKey, storedPricesFor, priceOnDay, conversionRoom, cutoffConversionCheck, cutoffOtherNights,
   // v2.5.1: the server-derived figures the drain must refresh, the day-effective
   // flag, the blank-omitting settings payload and the phone's note refusal.
   backlogBalance, cutoffOnDay, stockStatusOf, stockStatusList,
@@ -8604,7 +8607,7 @@ test('the GCash card starts collapsed only when every figure in it is 0', () => 
 
 test('the phone refuses the conversion and the special order in the SERVER\'s own words', () => {
   const { srv, boot } = v27Fixture();
-  // Converted cash above the day's cash: byte-compare against the live server.
+  // Converted cash above the cutoff's cash so far: byte-compare against the live server.
   let app = syncedClient(boot);
   app.loadBentaForm(V27_DAY);
   app.benta.gcashConverted = 100000;
@@ -8740,13 +8743,15 @@ test('the conversion converts BOTH ways (v2.7.3): signed on the wire, a chip on 
   // The phone refuses past the GCash floor in the server's own sentence.
   app.benta.gcashConverted = '101';
   const errs = app.validateBenta();
+  // (v2.25.0: the bound is the cutoff's GCash so far; with this the only night
+  // in its cutoff, that is the day's 100.)
   assert.match(String(errs.gcashConverted || ''),
-    /The GCash taken out as cash \(101\) cannot be more than the day's GCash \(100\)\./);
-  // And past the cash floor the other way, unchanged from v2.7.0.
+    /The GCash taken out as cash \(101\) cannot be more than the GCash this cutoff has taken in so far \(100 up to [A-Z][a-z]+ \d+\)\./);
+  // And past the cash floor the other way.
   app.benta.convDir = 'out';
   app.benta.gcashConverted = '9999';
   assert.match(String(app.validateBenta().gcashConverted || ''),
-    /cannot be more than the day's cash/);
+    /cannot be more than the cash this cutoff has taken in so far/);
   // Source pins for the DOM-bound half: the two direction chips exist and the
   // payload derives its sign from the chip, never from typed text.
   assert.match(HTML, /data-act="conv-dir" data-dir="out"/);
@@ -10110,6 +10115,167 @@ test('REVIEW: the give-away head never advertises a figure the save refuses (v2.
   assert.strictEqual(app.freeSummaryText(), '3 units');
   b4.free = -3;
   assert.strictEqual(app.freeSummaryText(), '2 units', 'a negative counts for nothing');
+});
+
+// ---------------------------------------------------------------------------
+// v2.25.0 — THE CONVERSION LOOKS AT THE CUTOFF SO FAR, NOT THE DAY. Owner:
+// "cash to gcash vice versa, looks at the overall total not just the day."
+// ---------------------------------------------------------------------------
+
+test('THE CONVERSION MAY REACH INTO EARLIER NIGHTS THIS CUTOFF (v2.25.0): preview, refusal and the sheet agree to the peso', () => {
+  const srv = loadServer();
+  // FIXED_NOW is 2026-08-01: three nights ago .. one night ago are Jul 29–31,
+  // all in the Jul 16–31 cutoff; today is the first day of the next one.
+  const E = ymdDaysAgo(3), F = ymdDaysAgo(2), D = ymdDaysAgo(1);
+  const night = (date, counts, id, extra) => post(srv.ctx, { token: srv.token, action: 'saveDay', payload: Object.assign({
+    date, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '', counts, entryId: id }, extra || {}) });
+  let r = night(E, [{ sku: 'box4', sod: 5, eod: 0 }], 'reach-e');            // cash 250
+  assert.strictEqual(r.ok, true, r.error);
+  r = night(F, [{ sku: 'box4', sod: 5, eod: 0, gcashQty: 2 }], 'reach-f');    // cash 150, GCash 100
+  assert.strictEqual(r.ok, true, r.error);
+  const app = syncedClient(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+  assert.strictEqual(app.currentPeriod(E).start, app.currentPeriod(D).start, 'precondition: one cutoff');
+  app.loadBentaForm(D);
+  const b4 = app.benta.rows.find(x => x.sku === 'box4');
+  b4.sod = 10; b4.eod = 0;                                  // tonight: ₱500 cash, no GCash
+  // The room: tonight's 500 + 250 + 150 = 900 cash; 0 + 0 + 100 = 100 GCash.
+  const room = app.conversionRoom(D, 500, 0);
+  assert.deepStrictEqual([room.cash, room.gcash], [900, 100]);
+  assert.match(room.upTo, /^[A-Z][a-z]+ \d+$/, 'the day it is counted up to, in words');
+  // Counted UP TO the day: from E's point of view, F and D are not in the tin yet.
+  assert.deepStrictEqual(app.conversionRoom(E, 250, 0).cash, 250, 'later nights do not count');
+  // And a night from the PREVIOUS cutoff is somebody else's tin.
+  const prevStart = app.shiftPeriod(app.currentPeriod(D), -1).start;
+  app.state.days[prevStart] = Object.assign({}, app.state.days[E], { date: prevStart, cash: 9999, gcash: 9999 });
+  assert.deepStrictEqual([app.conversionRoom(D, 500, 0).cash, app.conversionRoom(D, 500, 0).gcash], [900, 100], 'the previous cutoff does not count');
+  delete app.state.days[prevStart];
+  // ₱800 to GCash — more than tonight's ₱500, within the cutoff's ₱900.
+  app.benta.convDir = 'out'; app.benta.gcashConverted = '800';
+  assert.deepStrictEqual(Object.keys(app.validateBenta()), [], 'the phone does not refuse it');
+  let c = app.computeDay(app.bentaPayload());
+  assert.deepStrictEqual([c.total, c.gcash, c.cash, c.gcashConverted], [500, 800, -300, 800],
+    'the preview lets tonight\'s cash go below zero: the rest came out of the tin');
+  assert.strictEqual(c.cashBefore, 500, 'and says what tonight took in before the conversion');
+  let p = app.bentaPayload(); p.entryId = 'reach-d';
+  let saved = post(srv.ctx, { token: srv.token, action: 'saveDay', payload: p });
+  assert.strictEqual(saved.ok, true, saved.error);
+  assert.deepStrictEqual([saved.data.total, saved.data.gcash, saved.data.cash], [500, 800, -300], 'the sheet agrees to the peso');
+  // One peso past the cutoff's cash: refused on the phone in the server's own sentence.
+  app.benta.gcashConverted = '901';
+  const err = app.validateBenta().gcashConverted;
+  p = app.bentaPayload(); p.entryId = 'reach-d2';
+  saved = post(srv.ctx, { token: srv.token, action: 'saveDay', payload: p });
+  assert.strictEqual(saved.ok, false, 'precondition: the server refuses');
+  assert.strictEqual(err, saved.error, 'byte for byte');
+  assert.match(err, /^The cash converted to GCash \(901\) cannot be more than the cash this cutoff has taken in so far \(900 up to [A-Z][a-z]+ \d+\)\.$/);
+  // The preview clamps at the same figure, so the receipt never shows a split the sheet will refuse.
+  assert.strictEqual(app.computeDay(app.bentaPayload()).gcashConverted, 900);
+  // The other way: the cutoff's GCash so far is F's 100, though tonight took none.
+  app.benta.convDir = 'in'; app.benta.gcashConverted = '100';
+  assert.deepStrictEqual(Object.keys(app.validateBenta()), [], 'a GCash cash-out with no GCash tonight — the balance holds F\'s');
+  c = app.computeDay(app.bentaPayload());
+  assert.deepStrictEqual([c.total, c.gcash, c.cash], [500, -100, 600]);
+  app.benta.gcashConverted = '101';
+  assert.match(String(app.validateBenta().gcashConverted), /^The GCash taken out as cash \(101\) cannot be more than the GCash this cutoff has taken in so far \(100 up to [A-Z][a-z]+ \d+\)\.$/);
+  // A re-save of D itself never counts D's own stored row: after saving the
+  // ₱800 conversion (cash −300), the room for D is still 900.
+  const app2 = syncedClient(post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data);
+  assert.strictEqual(app2.state.days[D].cash, -300, 'precondition: D is stored with its conversion');
+  app2.loadBentaForm(D);
+  assert.strictEqual(app2.conversionRoom(D, 500, 0).cash, 900, 'D\'s own row is excluded by date');
+  assert.strictEqual(app2.num(app2.benta.gcashConverted), 800, 'and the form shows the conversion as saved');
+  assert.deepStrictEqual(Object.keys(app2.validateBenta()), [], 'so the saved night re-validates clean');
+});
+
+test('THE CONVERSION: a night the phone cannot fully see is left to the server, and the receipt says where the rest came from (v2.25.0)', () => {
+  const { boot } = v27Fixture();
+  const app = syncedClient(boot);
+  const D = ymdDaysAgo(1);
+  app.loadBentaForm(D);
+  const b4 = app.benta.rows.find(x => x.sku === 'box4');
+  b4.sod = 4; b4.eod = 0;                                   // ₱200 tonight; V27_DAY (two nights ago) adds cash 600
+  const per = app.currentPeriod(D);
+  assert.strictEqual(app.conversionRoom(D, 200, 0).cash, 800, 'with the whole cutoff in view: 200 + 600');
+  // The phone's window starts AFTER the cutoff did: it cannot see every night,
+  // so it neither clamps nor refuses — the server, which sees all, decides.
+  app.state.window_start = D;
+  app.cfg.apiUrl = 'https://example.invalid/exec';
+  assert.strictEqual(app.conversionRoom(D, 200, 0), null, 'no room figure without the whole period');
+  app.benta.convDir = 'out'; app.benta.gcashConverted = '5000';
+  assert.strictEqual(app.validateBenta().gcashConverted, undefined, 'not refused here');
+  assert.strictEqual(app.computeDay(app.bentaPayload()).gcashConverted, 5000, 'not clamped here');
+  // A window that reaches back to the cutoff's start IS the whole period: judged.
+  app.state.window_start = per.start;
+  assert.strictEqual(app.conversionRoom(D, 200, 0).cash, 800, 'the whole cutoff in view again — with a server');
+  assert.match(String(app.validateBenta().gcashConverted), /cannot be more than the cash this cutoff has taken in so far \(800 up to/);
+  // Demo mode (no API) has nothing beyond the phone: the phone\'s own days ARE the whole story.
+  app.state.window_start = D;
+  app.cfg.apiUrl = '';
+  assert.strictEqual(app.conversionRoom(D, 200, 0).cash, 800, 'without a server the phone judges by what it holds');
+  assert.ok(per.start <= D);
+  // The receipt's sentence for a conversion past tonight's takings — render
+  // code, so a source pin on both directions.
+  const receipt = slab('function updateReceipt(){', 'function rLine(label, amt){');
+  assert.match(receipt, /c\.gcashConverted > num\(c\.cashBefore\) \? ' — more than tonight’s cash; the rest came out of earlier nights’ cash this cutoff' : ''/);
+  assert.match(receipt, /-c\.gcashConverted > num\(c\.gcashSales\) \? ' — more than tonight’s GCash; the rest came out of earlier nights’ GCash this cutoff' : ''/);
+});
+
+test('THE PHONE REFUSES A RE-SAVE THAT WOULD UNCOVER A LATER NIGHT\'S CONVERSION, in the server\'s sentence (v2.25.0)', () => {
+  const srv = loadServer();
+  const E = ymdDaysAgo(3), D = ymdDaysAgo(1);                 // one cutoff (FIXED_NOW is 2026-08-01)
+  const night = (date, counts, id, extra) => post(srv.ctx, { token: srv.token, action: 'saveDay', payload: Object.assign({
+    date, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '', counts, entryId: id }, extra || {}) });
+  assert.strictEqual(night(E, [{ sku: 'box4', sod: 5, eod: 0 }], 'unc-e').ok, true);                         // cash 250
+  const d = night(D, [{ sku: 'box4', sod: 2, eod: 0 }], 'unc-d', { gcashConverted: 350 });                   // leans on E
+  assert.strictEqual(d.ok, true, d.error);
+  const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} }).data;
+  const app = syncedClient(boot);
+  app.loadBentaForm(E);
+  const b4 = app.benta.rows.find(x => x.sku === 'box4');
+  b4.sod = 3;                                                  // 150: the 350 on D would be uncovered by 100
+  const err = app.validateBenta().gcashConverted;
+  let p = app.bentaPayload(); p.entryId = 'unc-e2';
+  let saved = post(srv.ctx, { token: srv.token, action: 'saveDay', payload: p });
+  assert.strictEqual(saved.ok, false, 'precondition: the server refuses');
+  assert.strictEqual(err, saved.error, 'byte for byte');
+  assert.match(err, /^Saving this would leave the cutoff short: the 350 converted to GCash on [A-Z][a-z]+ \d+ would be more than the cash taken in up to that day \(250\)\. Lower that conversion first, or check these counts\.$/);
+  // Closing E is judged too — on the date slot, since the cards are hidden.
+  app.benta.closed = true;
+  const errC = app.validateBenta().date;
+  p = app.bentaPayload(); p.entryId = 'unc-e3';
+  saved = post(srv.ctx, { token: srv.token, action: 'saveDay', payload: p });
+  assert.strictEqual(saved.ok, false);
+  assert.strictEqual(errC, saved.error, 'the closed-day refusal is the server\'s sentence too');
+  assert.match(errC, /\(100\)\. Lower that conversion first/);
+  // Back to five boxes: clean on both sides.
+  app.benta.closed = false; b4.sod = 5;
+  assert.deepStrictEqual(Object.keys(app.validateBenta()), []);
+  p = app.bentaPayload(); p.entryId = 'unc-e4';
+  assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: p }).ok, true);
+  // The pieces: the other nights of a cutoff as the phone can vouch for them.
+  const others = app.cutoffOtherNights(E);
+  assert.deepStrictEqual(others.list.map(x => [x.date, x.cash, x.gcash, x.converted]), [[D, -250, 350, 350]]);
+  assert.strictEqual(app.cutoffConversionCheck(E, { converted: 0, cash: 250, gcash: 0 }), '', 'enough: no sentence');
+  assert.match(app.cutoffConversionCheck(E, { converted: 0, cash: 249, gcash: 0 }), /\(349\)\. Lower/, 'one peso short: named');
+
+  // A night the SERVER REFUSED is not in the sheet, so it is not in the tin:
+  // the phone must not count it (the review found it did — a green preview,
+  // then a second red card).
+  const app2 = syncedClient(boot);
+  assert.strictEqual(app2.conversionRoom(D, 100, 0).cash, 350, 'E counts while the sheet holds it');
+  app2.noteAttention('rejected', 'saveDay', { date: E }, 'The server said no.');
+  assert.strictEqual(app2.dateNotInSheet(E), true, 'precondition');
+  assert.strictEqual(app2.conversionRoom(D, 100, 0).cash, 100, 'a refused night is left out');
+  assert.deepStrictEqual(app2.cutoffOtherNights(D).list.map(x => x.date), [], 'and out of the other-nights list');
+
+  // A configured phone that has never synced cannot see the period: no judgement.
+  const fresh = loadClient();
+  fresh.cfg.apiUrl = 'https://example.invalid/exec';
+  assert.strictEqual(fresh.state.window_start, '', 'precondition: no bootstrap yet');
+  assert.strictEqual(fresh.conversionRoom(D, 100, 0), null);
+  assert.strictEqual(fresh.cutoffConversionCheck(D, { converted: 5000, cash: -4900, gcash: 5000 }), null, 'the server decides');
+  fresh.cfg.apiUrl = '';
+  assert.strictEqual(fresh.conversionRoom(D, 100, 0).cash, 100, 'demo mode: the phone\'s own days are the whole story');
 });
 
 test('REVIEW: the paper review\'s Cheese figure is what the card will show (v2.24.0)', () => {

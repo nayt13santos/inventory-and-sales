@@ -201,12 +201,17 @@ function injectFixture(){
       if (in_cutoff){ total += amount; gcash += gcash_amount; } else excluded += amount;
     }
     counts[ds] = rows;
+    // Tin cash converted to GCash on some nights — folded INTO gcash and out of
+    // cash exactly as the sheet stores it. Every eighth night converts more
+    // than its own cash (v2.25.0 allows that: the cutoff's cash covers it), so
+    // a night with Cash below zero is on the screens this test renders.
+    const conv = k % 8 === 0 ? (total - gcash) + 120 : (k % 4 === 0 ? Math.min(100, gcash) : 0);
     days[ds] = {
       date: ds, closed: false, staff: k % 3 ? 'Mama' : 'Ate Jen',
       salary: k % 5 === 0 ? '' : 200,            // one blank -> falls back to the settings rate
-      gcash, total, cash: total - gcash,
+      gcash: gcash + conv, total, cash: total - gcash - conv,
       custom_amount: 0, custom_gcash: 0, excluded_total: excluded,
-      gcash_converted: k % 4 === 0 ? Math.min(100, gcash) : 0,
+      gcash_converted: conv,
       lid_boxes: 2 + (k % 3),
       notes: k % 6 === 0 ? 'Rain in the evening, slow after 8' : '',
       entry_id: id('day'), updated_at: stamp(ds)

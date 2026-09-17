@@ -210,8 +210,11 @@
  *     v2.7.3 (positive = tin cash swapped for a GCash transfer, negative =
  *     GCash cashed out of the tin; the phone's direction chip carries the
  *     sign). Each direction is REFUSED, naming both figures, when it exceeds
- *     the day's computed figure on the side it leaves — neither Cash nor
- *     GCash can ever go negative. DailyLog appends `gcash_converted` (blank
+ *     the figure on the side it leaves — since v2.25.0 the CUTOFF's cash or
+ *     GCash taken in up to that night, not the day's (the tin holds every
+ *     night's cash since the cutoff began), so a day's own Cash or GCash may
+ *     be below zero while the cutoff's running figure on a converting night
+ *     never is (cutoffConversionCheck_). DailyLog appends `gcash_converted` (blank
  *     legacy cells read 0). The roll-up is gcash = Σ per-sku gcash_amount +
  *     custom_gcash + gcash_converted and cash = total − gcash, so
  *     Total = Cash + GCash still holds by construction, never by argument.
@@ -279,7 +282,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.24.0';
+var VERSION = '2.25.0';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -732,8 +735,9 @@ function apiSaveDay(ss, settings, payload) {
   // SIGNED since v2.7.3 — owner: "convert income cash to gcash, vice versa").
   // POSITIVE = tin cash swapped for a GCash transfer; NEGATIVE = GCash cashed
   // out of the tin. Either way it moves the SPLIT only — the day's Total is
-  // untouched — so both floors are validated against the day's computed
-  // figures AFTER the roll-up below, where they exist. Absent/blank (every
+  // untouched — so both floors are validated AFTER the roll-up below, against
+  // the cutoff's figures up to this night (v2.25.0), of which the day's
+  // computed figures are one term. Absent/blank (every
   // payload queued before v2.7.0) means 0: nothing was converted, and the
   // split lands exactly where it always did. Payloads queued by v2.7.0–v2.7.2
   // phones are always >= 0, so the sign change breaks nothing queued.
@@ -1119,24 +1123,30 @@ function apiSaveDay(ss, settings, payload) {
   var excludedLines = lines.filter(function (l) { return !l.in_cutoff; });
   var total = round2(counted.reduce(function (s, l) { return s + l.amount; }, 0) + custom);
   var gcashSales = round2(counted.reduce(function (s, l) { return s + l.gcash_amount; }, 0) + customGcash);
-  // A conversion can only move money that EXISTS on the side it leaves: at
-  // most the day's computed cash when converting cash to GCash, at most the
-  // day's computed GCash when cashing GCash out (v2.7.3) — so neither figure
-  // can ever go negative. Refused naming both figures — a cap applied
-  // silently would save a split the tin does not show.
+  // A conversion can only move money that EXISTS on the side it leaves. Since
+  // v2.25.0 that side is the CUTOFF's, not the day's (owner: "cash to gcash
+  // vice versa, looks at the overall total not just the day"): the tin holds
+  // every night's cash since the cutoff began, so moving three nights' worth
+  // into GCash on the fourth is an ordinary thing to do. The bound is the
+  // cutoff's cash (or GCash) from its first day up to and including this one —
+  // the other days as the sheet holds them, this day as just computed. The
+  // DAY's own cash may therefore go below zero; the cutoff's cannot. Refused
+  // naming both figures — a cap applied silently would save a split the tin
+  // does not show. The other days are read only when something was converted,
+  // so an ordinary night costs no extra read.
   var cashBefore = round2(total - gcashSales);
-  if (gcashConverted > cashBefore) {
-    throw new Error('The cash converted to GCash (' + fmtAmt(gcashConverted) +
-      ") cannot be more than the day's cash (" + fmtAmt(cashBefore) + ').');
-  }
-  if (gcashConverted < 0 && -gcashConverted > gcashSales) {
-    throw new Error('The GCash taken out as cash (' + fmtAmt(-gcashConverted) +
-      ") cannot be more than the day's GCash (" + fmtAmt(gcashSales) + ').');
-  }
   // gcash = per-sku GCash + the custom order's GCash + the signed conversion,
   // and cash is the remainder — Total = Cash + GCash by construction, as ever.
   var gcash = round2(gcashSales + gcashConverted);
   var cash = round2(total - gcash);
+  // THE CUTOFF'S RUNNING CASH AND GCASH NEVER GO BELOW ZERO ON A NIGHT THAT
+  // CONVERTED (v2.25.0). Checked on EVERY save, not only a converting one: the
+  // review of this release found that re-saving an earlier night smaller (or
+  // closing it) after a later night had converted against its cash left the
+  // cutoff short with no refusal at all. So every converting night on or after
+  // this one is re-checked with this night's figures in place of its stored
+  // row. One read of DailyLog per save; refused before any write.
+  cutoffConversionCheck_(ss, settings, date, { converted: gcashConverted, cash: cash, gcash: gcash });
   var excludedTotal = round2(excludedLines.reduce(function (s, l) { return s + l.amount; }, 0));
 
   var stamp = nowStamp();
@@ -1946,6 +1956,28 @@ function apiSheetCheck(ss) {
     if (Math.abs(day.total - day.cash - day.gcash) > 0.01) {
       say('DailyLog: ' + day.date + ' stores Total ' + day.total + ' but Cash ' + day.cash +
         ' + GCash ' + day.gcash + ' — the cells were edited by hand. Re-save that day from the app.');
+    }
+  }
+
+  // 6b. A conversion bigger than the cutoff had taken in by that night (v2.25.0).
+  // apiSaveDay refuses this on every save, so the sheet can only hold it after
+  // a hand edit — and then the note prints a negative Cash line and the tin
+  // card blames a sale nobody wrote down. Walk each cutoff in date order.
+  var sortedDays = days.slice().sort(function (a, b) { return a.date < b.date ? -1 : (a.date > b.date ? 1 : 0); });
+  var runCash = 0, runGcash = 0, runPer = '', saidConv = 0;
+  for (var d3 = 0; d3 < sortedDays.length; d3++) {
+    var dd = sortedDays[d3];
+    var perKey = periodStartOf_(dd.date).start;
+    if (perKey !== runPer) { runPer = perKey; runCash = 0; runGcash = 0; }
+    runCash = round2(runCash + asNum(dd.cash));
+    runGcash = round2(runGcash + asNum(dd.gcash));
+    var conv = asNum(dd.gcash_converted);
+    if (saidConv < 3 && ((conv > 0 && runCash < 0) || (conv < 0 && runGcash < 0))) {
+      saidConv++;
+      say('DailyLog: on ' + dd.date + ' the ' + fmtAmt(Math.abs(conv)) +
+        (conv > 0 ? ' converted to GCash is more than the cash the cutoff had taken in by then (' + fmtAmt(round2(runCash + conv)) + ')'
+                  : ' GCash taken out as cash is more than the GCash the cutoff had taken in by then (' + fmtAmt(round2(runGcash - conv)) + ')') +
+        ' — a night before it was edited by hand. Re-open that night in the app and lower the conversion, or check the nights before it.');
     }
   }
 
@@ -2939,6 +2971,80 @@ function periodsTouched_(start, end) {
     cur = periodStartOf_(addDaysStr(cur.end, 1));
   }
   return { count: out.length, list: out, last: out.length ? out[out.length - 1] : null };
+}
+
+/** "July 31" — the day a running figure is counted up to, in the words the
+ *  phone's monthName() + day produce, because the sentences below are matched
+ *  byte for byte on the phone. */
+function monthDay_(ds) {
+  var p = parseYmd(ds);
+  return MONTHS[p.m - 1] + ' ' + p.d;
+}
+
+/** THE CUTOFF'S CASH AND GCASH NEVER GO BELOW ZERO ON A NIGHT THAT CONVERTED
+ *  (v2.25.0). Owner: "cash to gcash vice versa, looks at the overall total not
+ *  just the day." A conversion moves money that exists on the side it leaves —
+ *  and the tin holds every night's cash since the cutoff began, so the bound
+ *  is the CUTOFF's cash (or GCash) from its first day up to and including the
+ *  converting night, not that night's own.
+ *
+ *  Stated as an invariant so it survives edits to OTHER nights: for every
+ *  converting night L in the cutoff on or after the night being saved, the
+ *  cutoff's cash (if L moved cash into GCash) or GCash (if L cashed GCash out)
+ *  summed over every night up to L — the OTHER nights as the sheet holds them,
+ *  the night being saved as just computed — must not be below zero. The night
+ *  being saved is excluded BY DATE, so a re-save never counts its own stored
+ *  row twice; nights after L are not in the tin yet. When L is the night being
+ *  saved this is exactly "the conversion cannot exceed the cutoff's figure up
+ *  to tonight"; when L is a later night it is "this re-save would pull the
+ *  cash out from under a conversion already made", refused in a sentence that
+ *  names that night. Mirrored on the phone by cutoffConversionCheck(); the two
+ *  must agree to the peso and the letter. `day` = {converted, cash, gcash} —
+ *  this night's FINAL figures, the conversion already inside them. */
+function cutoffConversionCheck_(ss, settings, date, day) {
+  var per = periodStartOf_(date);
+  var others = readDays(ss, dailySalaryOf(settings)).filter(function (d) {
+    return d.date !== date && d.date >= per.start && d.date <= per.end;
+  });
+  var nights = others.filter(function (d) { return d.date > date && asNum(d.gcash_converted) !== 0; })
+    .map(function (d) { return { date: d.date, conv: asNum(d.gcash_converted) }; });
+  if (asNum(day.converted) !== 0) nights.push({ date: date, conv: asNum(day.converted) });
+  nights.sort(function (a, b) { return a.date < b.date ? -1 : (a.date > b.date ? 1 : 0); });
+  for (var i = 0; i < nights.length; i++) {
+    var L = nights[i];
+    var cash = asNum(day.cash), gcash = asNum(day.gcash);
+    others.forEach(function (d) {
+      if (d.date <= L.date) { cash += asNum(d.cash); gcash += asNum(d.gcash); }
+    });
+    cash = round2(cash); gcash = round2(gcash);
+    var upTo = monthDay_(L.date);
+    if (L.date === date) {
+      // Tonight's own conversion: the figure named is what the cutoff had
+      // taken in up to tonight BEFORE the conversion — the most it could move.
+      if (L.conv > 0 && cash < 0) {
+        throw new Error('The cash converted to GCash (' + fmtAmt(L.conv) +
+          ') cannot be more than the cash this cutoff has taken in so far (' + fmtAmt(round2(cash + L.conv)) +
+          ' up to ' + upTo + ').');
+      }
+      if (L.conv < 0 && gcash < 0) {
+        throw new Error('The GCash taken out as cash (' + fmtAmt(-L.conv) +
+          ') cannot be more than the GCash this cutoff has taken in so far (' + fmtAmt(round2(gcash - L.conv)) +
+          ' up to ' + upTo + ').');
+      }
+    } else {
+      // A LATER night's conversion that this save would leave uncovered.
+      if (L.conv > 0 && cash < 0) {
+        throw new Error('Saving this would leave the cutoff short: the ' + fmtAmt(L.conv) +
+          ' converted to GCash on ' + upTo + ' would be more than the cash taken in up to that day (' +
+          fmtAmt(round2(cash + L.conv)) + '). Lower that conversion first, or check these counts.');
+      }
+      if (L.conv < 0 && gcash < 0) {
+        throw new Error('Saving this would leave the cutoff short: the ' + fmtAmt(-L.conv) +
+          ' GCash taken out as cash on ' + upTo + ' would be more than the GCash taken in up to that day (' +
+          fmtAmt(round2(gcash - L.conv)) + '). Lower that conversion first, or check these counts.');
+      }
+    }
+  }
 }
 
 /** The cutoff period a date falls in: {start, end}. */

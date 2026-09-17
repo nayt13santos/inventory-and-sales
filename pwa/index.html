@@ -610,7 +610,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.24.0';
+const APP_VERSION = '2.25.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -1687,12 +1687,18 @@ function computeDay(p){
   const gcashSales = r2(gsum + customGcash);
   // Money converted between the tin and GCash (v2.7.0; SIGNED since v2.7.3,
   // negative = GCash cashed out): it moves the SPLIT only — the Total is
-  // untouched. It can only move money that EXISTS on the side it leaves, so it
-  // clamps at the day's cash going one way and at the day's GCash going the
-  // other — exactly the bounds apiSaveDay refuses over (validateBenta shows
-  // those refusals inline; this keeps the preview true).
+  // untouched. It can only move money that EXISTS on the side it leaves — and
+  // since v2.25.0 that side is the CUTOFF's up to this day, not the day's
+  // (conversionRoom: the tin holds every night's cash since the cutoff began),
+  // so it clamps at the cutoff's cash going one way and at the cutoff's GCash
+  // going the other — exactly the bounds apiSaveDay refuses over (validateBenta
+  // shows those refusals inline; this keeps the preview true). A period the
+  // phone cannot fully see is not clamped at all: the server decides.
   const cashBefore = r2(total - gcashSales);
-  const gcashConverted = p.closed ? 0 : Math.max(-gcashSales, Math.min(cashBefore, num(p.gcashConverted)));
+  const room = p.closed ? null : conversionRoom(asObj(p).date, cashBefore, gcashSales);
+  const gcashConverted = p.closed ? 0
+    : (room ? Math.max(-Math.max(0, room.gcash), Math.min(Math.max(0, room.cash), num(p.gcashConverted)))
+            : num(p.gcashConverted));
   const gcash = r2(gcashSales + gcashConverted);
   // Lid boxes (v2.7.0): a plain count carried through so the receipt can print
   // it. NO price, NO money — it touches nothing else here.
@@ -1700,6 +1706,9 @@ function computeDay(p){
   return {
     lines, total, gcash, cash: r2(total - gcash), custom, customGcash,
     gcashConverted, lidBoxes,
+    // The day's own two sides BEFORE the conversion (v2.25.0), so the receipt
+    // can say when a conversion reached past tonight's takings into the tin.
+    cashBefore, gcashSales,
     // Kept apart, never added in. `excluded` is the sum of `excludedLines`, so
     // whatever the receipt prints below the totals always adds up to itself.
     excluded: r2(xsum),
@@ -1752,6 +1761,99 @@ function inPeriod(dateStr, per){ return dateStr >= per.start && dateStr <= per.e
  *  maths, because the cutoff figures need it to find that period's entered
  *  split — not only the Cutoff screen. */
 function periodKey(per){ return txt(asObj(per).start) + '_' + txt(asObj(per).end); }
+
+/** WHAT A CONVERSION MAY MOVE (v2.25.0). Owner: "cash to gcash vice versa,
+ *  looks at the overall total not just the day." The tin holds every night's
+ *  cash since the cutoff began, so the bound on "Converted during the day" is
+ *  the CUTOFF's cash (or GCash) from its first day up to and including this one:
+ *  every other saved day in that span as the phone holds it (its own conversions
+ *  already inside its cash/gcash), plus this day's figures as just computed and
+ *  passed in. The day itself is excluded by date, so a re-save never counts its
+ *  stored row twice; days after it are not in the tin yet. Mirrors the server's
+ *  conversionRoom_ to the peso — validateBenta refuses in its sentence. Returns
+ *  null when the phone cannot see the whole period (it starts before
+ *  window_start): then nothing is clamped or refused here, and the server —
+ *  which sees every day — decides. */
+function conversionRoom(date, cashToday, gcashToday){
+  const others = cutoffOtherNights(date);
+  if (!others) return null;
+  let cash = num(cashToday), gcash = num(gcashToday);
+  for (const row of others.list){
+    if (row.date > date) continue;
+    cash += num(row.cash);
+    gcash += num(row.gcash);
+  }
+  return { cash: r2(cash), gcash: r2(gcash), start: others.per.start, upTo: monthDay(date) };
+}
+/** "July 31" — the day a running figure is counted up to, in the words the
+ *  server's monthDay_ produces (MONTHS[m] + ' ' + d): the sentences built from
+ *  it are compared byte for byte against the server's. */
+function monthDay(date){ return monthName(date) + ' ' + d2parts(date).d; }
+/** THE OTHER NIGHTS OF `date`'s CUTOFF as this phone can vouch for them — or
+ *  null when it cannot see the whole period, in which case nothing built on
+ *  them may clamp or refuse (the server, which sees every day, decides):
+ *  a server is configured but the phone has never synced (no window yet), or
+ *  its window starts after the cutoff did. A night the server REFUSED is left
+ *  out too (dateNotInSheet): it sits in state.days so the red card can name
+ *  it, but the sheet does not hold its cash, and the review of v2.25.0 found
+ *  the phone counting it — a green preview followed by a second red card. */
+function cutoffOtherNights(date){
+  if (!isDateStr(date)) return null;
+  const per = currentPeriod(date);
+  const ws = txt(asObj(state).window_start);
+  if (config.apiUrl && (!isDateStr(ws) || per.start < ws)) return null;
+  const list = [];
+  const days = asObj(state.days);
+  for (const d in days){
+    if (d === date || d < per.start || d > per.end || dateNotInSheet(d)) continue;
+    const row = asObj(days[d]);
+    list.push({ date: d, cash: num(row.cash), gcash: num(row.gcash), converted: num(row.gcash_converted) });
+  }
+  list.sort((a, b) => a.date < b.date ? -1 : (a.date > b.date ? 1 : 0));
+  return { per, list };
+}
+/** THE CUTOFF'S CASH AND GCASH NEVER GO BELOW ZERO ON A NIGHT THAT CONVERTED
+ *  (v2.25.0) — the phone's copy of the server's cutoffConversionCheck_, to the
+ *  peso and the letter. For every converting night L in the cutoff on or after
+ *  `date` (this night included when it converts), the cutoff's cash (or GCash,
+ *  for a cash-out) summed over every night up to L — the other nights as the
+ *  phone holds them, this night as passed in — must not be below zero. Returns
+ *  the server's sentence, or '' when the save is fine, or null when the phone
+ *  cannot see the whole period. `day` = {converted, cash, gcash}: this night's
+ *  FINAL figures, the conversion already inside them. */
+function cutoffConversionCheck(date, day){
+  const others = cutoffOtherNights(date);
+  if (!others) return null;
+  const nights = others.list.filter(d => d.date > date && d.converted !== 0).map(d => ({ date: d.date, conv: d.converted }));
+  if (num(day.converted) !== 0) nights.push({ date, conv: num(day.converted) });
+  nights.sort((a, b) => a.date < b.date ? -1 : (a.date > b.date ? 1 : 0));
+  for (const L of nights){
+    let cash = num(day.cash), gcash = num(day.gcash);
+    for (const d of others.list){ if (d.date <= L.date){ cash += d.cash; gcash += d.gcash; } }
+    cash = r2(cash); gcash = r2(gcash);
+    const upTo = monthDay(L.date);
+    if (L.date === date){
+      if (L.conv > 0 && cash < 0){
+        return 'The cash converted to GCash (' + fmt(L.conv) + ') cannot be more than the cash this cutoff has taken in so far (' +
+          fmt(r2(cash + L.conv)) + ' up to ' + upTo + ').';
+      }
+      if (L.conv < 0 && gcash < 0){
+        return 'The GCash taken out as cash (' + fmt(-L.conv) + ') cannot be more than the GCash this cutoff has taken in so far (' +
+          fmt(r2(gcash - L.conv)) + ' up to ' + upTo + ').';
+      }
+    } else {
+      if (L.conv > 0 && cash < 0){
+        return 'Saving this would leave the cutoff short: the ' + fmt(L.conv) + ' converted to GCash on ' + upTo +
+          ' would be more than the cash taken in up to that day (' + fmt(r2(cash + L.conv)) + '). Lower that conversion first, or check these counts.';
+      }
+      if (L.conv < 0 && gcash < 0){
+        return 'Saving this would leave the cutoff short: the ' + fmt(-L.conv) + ' GCash taken out as cash on ' + upTo +
+          ' would be more than the GCash taken in up to that day (' + fmt(r2(gcash - L.conv)) + '). Lower that conversion first, or check these counts.';
+      }
+    }
+  }
+  return '';
+}
 
 /** That day's WAGE as the cutoff will count it: 0 on a closed day, the day's own
  *  snapshot when it has one, else today's rate for a row saved before the figure
@@ -4388,8 +4490,9 @@ function bentaPayload(){
     customGcash: closed ? 0 : Math.min(custom, Math.max(0, num(benta.customGcash))),
     // Tin cash swapped for GCash and the lid-box count (v2.7.0). Closed day
     // sends 0 for both, exactly as the server forces. The conversion is NOT
-    // clamped to the day's cash here: validateBenta refuses that state in the
-    // server's own sentence, so an over-large figure never queues at all.
+    // clamped to the cutoff's cash here (v2.25.0; the day's before that):
+    // validateBenta refuses that state in the server's own sentence, so an
+    // over-large figure never queues at all.
     // SIGNED on the wire (v2.7.3): the direction chip carries the sign, the
     // typed amount never does. 'in' = GCash cashed out of the tin = negative.
     gcashConverted: closed ? 0
@@ -5261,8 +5364,8 @@ function gcashCardHTML(skus, daySnap, payRow){
     '<input class="input money gcash-in" id="gcashConverted" inputmode="decimal" autocomplete="off" placeholder="0" value="' +
       esc(benta.gcashConverted || '') + '">' +
     '<p class="hint" style="margin-top:6px;">' + (dirIn
-      ? 'GCash you paid out of the tin as cash during the day. '
-      : 'Tin cash you moved into GCash during the day. ') +
+      ? 'GCash you paid out of the tin as cash during the day — up to the GCash this cutoff has taken in so far, not just tonight’s. '
+      : 'Tin cash you moved into GCash during the day — up to the cash this cutoff has taken in so far, not just tonight’s. ') +
       'The day’s total does not change — only the cash and GCash split.</p>' +
     '<p class="err" id="err-gcashConverted" hidden></p>' +
   '</div></div>';
@@ -5528,10 +5631,16 @@ function updateReceipt(){
     // The two v2.7.0 notes, each only when it has something to say: the moved
     // split (the figure is already inside GCash and out of Cash above), and the
     // lid-box count, which is not money at all.
+    // Since v2.25.0 a conversion may reach past tonight's takings into what the
+    // tin (or the GCash balance) holds from earlier nights this cutoff — and
+    // then tonight's own Cash (or GCash) above reads below zero. Say so, or a
+    // negative Cash line looks like a mistake.
     if (c.gcashConverted > 0){
-      h += '<div class="r-note">' + peso(c.gcashConverted) + ' of the cash was converted to GCash</div>';
+      h += '<div class="r-note">' + peso(c.gcashConverted) + ' of the cash was converted to GCash' +
+        (c.gcashConverted > num(c.cashBefore) ? ' — more than tonight’s cash; the rest came out of earlier nights’ cash this cutoff' : '') + '</div>';
     } else if (c.gcashConverted < 0){
-      h += '<div class="r-note">' + peso(-c.gcashConverted) + ' of the GCash was taken out as cash</div>';
+      h += '<div class="r-note">' + peso(-c.gcashConverted) + ' of the GCash was taken out as cash' +
+        (-c.gcashConverted > num(c.gcashSales) ? ' — more than tonight’s GCash; the rest came out of earlier nights’ GCash this cutoff' : '') + '</div>';
     }
     if (c.lidBoxes > 0){
       h += '<div class="r-note">Lid boxes used: ' + fmt(c.lidBoxes) + '</div>';
@@ -5831,7 +5940,15 @@ function validateBenta(){
   // anything else), and a partial year must never be committed either way.
   const dateBad = entryDateError(asObj(benta).date);
   if (dateBad) errs.date = dateBad;
-  if (benta.closed) return errs;   // a closed day sends nothing else to validate
+  if (benta.closed){
+    // A closed day sends nothing else to validate — except that closing a
+    // night the cutoff had cash from can pull that cash out from under a later
+    // night's conversion (v2.25.0). Judged here, in the server's sentence, on
+    // the date slot: the cards are hidden while the day is closed.
+    const said = cutoffConversionCheck(benta.date, { converted: 0, cash: 0, gcash: 0 });
+    if (said && !errs.date) errs.date = said;
+    return errs;
+  }
 
   for (const r of asArr(benta.rows)){
     // A sku that has left the Prices tab counts as a box here, exactly as it
@@ -5960,23 +6077,25 @@ function validateBenta(){
   }
 
   // The conversion, in the server's own sentences. Each direction's bound is
-  // the day's figure BEFORE the conversion — apiSaveDay checks after the
-  // roll-up, so it is measured here the same way: the whole day recomputed
-  // with the conversion at 0, whose cash/gcash are exactly those figures.
+  // the CUTOFF's figure up to this day (v2.25.0; it was the day's), measured
+  // the way apiSaveDay measures it: the whole day recomputed with the
+  // conversion at 0 gives this day's two sides, and conversionRoom adds the
+  // cutoff's other days up to it. A period the phone cannot fully see is not
+  // judged here — the server, which sees every day, decides.
   const conv = num(benta.gcashConverted);
   if (conv < 0){
     errs.gcashConverted = 'The converted amount cannot be negative — pick the direction with the two buttons instead.';
-  } else if (conv > 0){
+  } else {
+    // Run even at 0: a re-save that takes cash OUT of the cutoff can pull it
+    // out from under a later night's conversion, and the server refuses that.
+    // The final figures are built by hand, not read off computeDay, because
+    // computeDay clamps the conversion for the preview and the check must see
+    // the figure as typed.
+    const signed = (benta.convDir === 'in' ? -1 : 1) * conv;
     const base = computeDay(Object.assign(bentaPayload(), { gcashConverted: 0 }));
-    if (benta.convDir === 'in'){
-      if (conv > num(base.gcash)){
-        errs.gcashConverted = 'The GCash taken out as cash (' + fmt(conv) +
-          ") cannot be more than the day's GCash (" + fmt(base.gcash) + ').';
-      }
-    } else if (conv > num(base.cash)){
-      errs.gcashConverted = 'The cash converted to GCash (' + fmt(conv) +
-        ") cannot be more than the day's cash (" + fmt(base.cash) + ').';
-    }
+    const said = cutoffConversionCheck(benta.date, {
+      converted: signed, cash: r2(num(base.cash) - signed), gcash: r2(num(base.gcash) + signed) });
+    if (said) errs.gcashConverted = said;
   }
 
   // Lid boxes (v2.7.0): a whole count, never negative — the server's words for

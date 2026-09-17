@@ -920,8 +920,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.24.0', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.24.0');
+  assert.strictEqual(g.data.version, '2.25.0', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.25.0');
 });
 
 // ---------------------------------------------------------------------------
@@ -4197,35 +4197,38 @@ test('gcashConverted moves the split only: total untouched, Total = Cash + GCash
   assert.strictEqual(day.cash, 190);
 });
 
-test("the cash floor: converted cash above the day's cash is refused naming both figures", () => {
+test("the cash floor: converted cash above the cutoff's cash so far is refused naming both figures (v2.25.0: the day's, when it is the only day)", () => {
   const { ctx, ss, token } = freshSetup();
   const base = {
     customAmount: 100, customGcash: 40,
     counts: [{ sku: 'box4', sod: 10, eod: 4, gcashQty: 1 }]
   };
-  // cashBefore = 400 − 90 = 310. One peso over is refused, BEFORE any write.
+  // cashBefore = 400 − 90 = 310, and this is the only night saved in its
+  // cutoff, so the cutoff's cash so far IS the day's. One peso over is refused,
+  // BEFORE any write. (v2.25.0 moved the bound from the day to the cutoff so
+  // far — the sentence says which figure and up to which day.)
   let r = saveDay(ctx, token, Object.assign({}, base, { gcashConverted: 311, entryId: 'floor-1' }));
   assert.strictEqual(r.ok, false);
   assert.strictEqual(r.error,
-    "The cash converted to GCash (311) cannot be more than the day's cash (310).",
+    'The cash converted to GCash (311) cannot be more than the cash this cutoff has taken in so far (310 up to July 30).',
     'one plain sentence naming BOTH figures');
   assert.strictEqual(ss.getSheetByName('DailyLog').getDataRange().getValues().slice(1)
     .filter(x => x[0] === '2026-07-30').length, 0, 'the refusal fires before any write');
   assert.strictEqual(countsRowsFor(ss.getSheetByName('DailyCounts'), '2026-07-30').length, 0);
-  // Converting EXACTLY the day's cash is legal: the tin ends the day empty.
+  // Converting EXACTLY the cutoff's cash so far is legal: the tin ends the day empty.
   r = saveDay(ctx, token, Object.assign({}, base, { gcashConverted: 310, entryId: 'floor-2' }));
   assert.strictEqual(r.ok, true, r.error);
   assert.strictEqual(r.data.cash, 0, 'cash may reach exactly 0, never below');
   assert.strictEqual(r.data.gcash, 400);
   // PIN MOVED (v2.7.3, deliberate): a NEGATIVE conversion is the other
   // direction now — GCash cashed out of the tin — with its own floor at the
-  // day's GCash, refused in the same shape of sentence.
+  // cutoff's GCash so far, refused in the same shape of sentence.
   r = saveDay(ctx, token, Object.assign({}, base, { gcashConverted: -5, entryId: 'floor-3' }));
   assert.strictEqual(r.ok, true, r.error);
   assert.strictEqual(r.data.gcash, 85, 'GCash drops by the cash-out');
   assert.strictEqual(r.data.cash, 315, 'and the tin gains it — Total unmoved');
   assert.strictEqual(r.data.total, 400);
-  // Cashing out EXACTLY the day's GCash is legal: GCash ends the day at 0.
+  // Cashing out EXACTLY the cutoff's GCash so far is legal: GCash ends the day at 0.
   r = saveDay(ctx, token, Object.assign({}, base, { gcashConverted: -90, entryId: 'floor-4' }));
   assert.strictEqual(r.ok, true, r.error);
   assert.strictEqual(r.data.gcash, 0, 'GCash may reach exactly 0, never below');
@@ -4234,8 +4237,121 @@ test("the cash floor: converted cash above the day's cash is refused naming both
   r = saveDay(ctx, token, Object.assign({}, base, { gcashConverted: -91, entryId: 'floor-5' }));
   assert.strictEqual(r.ok, false);
   assert.strictEqual(r.error,
-    "The GCash taken out as cash (91) cannot be more than the day's GCash (90).",
+    'The GCash taken out as cash (91) cannot be more than the GCash this cutoff has taken in so far (90 up to July 30).',
     'one plain sentence naming BOTH figures, like the cash floor');
+});
+
+test("THE CONVERSION LOOKS AT THE CUTOFF SO FAR, NOT THE DAY (v2.25.0): earlier nights count, other cutoffs and later nights do not", () => {
+  // Owner: "cash to gcash vice versa, looks at the overall total not just the
+  // day." The tin holds every night's cash since the cutoff began.
+  const { ctx, token } = freshSetup();
+  const night = (date, counts, id, extra) => saveDay(ctx, token, Object.assign({
+    date, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '', counts, entryId: id }, extra || {}));
+  // Two earlier nights THIS cutoff (Jul 16–31): the 28th all cash (₱250), the
+  // 29th ₱150 cash + ₱100 by GCash.
+  let r = night('2026-07-28', [{ sku: 'box4', sod: 5, eod: 0 }], 'room-a');
+  assert.strictEqual(r.ok, true, r.error); assert.strictEqual(r.data.cash, 250);
+  r = night('2026-07-29', [{ sku: 'box4', sod: 5, eod: 0, gcashQty: 2 }], 'room-b');
+  assert.strictEqual(r.ok, true, r.error); assert.deepStrictEqual([r.data.cash, r.data.gcash], [150, 100]);
+  // A night in the PREVIOUS cutoff, and one AFTER the 30th: neither is in the
+  // tin on the 30th, so neither may count.
+  r = night('2026-07-14', [{ sku: 'box4', sod: 10, eod: 0 }], 'room-prev'); assert.strictEqual(r.ok, true, r.error);
+  r = night('2026-07-31', [{ sku: 'box4', sod: 10, eod: 0 }], 'room-after'); assert.strictEqual(r.ok, true, r.error);
+  // The 30th: cashBefore 310, GCash 90 (the cash-floor fixture). Room = 310 +
+  // 250 + 150 = 710 cash; 90 + 0 + 100 = 190 GCash.
+  const base = { date: '2026-07-30', customAmount: 100, customGcash: 40, counts: [{ sku: 'box4', sod: 10, eod: 4, gcashQty: 1 }] };
+  r = saveDay(ctx, token, Object.assign({}, base, { gcashConverted: 711, entryId: 'room-1' }));
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.error, 'The cash converted to GCash (711) cannot be more than the cash this cutoff has taken in so far (710 up to July 30).',
+    'the cutoff\'s cash up to that day, not the day\'s 310 and not the whole cutoff\'s');
+  r = saveDay(ctx, token, Object.assign({}, base, { gcashConverted: 710, entryId: 'room-2' }));
+  assert.strictEqual(r.ok, true, r.error);
+  assert.deepStrictEqual([r.data.total, r.data.gcash, r.data.cash], [400, 800, -400],
+    "the DAY's own cash goes below zero — the rest came out of the tin; the Total is unmoved");
+  // A re-save must not count the night's own stored row (now −400 cash).
+  r = saveDay(ctx, token, Object.assign({}, base, { gcashConverted: 710, entryId: 'room-3' }));
+  assert.strictEqual(r.ok, true, 'same room on a re-save: ' + r.error);
+  r = saveDay(ctx, token, Object.assign({}, base, { gcashConverted: 711, entryId: 'room-4' }));
+  assert.strictEqual(r.ok, false, 'and one peso over is still refused on a re-save');
+  assert.match(r.error, /\(710 up to July 30\)\.$/, 'with the same figure');
+  // The other way: the cutoff's GCash so far is 90 + 100 = 190.
+  r = saveDay(ctx, token, Object.assign({}, base, { gcashConverted: -191, entryId: 'room-5' }));
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.error, 'The GCash taken out as cash (191) cannot be more than the GCash this cutoff has taken in so far (190 up to July 30).');
+  r = saveDay(ctx, token, Object.assign({}, base, { gcashConverted: -190, entryId: 'room-6' }));
+  assert.strictEqual(r.ok, true, r.error);
+  assert.deepStrictEqual([r.data.total, r.data.gcash, r.data.cash], [400, -100, 500], "the DAY's GCash goes below zero; the Total is unmoved");
+  // And the earlier nights are untouched by any of it: their rows never moved.
+  const boot = post(ctx, { token, action: 'bootstrap', payload: {} }).data;
+  const d28 = boot.days.find(d => d.date === '2026-07-28'), d29 = boot.days.find(d => d.date === '2026-07-29');
+  assert.deepStrictEqual([d28.cash, d28.gcash, d29.cash, d29.gcash], [250, 0, 150, 100]);
+});
+
+test("A LATER NIGHT'S CONVERSION IS PROTECTED: re-saving an earlier night smaller, or closing it, is refused when it would uncover the conversion (v2.25.0)", () => {
+  // Found by the v2.25.0 review: the bound was checked only on the night that
+  // converted, so a later re-save of an EARLIER night pulled the cash out from
+  // under it and the cutoff's Cash went below zero with no refusal at all.
+  const { ctx, token } = freshSetup();
+  const night = (date, counts, id, extra) => saveDay(ctx, token, Object.assign({
+    date, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '', counts, entryId: id }, extra || {}));
+  let r = night('2026-07-28', [{ sku: 'box4', sod: 5, eod: 0 }], 'prot-a');              // cash 250
+  assert.strictEqual(r.ok, true, r.error);
+  r = night('2026-07-30', [{ sku: 'box4', sod: 2, eod: 0 }], 'prot-b', { gcashConverted: 350 });  // 100 + 250 = 350: exactly enough
+  assert.strictEqual(r.ok, true, r.error);
+  assert.deepStrictEqual([r.data.cash, r.data.gcash], [-250, 350], 'the 30th leans on the 28th');
+  // Re-save the 28th with 3 boxes (cash 150): the 30th's ₱350 would then have
+  // had only ₱250 to draw on. Refused, naming that night — before any write.
+  r = night('2026-07-28', [{ sku: 'box4', sod: 3, eod: 0 }], 'prot-c');
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.error, 'Saving this would leave the cutoff short: the 350 converted to GCash on July 30 would be more than the cash taken in up to that day (250). Lower that conversion first, or check these counts.');
+  let boot = post(ctx, { token, action: 'bootstrap', payload: {} }).data;
+  assert.strictEqual(boot.days.find(d => d.date === '2026-07-28').cash, 250, 'the refusal fired before any write');
+  // Closing the 28th outright: the same protection, on a closed day's save.
+  r = night('2026-07-28', [], 'prot-d', { closed: true });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /^Saving this would leave the cutoff short: the 350 converted to GCash on July 30 would be more than the cash taken in up to that day \(100\)\./);
+  // One box short is still short; exactly enough is fine; a NEW earlier night only adds.
+  r = night('2026-07-28', [{ sku: 'box4', sod: 4, eod: 0 }], 'prot-e');
+  assert.strictEqual(r.ok, false); assert.match(r.error, /\(300\)\. Lower that conversion first/);
+  r = night('2026-07-28', [{ sku: 'box4', sod: 5, eod: 0 }], 'prot-f');
+  assert.strictEqual(r.ok, true, r.error);
+  r = night('2026-07-27', [{ sku: 'box4', sod: 1, eod: 0 }], 'prot-g');                 // +50 on the 27th
+  assert.strictEqual(r.ok, true, r.error);
+  r = night('2026-07-28', [{ sku: 'box4', sod: 4, eod: 0 }], 'prot-h');                 // now 200 + 50 − 250 = 0: fine
+  assert.strictEqual(r.ok, true, r.error);
+  // A night AFTER the converting one is free to shrink: it was never in that tin.
+  r = night('2026-07-31', [{ sku: 'box4', sod: 1, eod: 0 }], 'prot-i');
+  assert.strictEqual(r.ok, true, r.error);
+  // And its cash does not help the 30th either: the 28th at 3 boxes is still
+  // short by 50 on the 30th (50 + 150 − 250), whatever the 31st took in.
+  r = night('2026-07-28', [{ sku: 'box4', sod: 3, eod: 0 }], 'prot-k');
+  assert.strictEqual(r.ok, false); assert.match(r.error, /\(300\)\. Lower that conversion first/);
+  r = night('2026-07-31', [], 'prot-j', { closed: true });
+  assert.strictEqual(r.ok, true, r.error);
+
+  // The GCash direction, on a fresh sheet: the 30th cashes out ₱100 of GCash
+  // that only the 28th took in; halving the 28th's GCash is refused.
+  const g = freshSetup();
+  const gnight = (date, counts, id, extra) => saveDay(g.ctx, g.token, Object.assign({
+    date, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '', counts, entryId: id }, extra || {}));
+  r = gnight('2026-07-28', [{ sku: 'box4', sod: 5, eod: 0, gcashQty: 2 }], 'gprot-a');        // cash 150, GCash 100
+  assert.strictEqual(r.ok, true, r.error);
+  r = gnight('2026-07-30', [{ sku: 'box4', sod: 2, eod: 0 }], 'gprot-b', { gcashConverted: -100 });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.deepStrictEqual([r.data.cash, r.data.gcash], [200, -100]);
+  r = gnight('2026-07-28', [{ sku: 'box4', sod: 5, eod: 0, gcashQty: 1 }], 'gprot-c');        // GCash 50
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.error, 'Saving this would leave the cutoff short: the 100 GCash taken out as cash on July 30 would be more than the GCash taken in up to that day (50). Lower that conversion first, or check these counts.');
+  // And the sheet audit names the state only a hand edit can now produce.
+  const sheet = g.ss.getSheetByName('DailyLog');
+  const vals = sheet.getDataRange().getValues();
+  const hdr = vals[0], ri = vals.findIndex(v => v[hdr.indexOf('date')] === '2026-07-28');
+  sheet.getRange(ri + 1, hdr.indexOf('gcash') + 1).setValue(20);      // hand edit: the 28th's GCash cut to 20
+  sheet.getRange(ri + 1, hdr.indexOf('cash') + 1).setValue(230);
+  const check = post(g.ctx, { token: g.token, action: 'sheetCheck', payload: {} });
+  assert.strictEqual(check.ok, true, check.error);
+  assert.ok(check.data.findings.some(f => f === 'DailyLog: on 2026-07-30 the 100 GCash taken out as cash is more than the GCash the cutoff had taken in by then (20) — a night before it was edited by hand. Re-open that night in the app and lower the conversion, or check the nights before it.'),
+    check.data.findings.join('\n'));
 });
 
 test('a closed day zeroes gcashConverted and lidBoxes whatever the payload says', () => {
@@ -6245,14 +6361,14 @@ test('an unknown action is refused by name, and doGet answers without a token', 
   assert.strictEqual(r.error, 'Unknown action: "saveDay".',
     'this app cannot save a day, and says so rather than pretending');
   const g = JSON.parse(ctx.doGet({}).getContent());
-  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.24.0' } });
+  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.25.0' } });
 });
 
 test('ping proves the setup WITHOUT spending a unit of quota — even with no key yet', () => {
   const ctx = loadVision({ keepKeyPlaceholder: true });
   const r = vpost(ctx, { token: VISION_TOK, action: 'ping', payload: {} });
   assert.strictEqual(r.ok, true, r.error);
-  assert.strictEqual(r.data.version, '2.24.0', 'the vision project ships with the release it belongs to');
+  assert.strictEqual(r.data.version, '2.25.0', 'the vision project ships with the release it belongs to');
   assert.strictEqual(r.data.model, 'gemini-3.6-flash');
   assert.strictEqual(r.data.key_configured, false, 'a yes/no — never the key itself');
   keepsSecrets(JSON.stringify(r));
