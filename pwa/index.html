@@ -610,7 +610,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.25.0';
+const APP_VERSION = '2.25.1';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -7348,7 +7348,8 @@ function renderCutoff(){
  *  (deliveries, legacy expense-attached arrivals, usage, counts). Display
  *  only. A period this phone cannot fully see (older than window_start) shows
  *  NOTHING rather than partial sums dressed as truth — same rule the money
- *  preview follows. Products with no movement are left out, not zero-padded. */
+ *  preview follows. A known nonzero carryover remains visible even without
+ *  movement this cutoff; empty products are not zero-padded. */
 function stockCutoffHTML(per){
   if (previewIncomplete(per)) return '';
   const items = activeStockItems();
@@ -7384,8 +7385,10 @@ function stockCutoffHTML(per){
         }
       }
     }
-    if (arrived || opened || counted) rows.push({ product, unit: txt(asObj(it).unit), arrived, opened, counted,
-      opening: openingCountFor(product, per) });
+    const opening = openingCountFor(product, per);
+    if (arrived || opened || counted || (opening && opening.qty !== 0)){
+      rows.push({ product, unit: txt(asObj(it).unit), arrived, opened, counted, opening });
+    }
   }
   if (!rows.length) return '';
   let h = '<div class="section-title">Stock this cutoff</div><div class="card">' +
@@ -7441,7 +7444,7 @@ function countDateHint(){
     'may not equal what you type. If that day already has a count, this replaces it.';
 }
 
-/** WHAT A CUTOFF STARTED WITH (v2.21.0), or null when no count precedes it.
+/** WHAT A CUTOFF STARTED WITH (v2.25.1), or null when it cannot be established.
  *
  *  Owner, 2026-09-02: "how to correct the count of bonito, it says 1 bag came in
  *  2 bags opened." Nothing needed correcting — he had a bag already, from the
@@ -7449,8 +7452,12 @@ function countDateHint(){
  *  as impossible without it. An opening balance is the difference between a
  *  figure he can check and a figure he has to take on trust.
  *
- *  null, never 0, when nothing was counted before the period: blank is never
- *  zero, and "started with 0" would be a claim this cannot support. */
+ *  A physical count is an END-OF-DAY baseline, not necessarily the opening
+ *  of this cutoff. Carry deliveries and usage AFTER that date and BEFORE the
+ *  cutoff into the opening balance. Bonito's Aug 31 count of 0, plus 2 bags
+ *  delivered and 1 opened in Sep 1–15, means Sep 16 starts with 1, not 0.
+ *  null, never 0, when there is no count or the intervening history is missing.
+ *  This is display-only: it never records another delivery or stocktake. */
 function openingCountFor(product, per){
   const start = txt(asObj(per).start);
   if (!isDateStr(start)) return null;
@@ -7466,7 +7473,34 @@ function openingCountFor(product, per){
       }
     }
   }
-  return best;
+  if (!best) return null;
+  // A count at closing on the day before the retained window is sufficient;
+  // an older count needs movements this phone cannot guarantee it still holds.
+  const win = txt(asObj(state).window_start);
+  if (isDateStr(win) && addDays(best.date, 1) < win) return null;
+  const inOpeningSpan = d => isDateStr(d) && d > best.date && d < start;
+  let qty = best.qty;
+  const deliveries = asObj(state.stockDeliveries);
+  for (const d in deliveries){
+    if (!inOpeningSpan(d)) continue;
+    for (const r of asArr(deliveries[d])){
+      if (txt(asObj(r).product) === txt(product)) qty += num(asObj(r).qty);
+    }
+  }
+  // Keep the older expense-attached arrival route, just as stock-on-hand does.
+  const expenses = asObj(state.expenses);
+  for (const id in expenses){
+    const e = asObj(expenses[id]);
+    if (txt(e.stock_product) === txt(product) && inOpeningSpan(txt(e.date))) qty += num(e.stock_qty);
+  }
+  const usage = asObj(state.stockUsage);
+  for (const d in usage){
+    if (!inOpeningSpan(d)) continue;
+    for (const r of asArr(usage[d])){
+      if (txt(asObj(r).product) === txt(product)) qty -= num(asObj(r).qty);
+    }
+  }
+  return { date: best.date, qty: r2(qty), updated_at: best.updated_at };
 }
 
 /** SUPPLIES IN TWO LINES (v2.16.0). The owner's own words, 2026-09-01:

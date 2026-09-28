@@ -6190,6 +6190,97 @@ test('THE CUTOFF STOCK BLOCK SHOWS WHAT IT STARTED WITH (v2.21.0)', () => {
   assert.strictEqual(app.openingCountFor('Bonito', per).qty, 5, 'the later entry of that day');
 });
 
+function carryoverClient(){
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  for (const key of ['stockCounts', 'stockDeliveries', 'stockUsage', 'expenses']){
+    for (const id in app.state[key]) delete app.state[key][id];
+  }
+  app.state.window_start = '2026-08-01';
+  app.state.stockCounts['2026-08-31'] = [
+    { date: '2026-08-31', product: 'Bonito', counted_qty: 2, updated_at: '2026-08-31 23:57:33' },
+    { date: '2026-08-31', product: 'Bonito', counted_qty: 0, updated_at: '2026-08-31 23:57:38' }
+  ];
+  app.state.stockDeliveries['2026-09-01'] = [{ product: 'Bonito', qty: 1 }];
+  app.state.stockDeliveries['2026-09-09'] = [{ product: 'Bonito', qty: 1 }];
+  app.state.stockUsage['2026-09-10'] = [{ product: 'Bonito', qty: 1 }];
+  return app;
+}
+
+test('CUTOFF CARRYOVER: Bonito starts September 16 with the bag left from September 1–15', () => {
+  const app = carryoverClient(), per = { start: '2026-09-16', end: '2026-09-30' };
+  const before = JSON.stringify(app.state);
+  const opening = app.openingCountFor('Bonito', per);
+  assert.strictEqual(opening.qty, 1, '0 at Aug 31 + 2 delivered - 1 opened = 1 carried forward');
+  assert.strictEqual(opening.date, '2026-08-31', 'the physical baseline date is retained');
+  assert.strictEqual(JSON.stringify(app.state), before, 'display calculation must not write a stock adjustment');
+  assert.strictEqual(app.openingCountFor('Bonito', per).qty, 1, 'rendering again must not add the carryover twice');
+});
+
+test('CUTOFF CARRYOVER: a nonzero opening remains visible without activity in this cutoff', () => {
+  const app = carryoverClient(), per = { start: '2026-09-16', end: '2026-09-30' };
+  const html = app.stockCutoffHTML(per);
+  assert.match(html, />Bonito</);
+  assert.match(html, /1 \w+ at the start/);
+  assert.ok(!html.includes('came in') && !html.includes('opened'), 'prior-cutoff movement is not described as new movement');
+  app.state.stockUsage['2026-09-15'] = [{ product: 'Bonito', qty: 1 }];
+  assert.strictEqual(app.stockCutoffHTML(per), '', 'a known zero with no new activity stays quiet');
+});
+
+test('CUTOFF CARRYOVER: the physical count absorbs its entire day and the new cutoff is excluded', () => {
+  const app = carryoverClient(), per = { start: '2026-09-16', end: '2026-09-30' };
+  app.state.stockDeliveries['2026-08-30'] = [{ product: 'Bonito', qty: 20 }];
+  app.state.stockDeliveries['2026-08-31'] = [{ product: 'Bonito', qty: 30 }];
+  app.state.stockUsage['2026-08-31'] = [{ product: 'Bonito', qty: 40 }];
+  app.state.stockDeliveries['2026-09-16'] = [{ product: 'Bonito', qty: 3 }];
+  app.state.stockUsage['2026-09-16'] = [{ product: 'Bonito', qty: 1 }];
+  app.state.stockDeliveries['2026-10-01'] = [{ product: 'Bonito', qty: 100 }];
+  assert.strictEqual(app.openingCountFor('Bonito', per).qty, 1);
+  const html = app.stockCutoffHTML(per);
+  assert.match(html, /1 \w+ at the start, 3 \w+s? came in, 1 \w+ opened/);
+});
+
+test('CUTOFF CARRYOVER: legacy expense arrivals count once and unrelated products are ignored', () => {
+  const app = carryoverClient(), per = { start: '2026-09-16', end: '2026-09-30' };
+  app.state.expenses.old = { date: '2026-09-15', stock_product: 'Bonito', stock_qty: 2 };
+  app.state.expenses.other = { date: '2026-09-15', stock_product: 'Aonori', stock_qty: 90 };
+  app.state.expenses.new = { date: '2026-09-16', stock_product: 'Bonito', stock_qty: 90 };
+  app.state.stockUsage['2026-09-15'] = [{ product: 'Aonori', qty: 80 }];
+  assert.strictEqual(app.openingCountFor('Bonito', per).qty, 3);
+});
+
+test('CUTOFF CARRYOVER: a newer physical count replaces earlier movements, not adds to them', () => {
+  const app = carryoverClient(), per = { start: '2026-09-16', end: '2026-09-30' };
+  app.state.stockCounts['2026-09-12'] = [
+    { date: '2026-09-12', product: 'Bonito', counted_qty: 4, updated_at: '2026-09-12 20:00:00' },
+    { date: '2026-09-12', product: 'Bonito', counted_qty: 3, updated_at: '2026-09-12 20:01:00' }
+  ];
+  app.state.stockDeliveries['2026-09-13'] = [{ product: 'Bonito', qty: 1 }];
+  app.state.stockUsage['2026-09-15'] = [{ product: 'Bonito', qty: 2 }];
+  app.state.stockCounts['2026-09-16'] = [{ date: '2026-09-16', product: 'Bonito', counted_qty: 99 }];
+  const opening = app.openingCountFor('Bonito', per);
+  assert.strictEqual(opening.qty, 2);
+  assert.strictEqual(opening.date, '2026-09-12');
+});
+
+test('CUTOFF CARRYOVER: incomplete history is unknown, including a baseline before the retained window', () => {
+  const app = carryoverClient(), per = { start: '2026-09-16', end: '2026-09-30' };
+  app.state.window_start = '2026-09-02';
+  assert.strictEqual(app.openingCountFor('Bonito', per), null, 'the Sep 1 delivery is outside the guaranteed history');
+  app.state.window_start = '2026-09-01';
+  assert.strictEqual(app.openingCountFor('Bonito', per).qty, 1, 'count on the evening before the window is sufficient');
+  delete app.state.stockCounts['2026-08-31'];
+  assert.strictEqual(app.openingCountFor('Bonito', per), null, 'deliveries alone do not prove a starting balance');
+});
+
+test('CUTOFF CARRYOVER: negative balances are not silently rounded up to zero', () => {
+  const app = carryoverClient();
+  app.state.stockUsage['2026-09-15'] = [{ product: 'Bonito', qty: 3 }];
+  const per = { start: '2026-09-16', end: '2026-09-30' };
+  assert.strictEqual(app.openingCountFor('Bonito', per).qty, -2);
+  assert.match(app.stockCutoffHTML(per), /-2 \w+s? at the start/);
+});
+
 test('THE DATE A COUNT IS FOR, and what it means (v2.21.0)', () => {
   const app = loadClient();
   app.applyBootstrap(F.boot);
