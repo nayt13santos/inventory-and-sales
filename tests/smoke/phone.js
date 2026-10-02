@@ -432,6 +432,29 @@ async function runViewport(browser, baseUrl, vp){
       await step(tab.label + ' (previous cutoff)', tab.key, () => page.click('[data-act="' + tab.prev + '"]'));
     }
   }
+  // Exercise the new checklist with the REAL input/change/click listeners.
+  // Updating the preview must not replace the field being typed into.
+  await step('Cutoff (checklist open)', 'cutoff', async () => {
+    await page.evaluate(() => {
+      showTab('cutoff');
+      document.getElementById('check-status-salary').closest('details').open = true;
+    });
+    await page.select('#check-status-salary','paid');
+    await page.focus('#check-tin-salary');
+    await page.keyboard.type('1200');
+    const typed = await page.evaluate(() => ({ value:document.getElementById('check-tin-salary').value, focus:document.activeElement.id }));
+    if (typed.value !== '1200' || typed.focus !== 'check-tin-salary') throw new Error('Typing lost its field or focus: ' + JSON.stringify(typed));
+  });
+  await step('Cutoff (checklist saved)', 'cutoff', async () => {
+    await page.click('[data-act="check-save"]');
+    const saved = await page.evaluate(() => cutoffCheckSaved(cutoffPer));
+    if (saved.statuses.salary !== 'paid' || saved.tin.salary !== 1200) throw new Error('Checklist did not save through the actual button.');
+    if (process.env.OCTOGO_SCREENSHOT_DIR) {
+      fs.mkdirSync(process.env.OCTOGO_SCREENSHOT_DIR,{recursive:true});
+      await page.evaluate(() => window.scrollTo(0,0));
+      await page.screenshot({path:path.join(process.env.OCTOGO_SCREENSHOT_DIR,'cutoff-'+size+'.png')});
+    }
+  });
   await context.close();
   return allOk;
 }
@@ -480,7 +503,7 @@ async function main(){
     server.close();
   }
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
-  const checks = VIEWPORTS.length * TABS.reduce((n, t) => n + 1 + (t.prev ? 1 : 0), 0);
+  const checks = VIEWPORTS.length * (TABS.reduce((n, t) => n + 1 + (t.prev ? 1 : 0), 0) + 2);
   if (ok) console.log('\nPASS — ' + checks + ' screens fit the phone, no errors (' + secs + 's)');
   else console.log('\nFAIL — see the FAIL lines above (' + secs + 's)');
   process.exitCode = ok ? 0 : 1;

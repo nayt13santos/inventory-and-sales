@@ -10,6 +10,16 @@ Locale: Philippines. Timezone **Asia/Manila** everywhere. Currency PHP. Dates ar
 
 ## Business rules (verified against owner's real cutoff notes)
 
+### v2.26.0: cash comparison and payment checklist
+
+- The Cutoff screen starts with **Compare with your paper and cash**, then groups allocations into **Needs checking**, **Partly paid**, **Already deducted**, and **Still to pay**. Remaining is labelled **Remaining after allocations**, never a payment or physical cash balance. The partner's generated note and allocation mathematics are unchanged.
+- A per-cutoff checklist is saved in `CutoffInputs.reconciliation_json` through `saveCutoffCheck`. It contains payment statuses and confirmed cash-from-tin totals for minor supplies, salary, Mama, electricity, split, and major/supplier payments; opening cash; unreturned borrowing **taken during this cutoff**; optional paper sales total; and wages already netted in that paper total. Blank means unknown, not zero. There are no automatic historical confirmations or sales corrections.
+- `Expected tin = opening cash + takoyaki cash + excluded/nori cash − confirmed category cash payments − this cutoff's outstanding borrowing`. A category's confirmed cash **replaces** its recorded cash total, never adds to it. Pending categories debit zero but any contradictory Expenses rows are explicitly flagged. Supplier/backlog cash payments are not the value of stock opened. GCash payments never debit the tin. Other cash deposits/withdrawals and old-cutoff loan repayments need separate investigation.
+- `Comparable paper sales = takoyaki cash + excluded/nori cash − wages already netted in paper`. Those wages are **not** subtracted twice from the tin. A bogus nori entry remains a visible difference until its original daily record is corrected.
+- The checklist does not create Expenses or change sales/cutoff notes. Legacy split and cash-count saves preserve it. Offline saves queue/replay; source-total changes, unsaved values, sync/attention problems, unknowns, or conflicting records prevent a cleared verdict. This is a cutoff-total comparison, not verification of every paper transaction.
+- New checklist writes migrate only the additional column, append-only. New periods begin unconfirmed. A first checklist preserves the usual split rather than creating a zero split.
+- **Nori uses one Quantity sold field** (paid units); giveaways remain separate. Fresh days do not carry stock forward. For old-client/backend compatibility, an explicitly changed direct quantity is encoded as `sod = paid + free`, `eod = 0`. Untouched historical SOD/EOD and prices are preserved. This field is sales entry, not nori stock tracking; takoyaki box counting is unchanged.
+
 - Cutoff periods: **1–15** and **16–end of month**.
 - Daily sales are computed from **container counts**: start-of-day (SOD) vs end-of-day (EOD) per box size. Sold = SOD − EOD. Sold then splits into four buckets — Cheese, GCash, GCash Cheese, and plain regular cash as the remainder (see the DailyCounts section).
 - Current prices (seed data; editable in sheet `Prices` tab):

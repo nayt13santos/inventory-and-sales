@@ -282,7 +282,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.25.2';
+var VERSION = '2.26.0';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -417,7 +417,7 @@ var SCHEMA = [
   { name: TAB.EXPENSES, headers: ['date', 'category', 'item', 'amount', 'backlog_ref', 'notes', 'entry_id', 'updated_at', 'stock_product', 'stock_qty', 'paid_from', 'entered_by'], textCols: ['date', 'updated_at', 'paid_from', 'entered_by'] },
   { name: TAB.BACKLOGS, headers: ['name', 'description', 'total_amount', 'start_date', 'active'], textCols: ['start_date'] },
   // The Split is an ENTERED amount per cutoff (v2.3.0), no longer the residual.
-  { name: TAB.CUTOFF_INPUTS, headers: ['start', 'end', 'split_amount', 'entry_id', 'updated_at', 'tin_counted'], textCols: ['start', 'end', 'updated_at'] },
+  { name: TAB.CUTOFF_INPUTS, headers: ['start', 'end', 'split_amount', 'entry_id', 'updated_at', 'tin_counted', 'reconciliation_json'], textCols: ['start', 'end', 'updated_at', 'reconciliation_json'] },
   { name: TAB.CUTOFFS, headers: ['start', 'end', 'total', 'cash', 'gcash', 'mama', 'split', 'per_partner', 'supplies', 'octopus', 'other', 'electric', 'note_text', 'generated_at'], textCols: ['start', 'end', 'generated_at'] }
 ];
 
@@ -537,6 +537,9 @@ function doPost(e) {
         break;
       case 'saveTinCount':
         data = withLock(function () { return apiSaveTinCount(ss, payload); });
+        break;
+      case 'saveCutoffCheck':
+        data = withLock(function () { return apiSaveCutoffCheck(ss, payload); });
         break;
       case 'savePrices':
         data = withLock(function () { return apiSavePrices(ss, payload); });
@@ -1530,19 +1533,49 @@ function apiSaveCutoffSplit(ss, payload) {
 }
 
 /**
- * WHAT WAS ACTUALLY IN THE TIN, for one cutoff (v2.12.1).
- *
- * The other half of v2.12.0. The app can say what the tin SHOULD hold — cash
- * sales less what was paid out of it — and this is the figure that says what it
- * really held, so the two can be set side by side before the money is collected.
- *
- * It lives on the SAME CutoffInputs row as the split, keyed on (start, end), and
- * writes ONLY its own cell: buildRow starts from the existing row, so saving a
- * count can never disturb a split that was already entered (and the reverse).
- *
- * Centavos are allowed here, unlike the split: a tin holds coins, and rounding
- * her count would manufacture the very difference this screen exists to find.
+ * Cash reconciliation confirmations, scoped to one cutoff (v2.26.0).
+ * Metadata only, not new transactions. Upserts its own JSON cell while leaving
+ * the split and counted cash untouched. Blank cash fields remain unknown.
  */
+function apiSaveCutoffCheck(ss, payload) {
+  var start = reqDate(payload.start, 'start');
+  var end = reqDate(payload.end, 'end');
+  if (start > end) throw new Error('The cutoff start must be on or before its end.');
+  var entryId = asStr(payload.entryId);
+  if (!entryId) throw new Error('entryId is required.');
+  var src = payload.check;
+  if (!src || typeof src !== 'object' || Array.isArray(src)) throw new Error('A cutoff checklist is required.');
+  var out = { version: 1, statuses: {}, tin: {}, basis: asStr(src.basis) };
+  if (out.basis.length > 20000) throw new Error('The checklist reference is too long.');
+  function money(v, label) {
+    if (v === '' || v == null) return '';
+    if (typeof v !== 'string' && typeof v !== 'number') throw new Error(label + ' must be a number.');
+    if (typeof v === 'string' && !v.trim()) return '';
+    var n = Number(v);
+    if (!isFinite(n) || n < 0 || n > 1000000000) throw new Error(label + ' must be a non-negative amount.');
+    return round2(n);
+  }
+  ['mama', 'split', 'minor', 'major', 'salary', 'electric'].forEach(function (key) {
+    var status = src.statuses && src.statuses[key] || 'unknown';
+    if (['unknown', 'paid', 'pending', 'partial'].indexOf(status) < 0) throw new Error('Unrecognised payment status.');
+    out.statuses[key] = status;
+    out.tin[key] = money(src.tin && src.tin[key], key + ' cash paid');
+    if (status === 'pending' && Number(out.tin[key]) > 0) throw new Error(key + ' is still to pay, but has cash paid. Choose Partly paid or clear the cash amount.');
+  });
+  ['opening', 'borrowed', 'paper', 'paperSalary'].forEach(function (key) { out[key] = money(src[key], key); });
+  // Checklist metadata only: never creates Expenses, changes sales, or alters
+  // the partner's allocation note. A payment confirmation is not a new payment.
+  migrateTab(ss, schemaFor(TAB.CUTOFF_INPUTS));
+  var encoded = JSON.stringify(out);
+  var row = { start:start, end:end, reconciliation_json:encoded, entry_id:entryId, updated_at:nowStamp() };
+  if (!readCutoffInputs(ss).some(function (r) { return r.start === start && r.end === end; })) {
+    row.split_amount = splitDefaultOf(readSettings(ss));
+  }
+  upsertRows(ss, TAB.CUTOFF_INPUTS, [row], ['start', 'end']);
+  return { start:start, end:end, entry_id:entryId, reconciliation_json:encoded };
+}
+
+/** Physical cash counted, independent of allocation and payment confirmations. */
 function apiSaveTinCount(ss, payload) {
   var start = reqDate(payload.start, 'start');
   var end = reqDate(payload.end, 'end');
@@ -3565,6 +3598,7 @@ function readCutoffInputs(ss) {
       // counted this cutoff yet, which is different from counting it and finding
       // nothing — and only the raw value can tell those apart.
       tin_counted: asStr(cellOf(r, t, 'tin_counted')),
+      reconciliation_json: asStr(cellOf(r, t, 'reconciliation_json')),
       entry_id: asStr(cellOf(r, t, 'entry_id')),
       updated_at: asStr(cellOf(r, t, 'updated_at'))
     });

@@ -924,8 +924,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.25.2', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.25.2');
+  assert.strictEqual(g.data.version, '2.26.0', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.26.0');
 });
 
 // ---------------------------------------------------------------------------
@@ -1121,7 +1121,7 @@ test('setupSheet creates and seeds the stock + cutoff tabs', () => {
   assert.deepStrictEqual(ss.getSheetByName('StockCounts').getDataRange().getValues()[0],
     ['date', 'product', 'counted_qty', 'entry_id', 'updated_at', 'entered_by']);
   assert.deepStrictEqual(ss.getSheetByName('CutoffInputs').getDataRange().getValues()[0],
-    ['start', 'end', 'split_amount', 'entry_id', 'updated_at', 'tin_counted']);
+    ['start', 'end', 'split_amount', 'entry_id', 'updated_at', 'tin_counted', 'reconciliation_json']);
   // Newly appended/created date + timestamp columns get the plain-text format.
   assert.strictEqual(ss.getSheetByName('StockUsage').columnFormats[1], '@');
   assert.strictEqual(ss.getSheetByName('StockCounts').columnFormats[1], '@');

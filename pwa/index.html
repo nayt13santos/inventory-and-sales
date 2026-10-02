@@ -318,6 +318,17 @@ select.input{ appearance:auto; }
   text-transform:uppercase; letter-spacing:.04em;
 }
 
+.check-issues{padding-left:20px;margin-top:12px;font-size:14px;color:var(--alert);}
+.check-detail{border-top:1px solid var(--line);margin-top:12px;padding-top:8px;}
+.check-issues li{margin:6px 0;}
+.check-edit{border-top:1px solid var(--line);padding-top:12px;margin-top:12px;}
+.check-edit > label{display:block;font-weight:700;margin-bottom:6px;}
+.check-edit select{margin-bottom:10px;}
+details > summary{cursor:pointer;font-weight:700;min-height:44px;}
+#coCashCheck .co-row > span:first-child{min-width:0;overflow-wrap:anywhere;}
+#coCashCheck .v{font-size:15px;}
+#coResidualLabel{min-width:0;}
+
 /* Stock-on-hand list (More) */
 .st-item{ padding:12px 0; border-bottom:1px solid var(--line); }
 .st-item:last-child{ border-bottom:none; }
@@ -610,7 +621,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.25.2';
+const APP_VERSION = '2.26.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -982,6 +993,7 @@ function normCutoffInput(r){
     // has counted this cutoff, and coercing it to 0 would report a shortage of
     // the whole tin on every cutoff nobody has got round to counting.
     tin_counted: rawNum(pick(r, 'tin_counted', 'tinCounted')),
+    reconciliation_json: txt(r.reconciliation_json),
     entry_id: txt(pick(r, 'entry_id', 'entryId')),
     updated_at: txt(pick(r, 'updated_at', 'updatedAt'))
   };
@@ -1160,7 +1172,7 @@ const SNAPSHOT_ACTIONS = Object.assign(Object.create(null),
 const QUEUE_KEY_FOR = Object.assign(Object.create(null), {
   saveDay:'date', saveExpense:'entryId', deleteExpense:'entryId',
   saveStockCount:'entryId', saveStockDelivery:'entryId', saveCutoffSplit:'entryId',
-  saveTinCount:'entryId',
+  saveTinCount:'entryId', saveCutoffCheck:'entryId',
   savePrices:'entryId', saveSettings:'entryId', saveStockItems:'entryId'
 });
 function sanitizeQueue(raw){
@@ -2162,6 +2174,91 @@ function computeCutoff(per){
     tinOut: r2(tinOut), tinUnknown: r2(unknownOut), tinExpected: r2(cash - tinOut),
     excluded: x.total, excludedLines: x.lines
   };
+}
+
+// A cutoff checklist is separate from the allocation ledger. Confirming that
+// money was paid must never create another expense or deduct Remaining twice.
+const CHECK_ITEMS = [
+  ['minor','Supplies (minor)'], ['salary','Salary'], ['mama','Mama'],
+  ['electric','Electric bill'], ['split','Split'], ['major','Supplies (major)']
+];
+const CHECK_STATUS = { unknown:'Needs checking', paid:'Already deducted', pending:'Still to pay', partial:'Partly paid' };
+let checkEdits = {};
+function checkMoney(v){
+  if (v === '' || v == null || (typeof v === 'string' && !v.trim())) return null;
+  if (typeof v !== 'number' && typeof v !== 'string') return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 && n <= 1000000000 ? r2(n) : null;
+}
+function cutoffCheckSaved(per){
+  let c = {};
+  try { c = asObj(JSON.parse(txt(asObj(asObj(state.cutoffInputs)[periodKey(per)]).reconciliation_json))); } catch(e){}
+  const out = { statuses:{}, tin:{}, basis:txt(c.basis) };
+  for (const [key] of CHECK_ITEMS){
+    out.statuses[key] = Object.prototype.hasOwnProperty.call(CHECK_STATUS, asObj(c.statuses)[key]) ? c.statuses[key] : 'unknown';
+    out.tin[key] = checkMoney(asObj(c.tin)[key]) ?? '';
+  }
+  for (const key of ['opening','borrowed','paper','paperSalary']) out[key] = checkMoney(c[key]) ?? '';
+  return out;
+}
+function cutoffCheckDraft(per){ return checkEdits[periodKey(per)] || cutoffCheckSaved(per); }
+function checkAllocation(f, key){
+  if (key === 'minor') return noteMinorVal(f);
+  if (key === 'major') return num(noteUsedFig(f));
+  return num(f[key]);
+}
+function checkExpenseKey(e){
+  const cat = normCategory(e.category);
+  return cat === 'Mama' ? 'mama' : cat === 'Electric' ? 'electric' : cat === 'Backlog' ? 'major' : 'minor';
+}
+function checkLoggedTin(per){
+  const out = { minor:0, salary:0, mama:0, electric:0, split:0, major:0 };
+  for (const e of Object.values(asObj(state.expenses))){
+    if (isObj(e) && inPeriod(e.date, per) && e.paid_from === 'tin') out[checkExpenseKey(e)] += num(e.amount);
+  }
+  for (const key in out) out[key] = r2(out[key]);
+  return out;
+}
+function cutoffCheckBasis(per, f){
+  // A changed source total invalidates the old confirmation. No transaction
+  // text or private notes are copied into this comparison fingerprint.
+  return JSON.stringify([f.total, f.cash, f.gcash, f.excluded, f.salary, f.split, f.mama,
+    f.electric, noteMinorVal(f), noteUsedFig(f), f.backlogPaid, f.tinOut, f.tinUnknown,
+    Object.entries(asObj(state.days)).filter(([d]) => inPeriod(d,per)).sort().map(([d,r]) => [d,r.total,r.gcash,r.salary,r.excluded_total]),
+    Object.values(asObj(state.expenses)).filter(e => isObj(e) && inPeriod(e.date,per))
+      .map(e => [e.entry_id,e.date,e.category,e.amount,e.paid_from]).sort()]);
+}
+function cutoffCashCheck(per, f, check){
+  const c = check || cutoffCheckDraft(per), logged = checkLoggedTin(per);
+  const issues = [], conflicts = [];
+  let paid = 0;
+  for (const [key,label] of CHECK_ITEMS){
+    const status = asObj(c.statuses)[key] || 'unknown';
+    const entered = checkMoney(asObj(c.tin)[key]);
+    const relevant = checkAllocation(f,key) !== 0 || logged[key] !== 0 || entered > 0;
+    if (status === 'unknown' && relevant) issues.push(label + ': payment status not checked');
+    if (status === 'pending') {
+      if (entered > 0) issues.push(label + ': still to pay conflicts with the entered cash payment');
+      if (logged[key] > 0) conflicts.push(label + ': ' + peso(logged[key]) + ' is labelled paid from the tin in Expenses, but marked still to pay here.');
+    } else if (entered !== null) {
+      paid += entered;
+      if (['minor','mama','electric','major'].includes(key) && entered !== logged[key]) conflicts.push(label + ': confirmed tin payment differs from Expenses by ' + peso(Math.abs(entered - logged[key])) + '.');
+    } else {
+      paid += logged[key];
+      if (relevant) issues.push(label + ': confirm cash actually taken from the tin (0 if paid elsewhere)');
+    }
+  }
+  const opening = checkMoney(c.opening), borrowed = checkMoney(c.borrowed);
+  if (opening === null) issues.push('Opening cash not checked');
+  if (borrowed === null) issues.push('Outstanding borrowing not checked');
+  if (c.basis && c.basis !== cutoffCheckBasis(per,f)) issues.push('Source figures changed since the checklist was saved; review it again');
+  const expected = r2(num(opening) + num(f.cash) + num(f.excluded) - paid - num(borrowed));
+  const counted = tinCountFor(per,f).counted;
+  const paper = checkMoney(c.paper), paperSalary = checkMoney(c.paperSalary);
+  const comparable = paperSalary === null ? null : r2(num(f.cash) + num(f.excluded) - paperSalary);
+  return { expected, paid:r2(paid), counted, difference:counted === null ? null : r2(counted-expected),
+    paper, comparable, paperDifference:paper === null || comparable === null ? null : r2(comparable-paper),
+    issues, conflicts, complete:issues.length === 0 };
 }
 
 /** The same figures with a DIFFERENT split, so the residual can follow the field
@@ -3327,6 +3424,20 @@ function applyLocalCutoffSplit(p){
 
 /** What the tin actually held, for one cutoff. Shares CutoffInputs with the
  *  split and touches only its own field — same rule, opposite direction. */
+function applyLocalCutoffCheck(p){
+  ensureShape();
+  const per = { start:txt(p.start), end:txt(p.end) };
+  if (!isDateStr(per.start) || !isDateStr(per.end)) return;
+  const key = periodKey(per);
+  const was = asObj(state.cutoffInputs[key]);
+  state.cutoffInputs[key] = Object.assign({}, was, {
+    start:per.start, end:per.end,
+    // Preserve the usual split when a checklist is the first input this cutoff.
+    split_amount: was.split_amount == null ? splitDefault() : was.split_amount,
+    reconciliation_json:JSON.stringify(p.check), entry_id:txt(p.entryId), updated_at:new Date().toISOString()
+  });
+}
+
 function applyLocalTinCount(p){
   ensureShape();
   const per = { start:txt(p.start), end:txt(p.end) };
@@ -3435,6 +3546,7 @@ const LOCAL_APPLIERS = {
   saveStockDelivery: p => applyLocalStockDelivery(p),
   saveCutoffSplit: p => applyLocalCutoffSplit(p),
   saveTinCount: p => applyLocalTinCount(p),
+  saveCutoffCheck: p => applyLocalCutoffCheck(p),
   savePrices: p => applyLocalPrices(p),
   saveSettings: p => applyLocalSettings(p),
   saveStockItems: p => applyLocalStockItems(p)
@@ -4255,6 +4367,9 @@ function loadBentaForm(date){
   // from the previous day".)
   if (!counts.length){
     for (const r of rows){
+      // Nori is entered as today's paid sales, not a shelf count. Carrying
+      // yesterday's remaining stock here would invent today's sales.
+      if (noriUsesSoldField(r.sku)) continue;
       const prevEod = prevEodFor(r.sku, d);
       if (prevEod !== '') r.sod = prevEod;
     }
@@ -4342,6 +4457,44 @@ function prevEodFor(sku, date){
     }
   }
   return bestDate ? best : '';
+}
+
+/** Nori's single paid-quantity question is a presentation adapter, not a
+ *  rewrite of the sheet's historical stock readings. Unedited rows retain
+ *  their original SOD/EOD; an explicit sales/free edit encodes the same paid
+ *  quantity in the existing server contract. No backend migration is needed. */
+function noriUsesSoldField(sku){
+  return txt(sku) === 'nori' && !isBoxSku(sku);
+}
+function noriSoldVal(r){
+  const row = asObj(r);
+  if (isBlankVal(row.sod) || isBlankVal(row.eod)) return '';
+  if (!Number.isFinite(Number(row.sod))) return raw1(row.sod);
+  if (!Number.isFinite(Number(row.eod))) return '';
+  return Number(row.sod) - Number(row.eod) - num(row.free);
+}
+function setNoriSold(r, raw){
+  // Leave the exact historical counts alone even if the same answer is typed.
+  const before = noriSoldVal(r);
+  if (!isBlankVal(raw) && !isBlankVal(before) &&
+      Number.isFinite(Number(raw)) && Number(raw) === Number(before)) return;
+  r.sod = isBlankVal(raw) ? '' : (Number.isFinite(Number(raw)) ? Number(raw) + num(r.free) : raw1(raw));
+  r.eod = 0;
+}
+function setNoriFree(r, raw){
+  const paid = noriSoldVal(r);
+  const changed = Number(raw) !== Number(r.free);
+  r.free = raw1(raw);
+  if (!changed) return;
+  // A free nori is additional movement, not one fewer paid sale. Preserve a
+  // cleared paid-sales answer through free edits and draft restoration too.
+  r.sod = isBlankVal(paid) ? '' : (Number.isFinite(Number(paid)) ? Number(paid) + num(raw) : paid);
+  r.eod = 0;
+}
+function noriCountHTML(pr, row){
+  return '<div class="count-cell"><label for="in-' + esc(pr.sku) + '-noriSold">Quantity sold</label>' +
+    stepperHTML(pr.sku, 'noriSold', esc(noriSoldVal(row)), 'Quantity sold, ' + pr.label) + '</div>' +
+    '<p class="hint" style="margin-top:8px;">Enter paid sales only — 0 if none. No opening or closing stock count. Put freebies in “Given away or ruined”.</p>';
 }
 
 /** Whether the form holds ANY GCash figure tonight — the one rule for whether
@@ -4615,6 +4768,13 @@ function bentaSkuList(){
 // is what stops a stepper looking like it did nothing.
 function skuSplitText(pr, row){
   const sold = Math.max(0, num(row.sod) - num(row.eod));
+  if (noriUsesSoldField(row.sku)){
+    const paid = noriSoldVal(row);
+    if (isBlankVal(paid)) return 'Enter how many were sold — 0 if none.';
+    if (!Number.isInteger(Number(paid)) || Number(paid) < 0) return 'Use a whole quantity of 0 or more.';
+    return paid + ' × ' + peso(num(pr.price)) + ' = ' + peso(r2(Number(paid) * num(pr.price))) +
+      (inCutoffFlag(pr.in_cutoff) ? '' : '  ·  not in the day’s total');
+  }
   if (!sold) return 'Enter the start and end counts to see the total.';
   const isBox = pr.group === 'box';
   const price = num(pr.price), cheesePrice = num(pr.cheese_price);
@@ -4927,6 +5087,7 @@ const ATTN_WHAT = {
   saveStockCount:  { thing:'stock count', where:'count it again under More → Stock on hand.' },
   saveStockDelivery: { thing:'delivery', where:'add it again with “Stock came in” under More → Stock on hand.' },
   saveCutoffSplit: { thing:'split',      where:'enter it again on the Cutoff screen.' },
+  saveCutoffCheck: { thing:'cutoff checklist', where:'review it again on the Cutoff screen.' },
   savePrices:      { thing:'price change', where:'change it again under More → Maintenance.' },
   saveSettings:    { thing:'settings change', where:'change it again under More → Maintenance.' },
   saveStockItems:  { thing:'stock list change', where:'change it again under More → Maintenance.' }
@@ -5101,6 +5262,7 @@ function renderBenta(){
       // What the badge SHOWS — blank while either count is missing (soldVal), so
       // a half-read row never advertises a night's sales nobody counted.
       const sold = soldVal(row);
+      const directSold = noriUsesSoldField(pr.sku);
       const isBox = pr.group === 'box';
       // A sku kept OUT of the cutoff is counted exactly like the others, so its
       // card looks ordinary — start count, end count, sold — with one badge and one
@@ -5171,14 +5333,14 @@ function renderBenta(){
         // the day is saved. Say so here rather than letting it surprise her.
         (pr.missing ? '<p class="hint" style="margin:-4px 0 10px;">' + esc(pr.label) +
           ' is not in the Prices tab any more, so it has no price. Saving this day will remove its counts.</p>' : '') +
-        '<div class="count-grid">' +
+        (directSold ? noriCountHTML(pr, row) : '<div class="count-grid">' +
           // stepVal, not num: a count the reading could not see stays EMPTY.
           '<div class="count-cell"><label for="in-' + sk + '-sod">Start of day</label>' + stepperHTML(pr.sku, 'sod', stepVal(row.sod), 'Start of day, ' + pr.label) + '</div>' +
           '<div class="count-cell"><label for="in-' + sk + '-eod">End of day</label>' + stepperHTML(pr.sku, 'eod', stepVal(row.eod), 'End of day, ' + pr.label) + '</div>' +
-        '</div>' +
-        '<div class="sold-row">' +
+        '</div>') +
+        (directSold ? '' : '<div class="sold-row">' +
           '<div class="sold-badge" id="soldbadge-' + sk + '">Sold: <b id="sold-' + sk + '">' + sold + '</b></div>' +
-        '</div>' +
+        '</div>') +
         // An in-cutoff card carries only the cheese FACT here — payment lives in
         // the GCash card below and the cash remainder after it (v2.7.0). No
         // payment split on an excluded sku at all: its money is one plain amount
@@ -5187,7 +5349,7 @@ function renderBenta(){
         // zeroed — see oldBuckets.
         (inCut
           ? cheeseFact
-          : oldBuckets + '<p class="excl-note">Count it as usual — its money is kept separate.</p>' +
+          : oldBuckets + '<p class="excl-note">' + (directSold ? 'Its money is kept separate.' : 'Count it as usual — its money is kept separate.') + '</p>' +
             '<div class="sku-split" id="split-' + sk + '">' + skuSplitText(prEff, row) + '</div>') +
         '<p class="err" id="err-sku-' + sk + '" hidden></p>' +
       '</div>';
@@ -5417,7 +5579,7 @@ function freeSummaryText(){
 }
 function freeCardHTML(skus, payRow){
   let body = '<p class="hint">Anything that left the tray but was not paid for — a box given to someone, dropped, burnt; nori too. ' +
-    'It stays in “Sold”, because it did leave the tray; no money is added for it. Most nights this stays at 0.</p>';
+    'For box counts it stays in “Sold”, because it left the tray; no money is added for it. For nori, enter it here separately from “Quantity sold”. Most nights this stays at 0.</p>';
   let anyRow = false;
   for (const pr of asArr(skus)){
     const row = asArr(benta.rows).find(r => r.sku === pr.sku);
@@ -5858,7 +6020,8 @@ function soldHistory(sku, date, want, dates){
     // Neither figure may be missing: a night nobody finished counting says
     // nothing about whether this sku normally sells.
     if (isBlankVal(row.sod) || isBlankVal(row.eod)) continue;
-    out.push({ date: d, sold: Math.max(0, num(row.sod) - num(row.eod)) });
+    out.push({ date: d, sold: Math.max(0, num(row.sod) - num(row.eod) -
+      (noriUsesSoldField(sku) ? num(row.free_qty) : 0)) });
   }
   return out;
 }
@@ -5903,6 +6066,18 @@ function nightChecks(){
     const usually = soldNights >= Math.ceil(NIGHT_USUAL_SHARE * hist.length);
     if (!usually) continue;
     const label = skuLabel(sku);
+
+    if (noriUsesSoldField(sku)){
+      const paid = noriSoldVal(r);
+      if (isBlankVal(paid)){
+        out.push(label + ' has no quantity sold entered tonight, though it was counted on ' + hist.length +
+          ' of the last nights and sold on ' + soldNights + ' of them. Enter the paid quantity — 0 if none.');
+      } else if (Number(paid) === 0){
+        out.push(label + ': nothing sold tonight, though it sold on ' + soldNights + ' of the last ' +
+          hist.length + ' nights. “Quantity sold” says 0 — if that is right, leave it; otherwise check the paid sales.');
+      }
+      continue;
+    }
 
     // (1) NOT COUNTED AT ALL tonight, though it is normally counted. Both
     // figures blank is a legitimate "we did not sell it" — so this asks.
@@ -6027,7 +6202,9 @@ function validateBenta(){
     // under that sku's stepper; saveBenta opens the card before scrolling to it.
     const fq = num(r.free);
     const freeKey = 'free:' + r.sku;
-    if (!isWhole(fq)){
+    if (noriUsesSoldField(r.sku) && !isBlankVal(r.free) && !Number.isFinite(Number(r.free))){
+      errs[freeKey] = label + ': given away or ruined must be a whole number of 0 or more.';
+    } else if (!isWhole(fq)){
       errs[freeKey] = label + ': given away or ruined must be a whole number (got "' + txt(r.free) + '").';
     } else if (fq < 0){
       errs[freeKey] = label + ': given away or ruined cannot be negative.';
@@ -6085,7 +6262,13 @@ function validateBenta(){
     // persisted — so the refusal has to live HERE, where Save day cannot get
     // past it. Checked LAST, so an ordinary counting mistake is still named
     // first; 0 is a real answer and always accepted (v2.9.0).
-    if (!errs[key] && isBlankVal(r.eod) && !isBlankVal(r.sod) && num(r.sod) > 0){
+    if (noriUsesSoldField(r.sku) &&
+        (isBlankVal(noriSoldVal(r)) || !Number.isFinite(Number(r.sod)) || !Number.isFinite(Number(r.eod)))){
+      errs[key] = label + ': enter the quantity sold — 0 if none.';
+    } else if (noriUsesSoldField(r.sku) &&
+        (!Number.isInteger(Number(noriSoldVal(r))) || Number(noriSoldVal(r)) < 0)){
+      errs[key] = label + ': quantity sold must be a whole number of 0 or more.';
+    } else if (!errs[key] && isBlankVal(r.eod) && !isBlankVal(r.sod) && num(r.sod) > 0){
       errs[key] = skuLabel(r.sku) + ': the end count is empty, so all ' + fmt(num(r.sod)) +
         ' would count as sold. Type what was left — 0 if the tray emptied.';
     }
@@ -6325,6 +6508,16 @@ function tearReceipt(done){
 function bentaStep(sku, field, dir){
   const r = benta.rows.find(x => x.sku === sku);
   if (!r) return;
+  if (noriUsesSoldField(sku) && (field === 'noriSold' || field === 'free')){
+    const v = Math.max(0, num(field === 'noriSold' ? noriSoldVal(r) : r.free) + dir);
+    if (field === 'noriSold') setNoriSold(r, v);
+    else setNoriFree(r, v);
+    benta.dirty = true;
+    const input = $('in-' + sku + '-' + field);
+    if (input) input.value = v;
+    afterCountChange(sku);
+    return;
+  }
   // The v2.7.0 presentation steppers edit the buckets through their own map.
   if (UI_FIELDS[field]){ uiStep(r, field, dir); return; }
   const key = ROW_FIELDS[field];
@@ -6382,6 +6575,8 @@ function afterCountChange(sku){
   // soldVal, the same reading renderBenta drew the badge with, so the two can
   // never disagree about a row that is only half read (v2.9.0).
   if (soldEl && r) soldEl.textContent = soldVal(r);
+  const noriInput = $('in-' + sku + '-noriSold');
+  if (noriInput && r && noriInput !== document.activeElement) noriInput.value = noriSoldVal(r);
   updateReceipt();
   validateBentaLive();   // also refreshes the derived "Regular (cash)" figure
 }
@@ -7034,9 +7229,125 @@ function splitHintText(per, f){
 /** What the residual MEANS, in words, under the figure. */
 function residualNote(remaining){
   const r = num(remaining);
-  if (r < 0) return 'This cutoff came up short. Nothing is left for the backlogs.';
-  if (r === 0) return 'Nothing left over this cutoff.';
-  return 'Left in the business — this is what backlog payments come out of.';
+  if (r < 0) return 'Allocations exceed sales. This is not the difference in your cash tin.';
+  return 'After all allocations, including unpaid items. Not cash on hand and not another payment to deduct.';
+}
+
+function cutoffPaymentHTML(per, f){
+  const c = cutoffCheckDraft(per), sup = suppliesSplit(f);
+  let h = '<p class="hint">Allocation amounts below include cash and GCash. Status is your confirmation, not a new expense.</p>';
+  for (const status of ['unknown','partial','paid','pending']){
+    const rows = CHECK_ITEMS.filter(([key]) => c.statuses[key] === status);
+    if (!rows.length) continue;
+    h += '<h3 class="section-title">' + CHECK_STATUS[status] + '</h3>';
+    for (const [key,label] of rows){
+      h += '<div class="co-row"><span>' + esc(label) + '</span><span class="v">' +
+        (key === 'major' && !suppliesSplit(f).majorKnown ? '—' : peso(checkAllocation(f,key))) + '</span></div>';
+      if (key === 'major') h += '<p class="hint">Value of stock consumed; check the supplier bill before paying. Backlog payments are separate from this allocation.</p>';
+      if (key === 'major' && sup.why) h += '<p class="hint">' + esc(sup.why) + '</p>';
+      if (key === 'minor') h += '<p class="hint">Includes purchases paid through GCash. Only cash payments belong in the tin comparison.</p>';
+    }
+  }
+  return h;
+}
+function cutoffCashHTML(per, f){
+  const c = cutoffCheckDraft(per), r = cutoffCashCheck(per,f,c);
+  const pending = asArr(queue).some(q => ['saveCutoffCheck','saveTinCount','saveDay','saveExpense','deleteExpense','saveCutoffSplit'].includes(q.action));
+  const sourceIssues = [];
+  if (previewIncomplete(per)) sourceIssues.push('This device cannot see the whole cutoff. Sync before comparing.');
+  if (num(f.tinUnknown) > 0) sourceIssues.push(peso(f.tinUnknown) + ' of logged expenses has no payment source; check it against your confirmed cash payments.');
+  if (missingDaysInPeriod(per).filter(d => d < todayStr()).length) sourceIssues.push('Some days have no entry. Confirm those days before settling.');
+  if (cutoffMissingDays(per).length || cutoffMissingMoney(per).length) sourceIssues.push('Some entries have not reached the Sheet.');
+  if (pending) sourceIssues.push(config.apiUrl ? 'Changes are waiting to sync with the Sheet.' : 'Demo/local data only; not verified against the Sheet.');
+  if (checkEdits[periodKey(per)]) sourceIssues.push('Checklist changes are not saved yet.');
+  if (Object.prototype.hasOwnProperty.call(tinEdits,periodKey(per))) sourceIssues.push('The new cash count is not saved yet.');
+  if (r.paper !== null && r.comparable === null) sourceIssues.push('Confirm the wages already deducted in the paper total (0 if none).');
+  if (r.paperDifference !== null && r.paperDifference !== 0) sourceIssues.push('The app and paper cash-sales totals differ; review the daily entries.');
+  if (asArr(attention).some(a => {
+    const p = asObj(a.payload);
+    return (txt(p.start) === per.start && txt(p.end) === per.end) ||
+      inPeriod(txt(p.date) || txt(a.date),per);
+  })) sourceIssues.push('An entry for this cutoff needs attention under More; resolve it before settling.');
+  const issues = r.issues.concat(sourceIssues), clean = !issues.length && !r.conflicts.length;
+  const row = (label,value,big) => '<div class="co-row' + (big ? ' big' : '') + '"><span>' + label + '</span><span class="v">' + value + '</span></div>';
+  let h = '<div class="pay-intro">Compare with your paper and cash</div>' +
+    row('Still unaccounted',r.difference === null ? '—' : peso(Math.abs(r.difference)) + (r.difference < 0 ? ' short' : r.difference > 0 ? ' extra' : ''),true) +
+    row('Cash you counted',r.counted === null ? 'Not entered' : peso(r.counted)) +
+    row(clean ? 'Expected cash in tin' : 'Provisional cash balance',peso(r.expected)) +
+    '<p class="' + (clean && r.difference === 0 ? 'ok-note' : 'hint') + '">' +
+      (r.difference === null ? 'Enter your cash count below to see the difference.' : clean && r.difference === 0 ? 'Cash balances against these confirmed entries.' : 'Provisional until the checks below are resolved.') + '</p>';
+  if (r.paper !== null){
+    h += '<div class="r-sep" role="presentation"></div>' + row('Paper cash-sales total',peso(r.paper)) +
+      row('App cash less wages already in paper',r.comparable === null ? 'Enter wages' : peso(r.comparable));
+    if (r.paperDifference !== null) h += row('App minus paper',peso(r.paperDifference),true);
+  }
+  h += '<details class="check-detail"><summary>How the cash balance is worked out</summary>' +
+    '<p class="hint">Cash movement only. GCash and unpaid allocations are kept out. Other deposits or withdrawals are not included—check any such movement separately.</p>' +
+    row('Takoyaki cash received',peso(f.cash)) + row('Nori / separate cash sales',peso(f.excluded)) +
+    row('Cash already in tin at start',checkMoney(c.opening) === null ? 'Not checked' : peso(c.opening)) +
+    row('Actually paid from tin','−' + peso(r.paid)) +
+    row('Borrowed this cutoff, not returned',checkMoney(c.borrowed) === null ? 'Not checked' : '−' + peso(c.borrowed)) + '</details>';
+  if (issues.length || r.conflicts.length) h += '<details class="check-detail"><summary>' +
+    (issues.length + r.conflicts.length) + ' checks need attention</summary><ul class="check-issues">' + issues.concat(r.conflicts).map(s => '<li>' + esc(s) + '</li>').join('') + '</ul></details>';
+  return h;
+}
+function cutoffCheckFormHTML(per){
+  const c = cutoffCheckDraft(per), logged = checkLoggedTin(per);
+  const input = (id,label,value,hint) => '<div class="field"><label for="check-' + id + '">' + label + '</label>' +
+    '<input class="input money" id="check-' + id + '" data-check-money="' + id + '" inputmode="decimal" autocomplete="off" placeholder="Not checked" value="' + esc(value) + '">' +
+    (hint ? '<p class="hint">' + hint + '</p>' : '') + '</div>';
+  let h = '<details class="card"><summary>Review paid / pending and cash details</summary>' +
+    '<p class="hint" style="margin:12px 0;">Confirm each category for this cutoff. Enter cash actually taken from the tin, including payments already in Expenses—do not add them twice. Enter 0 if paid elsewhere. Use Partly paid when only some was paid.</p>';
+  for (const [key,label] of CHECK_ITEMS){
+    h += '<div class="check-edit"><label for="check-status-' + key + '">' + esc(label) + '</label>' +
+      '<select class="input" id="check-status-' + key + '" data-check-status="' + key + '">' +
+      Object.entries(CHECK_STATUS).map(([v,title]) => '<option value="' + v + '"' + (c.statuses[key] === v ? ' selected' : '') + '>' + title + '</option>').join('') + '</select>' +
+      input('tin-' + key,'Cash actually taken from tin (₱)',c.tin[key],
+        'Expenses currently label ' + esc(peso(logged[key])) + ' as taken from the tin.' + (key === 'major' ? ' Include supplier/backlog cash payments once, not the value of stock opened.' : '')) + '</div>';
+  }
+  h += input('opening','Cash already in tin at start (₱)',c.opening,'Enter 0 if the tin was empty at the last cutoff.') +
+    input('borrowed','Borrowed this cutoff and still unpaid (₱)',c.borrowed,'Only loans taken from this cutoff’s tin, not older borrowing or amounts included in the payments above. Enter 0 if none.') +
+    input('paper','Paper cash-sales total (₱, optional)',c.paper,'Include nori; exclude GCash.') +
+    input('paperSalary','Wages already subtracted in that paper total (₱)',c.paperSalary,'For example, six days at ₱200 = ₱1,200. This is only for comparing sales—not another cash deduction.') +
+    '<p class="err" id="err-check" hidden></p><button type="button" class="btn block" data-act="check-save">Save this cutoff checklist</button>' +
+    '<p class="hint" style="margin-top:8px;">Saved to this cutoff in Google Sheets when connected. Does not change sales, Expenses, or the partner’s cutoff note.</p></details>';
+  return h;
+}
+function updateCutoffCheckPreview(){
+  if (!cutoffPer) return;
+  const f = liveCutoff(cutoffPer);
+  const cash = $('coCashCheck'), groups = $('coPaymentGroups');
+  if (cash) cash.innerHTML = cutoffCashHTML(cutoffPer,f);
+  if (groups) groups.innerHTML = cutoffPaymentHTML(cutoffPer,f);
+}
+function saveCutoffCheck(){
+  const per = cutoffPer;
+  if (!per) return;
+  if (pendingSplit(per)){ setErr('err-check','Save the split first, then confirm this checklist.'); return; }
+  const c = cutoffCheckDraft(per), check = { version:1, statuses:{}, tin:{}, basis:cutoffCheckBasis(per,computeCutoff(per)) };
+  const read = (v,label) => {
+    if (v === '' || v == null || (typeof v === 'string' && !v.trim())) return '';
+    const n = checkMoney(v);
+    if (n === null) throw new Error(label + ' must be a non-negative amount.');
+    return n;
+  };
+  try {
+    for (const [key,label] of CHECK_ITEMS){
+      check.statuses[key] = c.statuses[key];
+      check.tin[key] = read(c.tin[key],label);
+      if (c.statuses[key] === 'pending' && check.tin[key] > 0) throw new Error(label + ' is still to pay but has cash paid. Choose Partly paid or clear the cash amount.');
+    }
+    for (const key of ['opening','borrowed','paper','paperSalary']) check[key] = read(c[key],key);
+  } catch(e){ setErr('err-check',e.message); return; }
+  const existing = asObj(asObj(state.cutoffInputs)[periodKey(per)]);
+  const payload = { start:per.start, end:per.end, entryId:txt(existing.entry_id) || uuid(), check };
+  applyLocalCutoffCheck(payload);
+  enqueue('saveCutoffCheck',payload);
+  delete checkEdits[periodKey(per)];
+  persistState();
+  renderCutoff();
+  toast(config.apiUrl ? 'Checklist kept on this phone; syncing to the Sheet.' : 'Checklist saved on this phone only.');
+  drainQueue();
 }
 
 function renderCutoff(){
@@ -7141,8 +7452,32 @@ function renderCutoff(){
   const typed = Object.prototype.hasOwnProperty.call(splitEdits, key) ? splitEdits[key] : null;
   const splitVal = typed == null ? f.split : typed;
   const live = liveCutoff(per);
-  const sup = suppliesSplit(f);
+  // First answer the owner's question: what is still unaccounted for?
+  h += '<div class="card" id="coCashCheck">' + cutoffCashHTML(per,live) + '</div>';
+  const t = tinCountFor(per,f);
+  const countedDraft = Object.prototype.hasOwnProperty.call(tinEdits,key) ? tinEdits[key] : (t.counted === null ? '' : String(t.counted));
+  h += '<div class="card"><div class="field"><label for="tinCountIn">Cash counted in the tin (₱)</label>' +
+    '<input class="input money" id="tinCountIn" inputmode="decimal" autocomplete="off" placeholder="Not counted" value="' + esc(countedDraft) + '">' +
+    '<p class="err" id="err-tin" hidden></p></div><button type="button" class="btn block" data-act="tin-save">Save the cash count</button></div>';
+  h += '<div class="card"><div class="pay-intro">Already deducted / still to pay</div>' +
+    '<div id="coPaymentGroups">' + cutoffPaymentHTML(per,live) + '</div></div>';
+  h += cutoffCheckFormHTML(per);
 
+  h += '<div class="card"><div class="pay-intro">Sales and allocation result</div>' +
+    '<div class="co-row big"><span>Total sales (without nori)</span><span class="v">' + peso(f.total) + '</span></div>' +
+    '<div class="co-sub">' + f.daysWithSales + ' days with sales · ' + f.openDays + ' days open</div>' +
+    '<div class="co-row"><span>Cash</span><span class="v">' + peso(f.cash) + '</span></div>' + gcashCutoffHTML(f) +
+    '<div class="r-sep" role="presentation"></div>' +
+    '<div class="co-row"><span>Split allocated</span><span class="v" id="coSplit">' + peso(live.split) + '</span></div>' +
+    '<div class="co-row split' + (live.remaining < 0 ? ' neg' : '') + '" id="coResidualRow">' +
+      '<span id="coResidualLabel">' + (live.remaining < 0 ? 'Short after allocations' : 'Remaining after allocations') + '</span>' +
+      '<span class="v" id="coResidual">' + peso(Math.abs(live.remaining)) + '</span></div>' +
+    '<div class="co-sub" id="coResidualNote">' + esc(residualNote(live.remaining)) + '</div>' +
+    (num(f.backlogPaid) > 0 ? '<p class="hint">' + esc(peso(f.backlogPaid)) + ' in backlog payments is separate from the allocations; do not deduct it twice in the cash checklist.</p>' : '') +
+  '</div>';
+
+  // Stock quantities explain the allocation, but do not obscure the cash check.
+  h += '<details><summary class="card">How major supplies were valued</summary>';
   /* SUPPLIES USED, IN MONEY (v2.14.0). Owner's ask: see the cost of what was
      opened, on this tab, kept current. Its own card, ABOVE the settlement
      figures and clearly separated from them, because the "Supplies" line below
@@ -7184,90 +7519,8 @@ function renderCutoff(){
     '</div>';
   }
 
-  /* WHAT SHOULD BE IN THE TIN (v2.12.0). Its own card, below the settlement
-     figures, because it answers a different question: not "how do we divide
-     this" but "is the cash actually there before we divide it". Shown only once
-     something has been marked as coming from the tin — until then it would be
-     the day's cash restated under a new heading, which teaches nothing. */
-  if (num(f.tinOut) > 0 || num(f.tinUnknown) > 0){
-    h += '<div class="card">' +
-      '<div class="pay-intro">What should be in the tin</div>' +
-      '<div class="co-row"><span>Cash taken in</span><span class="v">' + peso(f.cash) + '</span></div>' +
-      '<div class="co-row"><span>Paid out of the tin</span><span class="v">−' + peso(f.tinOut) + '</span></div>' +
-      '<div class="r-sep" role="presentation"></div>' +
-      '<div class="co-row big"><span>Should be left</span><span class="v">' + peso(f.tinExpected) + '</span></div>';
-    if (num(f.tinUnknown) > 0){
-      h += '<p class="hint" style="margin-top:8px;">' + esc(peso(f.tinUnknown)) +
-        ' of this cutoff\'s payments do not say where the money came from, so it is NOT ' +
-        'subtracted above. If any of it came out of the tin, the real figure is lower by that much. ' +
-        'Payments entered on the Expenses screen say where they came from; the one-tap chips here do not yet.</p>';
-    }
-    // THE COUNT (v2.12.1). Its own field on the same card, so the figure it is
-    // compared against is on screen while she types — the expected figure is the
-    // hard half, and the app already has it.
-    const t = tinCountFor(per, f);
-    const draft = Object.prototype.hasOwnProperty.call(tinEdits, periodKey(per))
-      ? tinEdits[periodKey(per)]
-      : (t.counted === null ? '' : String(t.counted));
-    h += '<div class="r-sep" role="presentation"></div>' +
-      '<div class="field" style="margin-bottom:8px;"><label for="tinCountIn">How much is actually in the tin? (₱)</label>' +
-        '<input class="input money" id="tinCountIn" inputmode="decimal" autocomplete="off" placeholder="0" value="' + esc(draft) + '">' +
-        '<p class="err" id="err-tin" hidden></p></div>' +
-      '<button type="button" class="btn block" data-act="tin-save">Save the count</button>';
-    const verdict = tinVerdict(per, f);
-    if (verdict){
-      h += '<p style="margin-top:10px;' + (t.off < 0 ? 'color:var(--alert);font-weight:600;' : '') + '">' +
-        esc(verdict) + '</p>';
-    } else {
-      h += '<p class="hint" style="margin-top:10px;">Count the tin before you collect it. ' +
-        'A figure that does not match is worth finding tonight rather than next fortnight.</p>';
-    }
-    h += '</div>';
-  }
 
-  // Live local preview
-  h += '<div class="card">' +
-    '<div class="co-row big"><span>Total</span><span class="v">' + peso(f.total) + '</span></div>' +
-    '<div class="co-sub">' + f.daysWithSales + (f.daysWithSales === 1 ? ' day with sales' : ' days with sales') +
-      ' · ' + f.openDays + (f.openDays === 1 ? ' day open' : ' days open') + '</div>' +
-    '<div class="r-sep" role="presentation"></div>' +
-    '<div class="co-row"><span>Cash</span><span class="v">' + peso(f.cash) + '</span></div>' +
-    gcashCutoffHTML(f) +
-    '<div class="r-sep" role="presentation"></div>' +
-    '<div class="co-row"><span>Mama</span><span class="v">' + peso(f.mama) + '</span></div>' +
-    '<div class="co-row"><span>Split</span><span class="v" id="coSplit">' + peso(live.split) + '</span></div>' +
-    // SUPPLIES, IN TWO LINES (v2.16.0) — the owner's ask, in his words. MINOR
-    // is the daily buying and it is the allocation the arithmetic uses; MAJOR is
-    // the value opened, carried here so he can read both figures in the one
-    // place he settles from, and in NO sum. The row is marked so the block still
-    // reads as arithmetic that closes.
-    '<div class="co-row"><span>Supplies (minor)</span><span class="v">' + peso(sup.minor) + '</span></div>' +
-    '<div class="co-row"><span>Supplies (major)</span>' +
-      '<span class="v">' + (sup.majorKnown ? peso(sup.major) : '—') + '</span></div>' +
-    (sup.why ? '<p class="hint" style="margin:2px 0 6px 14px;">' + esc(sup.why) + '</p>' : '') +
-    // BACKLOG PAYMENTS ARE OUTSIDE THESE FIGURES (v2.23.0), on the owner's
-    // decision: the stock they bought is deducted the night it is opened, so a
-    // payment settles a debt and moves nothing here. Said in one line when any
-    // were made, so money that left the tin is never simply absent.
-    (num(f.backlogPaid) > 0
-      ? '<p class="hint" style="margin:2px 0 6px 14px;">' +
-        esc(peso(f.backlogPaid)) + ' paid on backlogs this cutoff — settled debt, not deducted from Remaining again. ' +
-        'If marked paid via GCash, it is included in GCash expenses paid.</p>'
-      : '') +
-    // Octopus and Other payments are inside Supplies (minor) now (v2.20.0), so
-    // they are not shown again here — the column has to add up.
-    '<div class="co-row"><span>Salary</span><span class="v">' + peso(f.salary) + '</span></div>' +
-    '<div class="co-row"><span>Electric bill</span><span class="v">' + peso(f.electric) + '</span></div>' +
-    '<div class="r-sep" role="presentation"></div>' +
-    // The RESIDUAL: what is left in the business after everything, and what
-    // backlog payments are paid out of. Its LABEL carries the sign, exactly like
-    // the note — "Remaining" when there is something left, "Short" when there is
-    // not. Never clamped to zero.
-    '<div class="co-row split' + (live.remaining < 0 ? ' neg' : '') + '" id="coResidualRow">' +
-      '<span id="coResidualLabel">' + (live.remaining < 0 ? 'Short' : 'Remaining') + '</span>' +
-      '<span class="v" id="coResidual">' + peso(Math.abs(live.remaining)) + '</span></div>' +
-    '<div class="co-sub" id="coResidualNote">' + esc(residualNote(live.remaining)) + '</div>' +
-  '</div>';
+  h += '</details>';
 
   // The editable Split.
   h += '<div class="card">' +
@@ -7738,7 +7991,7 @@ function updateSplitLive(){
   const set = (id, v) => { const el = $(id); if (el) el.textContent = v; };
   set('coSplit', peso(live.split));
   set('coEach', peso(live.perPartner) + ' each');
-  set('coResidualLabel', live.remaining < 0 ? 'Short' : 'Remaining');
+  set('coResidualLabel', live.remaining < 0 ? 'Short after allocations' : 'Remaining after allocations');
   set('coResidual', peso(Math.abs(live.remaining)));
   set('coResidualNote', residualNote(live.remaining));
   set('coSplitHint', splitHintText(cutoffPer, f));
@@ -7751,6 +8004,7 @@ function updateSplitLive(){
   const block = $('noteBlock');
   if (block) block.hidden = !!pendingSplit(cutoffPer);
   setErr('err-split', num(raw) < 0 ? 'The split cannot be less than zero.' : '');
+  updateCutoffCheckPreview();
 }
 
 /** Save what the tin actually held for the cutoff on screen (v2.12.1). Reuses
@@ -7766,8 +8020,8 @@ function saveTinCount(){
     say('Enter what you counted, or leave the tin alone for now.');
     return;
   }
-  const counted = num(raw);
-  if (!(counted >= 0)){
+  const counted = checkMoney(raw);
+  if (counted === null){
     say('The counted cash cannot be less than zero.');
     return;
   }
@@ -7782,11 +8036,8 @@ function saveTinCount(){
   delete tinEdits[key];
   persistState();
   renderCutoff();
-  const f = computeCutoff(per);
-  const t = tinCountFor(per, f);
-  toast(t.off === 0
-    ? 'Counted ' + peso(t.counted) + ' — it matches.'
-    : 'Counted ' + peso(t.counted) + ' — ' + peso(Math.abs(t.off)) + (t.off < 0 ? ' short.' : ' over.'));
+  toast('Cash count kept: ' + peso(counted) + '. Review the checklist for any difference.');
+  drainQueue();
 }
 
 function saveSplit(){
@@ -10201,6 +10452,7 @@ document.addEventListener('click', (ev) => {
     loadCosting();
   }
   else if (act === 'tin-save') saveTinCount();
+  else if (act === 'check-save') saveCutoffCheck();
   else if (act === 'force-update') forceUpdate();
   else if (act === 'catch-open'){ catchOpen = true; renderIbapa(); }
   else if (act === 'catch-close'){
@@ -10254,6 +10506,14 @@ document.addEventListener('input', (ev) => {
   // The stock rows are addressed by their row INDEX in a data attribute: a
   // product name is sheet data and would make an id ambiguous.
   const ds = ev.target.dataset || {};
+  if (ds.checkMoney != null && cutoffPer){
+    const key = periodKey(cutoffPer), c = checkEdits[key] || (checkEdits[key] = cutoffCheckSaved(cutoffPer));
+    const field = ds.checkMoney;
+    if (field.startsWith('tin-') && CHECK_ITEMS.some(([k]) => k === field.slice(4))) c.tin[field.slice(4)] = ev.target.value;
+    else if (['opening','borrowed','paper','paperSalary'].includes(field)) c[field] = ev.target.value;
+    updateCutoffCheckPreview();
+    return;
+  }
   if (ds.stk != null){
     const r = asArr(benta.stock)[num(ds.stk)];
     if (r){ r.qty = ev.target.value; benta.dirty = true; updateStockCard(); validateBentaLive(); }
@@ -10318,7 +10578,15 @@ document.addEventListener('input', (ev) => {
     if (st && st.dataset.sku){
       const sku = st.dataset.sku;
       // A v2.7.0 presentation field writes the buckets through its own map.
-      if (UI_FIELDS[st.dataset.field]){
+      if (noriUsesSoldField(sku) && (st.dataset.field === 'noriSold' || st.dataset.field === 'free')){
+        const r = benta.rows.find(x => x.sku === sku);
+        if (r){
+          if (st.dataset.field === 'noriSold') setNoriSold(r, ev.target.value);
+          else setNoriFree(r, ev.target.value);
+          benta.dirty = true;
+          afterCountChange(sku);
+        }
+      } else if (UI_FIELDS[st.dataset.field]){
         const r = benta.rows.find(x => x.sku === sku);
         if (r){ uiTyped(r, st.dataset.field, ev.target.value); benta.dirty = true; afterCountChange(sku); }
       } else {
@@ -10404,6 +10672,12 @@ document.addEventListener('input', (ev) => {
 document.addEventListener('change', (ev) => {
   const id = ev.target.id;
   const ds = ev.target.dataset || {};
+  if (ds.checkStatus != null && cutoffPer && CHECK_ITEMS.some(([k]) => k === ds.checkStatus)){
+    const key = periodKey(cutoffPer), c = checkEdits[key] || (checkEdits[key] = cutoffCheckSaved(cutoffPer));
+    if (Object.prototype.hasOwnProperty.call(CHECK_STATUS,ev.target.value)) c.statuses[ds.checkStatus] = ev.target.value;
+    updateCutoffCheckPreview();
+    return;
+  }
   // Checkboxes and selects report through `change` on every phone, so the
   // maintenance toggles and the two pickers are wired here rather than on input.
   if (ds.mactive != null){ if (maintPrices[ds.mactive]) maintPrices[ds.mactive].active = ev.target.checked; return; }

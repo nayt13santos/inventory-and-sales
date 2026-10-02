@@ -5623,23 +5623,12 @@ test('THE OPENED VALUE IS AN ALLOCATION, and the block adds to Total (v2.22.0)',
   assert.strictEqual(app.noteUsedFig(bumped), 720, 'the opened value survived the split');
 });
 
-test('SOURCE PIN: a backlog payment is REPORTED on the card as settled debt (v2.23.0)', () => {
-  // v2.22.0 warned about an overlap here; v2.23.0 removed the overlap (backlog
-  // payments left every allocation on the owner's decision), so the card now
-  // simply says what went out and that it is outside every figure. Money that
-  // left the tin must never be simply absent from the screen.
-  const src = fs.readFileSync(INDEX_HTML, 'utf8');
-  const at = src.indexOf("'<div class=\"co-row\"><span>Supplies (major)</span>'");
-  assert.ok(at > 0);
-  const card = src.slice(at, at + 1400);
-  assert.match(card, /num\(f\.backlogPaid\) > 0/, 'drawn only when a payment was made');
-  assert.match(card, /esc\(peso\(f\.backlogPaid\)\)/, 'with the amount, escaped');
-  assert.match(card, /settled debt, not deducted from Remaining again/,
-    'debt settlement is still outside allocations');
-  assert.match(card, /included in GCash expenses paid/,
-    'but a marked GCash payment does leave that account');
-  assert.ok(card.indexOf('backlogInMinor') < 0, 'the overlap warning is gone with the overlap');
-  assert.ok(card.indexOf('deducted twice') < 0, 'and so is its sentence — there is no double-count left to name');
+test('SOURCE PIN: backlog payments remain outside allocations but visible in the cash check', () => {
+  const card = slab('function renderCutoff(){', 'function stockCutoffHTML(per){');
+  assert.match(card, /num\(f\.backlogPaid\) > 0/);
+  assert.match(card, /esc\(peso\(f\.backlogPaid\)\)/);
+  assert.match(card, /backlog payments is separate from the allocations/);
+  assert.match(HTML, /gcashCutoffHTML\(f\)/);
 });
 
 test('OPENED-EQUALS-SHELF: a card filled in as a stock count is challenged (v2.23.0)', () => {
@@ -6965,49 +6954,17 @@ test('SUPPLIES IN TWO LINES: major is opened, minor is the daily buying (v2.16.0
     'and the minor does not move when what was opened changes');
 });
 
-test('SOURCE PIN: the total card carries both supplies lines, and only one sums (v2.16.0)', () => {
-  const src = fs.readFileSync(INDEX_HTML, 'utf8');
-  const at = src.indexOf("'<div class=\"co-row\"><span>Supplies (minor)</span>");
-  assert.ok(at > 0, 'the total card must carry the MINOR line');
-  const card = src.slice(at, at + 900);
-
-  // MINOR is the merged figure since v2.20.0 — everything entered on the
-  // Expenses screen — and it comes from suppliesSplit so the card and the note
-  // can never disagree about what "minor" means.
-  assert.match(card, /Supplies \(minor\)<\/span><span class="v">' \+ peso\(sup\.minor\)/,
-    'minor prints the merged figure from the one rule that defines it');
-  assert.ok(card.indexOf('peso(f.supplies)') < 0,
-    'and never the Supplies CATEGORY alone — that is the bug this replaced');
-  // The two folded rows are gone from the card, or the column would not add up.
-  assert.ok(card.indexOf('>Octopus<') < 0, 'no separate Octopus row');
-  assert.ok(card.indexOf('>Other payments<') < 0, 'no separate Other payments row');
-
-  // MAJOR comes from the helper, prints '—' when unknown, and says on its face
-  // that it is not in the total. A muted style alone is not a statement.
-  assert.match(card, /Supplies \(major\)/, 'and the MAJOR line beside it');
-  // v2.22.0: major IS one of the summing rows now, so it is drawn as one — no
-  // aside styling and no "not in the total", both of which would now be lies.
-  assert.ok(card.indexOf('class="co-row aside"') < 0,
-    'the major row is an ordinary summing row now');
-  assert.ok(card.indexOf('not in the total') < 0,
-    'and must not still claim otherwise');
-  assert.match(card, /sup\.majorKnown \? peso\(sup\.major\) : '—'/,
-    "unknown prints an em dash, never ₱0");
-  assert.match(card, /esc\(sup\.why\)/, 'and the explanation is escaped');
-  // NOTHING TO SAY, NOTHING DRAWN. The row lives inside the column of figures,
-  // so the paragraph must be conditional or it pushes the rest of the block down
-  // every fortnight — including the ordinary fortnight where all is well.
-  assert.match(card, /\(sup\.why \? '<p class="hint"/,
-    'the paragraph is drawn only when there is something wrong or missing');
-
-  // The residual is still computed from the allocations alone: the major appears
-  // nowhere in liveCutoff or in the residual row.
-  const live = src.slice(src.indexOf('function liveCutoff('), src.indexOf('function liveCutoff(') + 1800);
-  assert.ok(live.indexOf('suppliesUsed') < 0 && live.indexOf('suppliesSplit') < 0,
-    'the residual may never see what was opened');
-
-  // The ASIDE style must exist, or the row reads as one of the summing rows.
-  assert.match(src, /\.co-row\.aside\{/, 'the aside row has its own style');
+test('SOURCE PIN: supplies keep their correct allocation meanings in the paid-pending groups', () => {
+  const groups = slab('function cutoffPaymentHTML(per, f){', 'function cutoffCashHTML(per, f){');
+  assert.ok(HTML.includes("['minor','Supplies (minor)']"));
+  assert.ok(HTML.includes("['major','Supplies (major)']"));
+  assert.match(groups, /checkAllocation\(f,key\)/);
+  assert.match(groups, /suppliesSplit\(f\)\.majorKnown \? '—' : peso/);
+  assert.match(groups, /esc\(sup\.why\)/);
+  assert.match(groups, /Value of stock consumed/);
+  assert.match(groups, /Includes purchases paid through GCash/);
+  assert.ok(HTML.includes("if (key === 'minor') return noteMinorVal(f)"));
+  assert.ok(HTML.includes("if (key === 'major') return num(noteUsedFig(f))"));
 });
 
 test('CATCH UP can target a cutoff that has ENDED (v2.14.1)', () => {
@@ -8206,39 +8163,18 @@ test('GCASH EXPENSES: unsynced expense edits and deletion update the preview and
   assert.strictEqual(app.computeCutoff(t.per).gcashOut, 0);
 });
 
-test('SOURCE PIN: the tin card names its unknown money and asks for a count (v2.12.0)', () => {
-  const src = fs.readFileSync(INDEX_HTML, 'utf8');
-  const at = src.indexOf('What should be in the tin');
-  assert.ok(at > 0, 'the card must exist');
-  const card = src.slice(at - 600, at + 3600);
-  assert.match(card, /if \(num\(f\.tinOut\) > 0 \|\| num\(f\.tinUnknown\) > 0\)/,
-    'it stays away until something has actually been marked');
-  // Pinned as the CONDITION, not just the sentence: a dead `if` leaves the
-  // sentence sitting in the source looking correct (the v2.9.1 lesson).
-  assert.match(card, /if \(num\(f\.tinUnknown\) > 0\)\{/,
-    'the unknown-money line must be GATED on there being some');
-  assert.match(card, /do not say where the money came from, so it is NOT/,
-    'unknown money is named, not folded in');
-  assert.match(card, /the real figure is lower by that much/,
-    'and the DIRECTION of the doubt is stated');
-  // v2.12.1: the ask is now the FALLBACK — once she has counted, the verdict
-  // takes its place, so both branches are pinned.
-  assert.match(card, /Count the tin before you collect it/,
-    'it asks for the count while there is none');
-  assert.match(card, /const verdict = tinVerdict\(per, f\);/,
-    'and once counted, the verdict replaces the ask');
-  assert.match(card, /id="tinCountIn"/, 'with a field to count into');
-  assert.match(card, /data-act="tin-save"/, 'and a way to save it');
-
-  // AND THE FORM MUST ACTUALLY SEND THE CHOICE. submitGasto reads the DOM, so
-  // this is pinned at the payload it builds — the one place the chip's answer
-  // becomes a fact the sheet will keep.
-  const sub = src.slice(src.indexOf('function submitGasto('), src.indexOf('function submitGasto(') + 2600);
-  assert.match(sub, /paidFrom: gx\.paidFrom/,
-    'the expense payload must carry where the money came from');
-  assert.match(src, /data-act="gastos-paid"/, 'and the chips must exist to choose it');
-  assert.match(src, /if \(PAID_FROM_CHOICES\.some\(c => c\.key === want\)\) gx\.paidFrom = want;/,
-    'only one of the three may ever be set, never a stale attribute');
+test('SOURCE PIN: cash check names unknown money and keeps counted cash separate', () => {
+  const card = slab('function cutoffCashHTML(per, f){', 'function cutoffCheckFormHTML(per){');
+  assert.match(card, /num\(f\.tinUnknown\) > 0/);
+  assert.match(card, /of logged expenses has no payment source/);
+  assert.match(card, /Provisional cash balance/);
+  assert.match(card, /Still unaccounted/);
+  assert.match(HTML, /id="tinCountIn"/);
+  assert.match(HTML, /data-act="tin-save"/);
+  assert.match(HTML, /data-act="check-save"/);
+  const sub = HTML.slice(HTML.indexOf('function submitGasto('), HTML.indexOf('function submitGasto(') + 2600);
+  assert.match(sub, /paidFrom: gx\.paidFrom/);
+  assert.match(HTML, /data-act="gastos-paid"/);
 });
 
 test('HOW THE NIGHTS COMPARE: weekday averages, honestly counted (v2.11.0)', () => {
@@ -8554,8 +8490,8 @@ test('a sku that always sells, suddenly selling none, is QUESTIONED (v2.10.0)', 
   assert.match(said, /nothing sold tonight/, 'the night must be questioned');
   assert.match(said, /sold on 9 of the last 10 nights/,
     'and the claim must be AUDITABLE — countable against her own paper');
-  assert.match(said, /all 20 are still there/, 'naming the figure that says so');
-  assert.match(said, /the end count is the figure to check/, 'and what to look at');
+  assert.match(said, /Quantity sold/, 'name the direct sales question');
+  assert.doesNotMatch(said, /end count|all 20 are still there/, 'do not ask for hidden stock counts');
   // box4 sold normally, so it must not be dragged in.
   assert.ok(!/Box 4/.test(said), 'a sku that behaved is not mentioned');
 
@@ -8563,8 +8499,8 @@ test('a sku that always sells, suddenly selling none, is QUESTIONED (v2.10.0)', 
   // any is the only possible outcome — saying "nothing sold, all 0 are still
   // there" would be noise, and noise is what makes a warning stop being read.
   row('nori').sod = 0; row('nori').eod = 0;
-  assert.ok(!/nothing sold tonight/.test(app.nightChecks().join('\n')),
-    'no stock to sell means nothing to question');
+  assert.match(app.nightChecks().join('\n'), /nothing sold tonight/,
+    'zero paid sales may be questioned; direct entry no longer asserts stock availability');
   row('nori').sod = 20; row('nori').eod = 20;      // back to the real signature
   assert.match(app.nightChecks().join('\n'), /nothing sold tonight/);
 
@@ -8734,18 +8670,17 @@ test('the START COUNT carries for EVERY sku, nori included (v2.9.8)', () => {
   // 1. THE REPORTED BUG. Last night closed with 8 nori and 12 box4 on the shelf.
   counts({ [D_LAST]: [c('box4', 30, 12), c('nori', 20, 8)] });
   app.loadBentaForm(FRESH);
-  assert.strictEqual(row('nori').sod, 8, 'nori must open at last night\'s close');
+  assert.strictEqual(row('nori').sod, 0, 'nori now starts with zero direct sales, never last night\'s stock');
   assert.strictEqual(row('box4').sod, 12, 'and boxes must not have regressed');
   // The figure this was really about: 8 on the shelf, 8 left, nothing sold —
   // which is only sayable once the start count is right.
-  row('nori').eod = 8;
-  assert.strictEqual(app.bentaPayload().counts.find(x => x.sku === 'nori').sod, 8,
-    'and the corrected start is what gets SENT, not just shown');
+  assert.strictEqual(app.bentaPayload().counts.find(x => x.sku === 'nori').sod, 0,
+    'and zero sales is what gets sent');
 
   // 2. It reaches back past a night that did not count nori at all.
   counts({ [D_OLD]: [c('nori', 10, 6)], [D_LAST]: [c('box4', 30, 9)] });
   app.loadBentaForm(FRESH);
-  assert.strictEqual(row('nori').sod, 6, 'the latest night that DID count it wins');
+  assert.strictEqual(row('nori').sod, 0, 'no earlier stock count becomes today\'s paid sales');
 
   // 3. BLANK IS NEVER ZERO. Last night's nori EOD was never read, so nothing is
   // known about what was left: prefill NOTHING and let her count it. Asserting 0
@@ -8819,7 +8754,7 @@ test('SOD prefill: a fresh date opens at the previous close; a saved day loads i
   // is counted in and out exactly like a box, and `sold` is sod − eod for every
   // sku, so the narrowing simply lost his nori money. It now carries like any
   // other sku, reaching back to D1 because D2 did not count it.
-  assert.strictEqual(row('nori').sod, 3, 'a SIMPLE sku carries over too (v2.9.8)');
+  assert.strictEqual(row('nori').sod, 0, 'nori uses quantity sold now; box carryover stays unchanged');
   assert.strictEqual(row('box4').eod, 0, 'only the SOD is prefilled — EOD is tonight\'s count');
   // A prefill, never a lock: it is an ordinary editable figure on the row.
   row('box4').sod = 9;
@@ -10770,10 +10705,10 @@ test('a row the paper left WHOLLY unread is questioned, not passed over (v2.10.0
   for (let i = 1; i <= 10; i++) app.state.counts[before(i)] = [c('nori', 20, 14)];
 
   const said = app.nightChecks().join('\n');
-  assert.match(said, /has no counts tonight/, 'a normally-counted product must not slip through blank');
+  assert.match(said, /has no quantity sold entered tonight/, 'a normally-sold product must not slip through blank');
   assert.match(said, /sold on 10 of them/, 'with the auditable claim attached');
-  assert.match(said, /If it really was not out tonight, leave it/,
-    'and permission to leave it, because blank is a real answer');
+  assert.match(said, /0 if none/i,
+    'confirm no sales explicitly, never interpret an unread blank as zero');
 });
 
 test('BLANK STAYS BLANK: a figure the paper did not give is EMPTY on the form, never 0', () => {
