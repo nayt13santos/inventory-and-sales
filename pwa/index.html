@@ -621,7 +621,7 @@ details > summary{cursor:pointer;font-weight:700;min-height:44px;}
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.26.0';
+const APP_VERSION = '2.26.1';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -2231,6 +2231,11 @@ function cutoffCheckBasis(per, f){
 function cutoffCashCheck(per, f, check){
   const c = check || cutoffCheckDraft(per), logged = checkLoggedTin(per);
   const issues = [], conflicts = [];
+  // LINE BY LINE (v2.26.1). Owner: "i need to see the cash remaining in the
+  // breakdown, list everything." Every category's cash is kept as its own line
+  // with where the figure came from, so the card can print the arithmetic the
+  // way his paper reads instead of one lumped "paid from tin".
+  const lines = [];
   let paid = 0;
   for (const [key,label] of CHECK_ITEMS){
     const status = asObj(c.statuses)[key] || 'unknown';
@@ -2238,13 +2243,16 @@ function cutoffCashCheck(per, f, check){
     const relevant = checkAllocation(f,key) !== 0 || logged[key] !== 0 || entered > 0;
     if (status === 'unknown' && relevant) issues.push(label + ': payment status not checked');
     if (status === 'pending') {
+      lines.push({ key, label, status, cash:0, source:'pending' });
       if (entered > 0) issues.push(label + ': still to pay conflicts with the entered cash payment');
       if (logged[key] > 0) conflicts.push(label + ': ' + peso(logged[key]) + ' is labelled paid from the tin in Expenses, but marked still to pay here.');
     } else if (entered !== null) {
       paid += entered;
+      lines.push({ key, label, status, cash:entered, source:'confirmed' });
       if (['minor','mama','electric','major'].includes(key) && entered !== logged[key]) conflicts.push(label + ': confirmed tin payment differs from Expenses by ' + peso(Math.abs(entered - logged[key])) + '.');
     } else {
       paid += logged[key];
+      lines.push({ key, label, status, cash:logged[key], source: status === 'unknown' ? 'unknown' : 'expenses' });
       if (relevant) issues.push(label + ': confirm cash actually taken from the tin (0 if paid elsewhere)');
     }
   }
@@ -2258,7 +2266,30 @@ function cutoffCashCheck(per, f, check){
   const comparable = paperSalary === null ? null : r2(num(f.cash) + num(f.excluded) - paperSalary);
   return { expected, paid:r2(paid), counted, difference:counted === null ? null : r2(counted-expected),
     paper, comparable, paperDifference:paper === null || comparable === null ? null : r2(comparable-paper),
+    lines, opening, borrowed,
     issues, conflicts, complete:issues.length === 0 };
+}
+
+/** The cash remaining, worked out line by line (v2.26.1) — the paper's own
+ *  shape: what came in, then every payment out of the tin on its own line with
+ *  where the figure comes from, then what was borrowed, then what should be
+ *  left. Always on screen, never folded away: this is the figure he reconciles
+ *  the tin against, and a lump sum cannot be checked against a paper list. */
+function cashLinesHTML(f, r){
+  const row = (label, value, cls) => '<div class="co-row' + (cls ? ' ' + cls : '') + '"><span>' + label + '</span><span class="v">' + value + '</span></div>';
+  const SOURCE = { confirmed:'', expenses:' (from Expenses)', pending:' (still to pay)', unknown:' (not checked)' };
+  let h = '<div class="pay-intro" style="margin-top:14px;">Cash remaining, line by line</div>' +
+    row('Takoyaki cash received', peso(f.cash)) +
+    row('Nori cash', num(f.excluded) ? '+' + peso(f.excluded) : '—') +
+    row('Cash already in tin at start', r.opening === null ? 'Not checked' : (num(r.opening) ? '+' + peso(r.opening) : '—'));
+  for (const l of asArr(r.lines)){
+    h += row(esc(l.label) + SOURCE[l.source], l.source === 'pending' ? '—' : (num(l.cash) ? '−' + peso(l.cash) : '—'));
+  }
+  h += row('Borrowed this cutoff, not returned', r.borrowed === null ? 'Not checked' : (num(r.borrowed) ? '−' + peso(r.borrowed) : '—')) +
+    '<div class="r-sep" role="presentation"></div>' +
+    row('Cash remaining (expected in tin)', peso(r.expected), 'big') +
+    '<p class="hint">Cash only: GCash and anything still to pay are not in this list. Other money put in or taken out of the tin is not known to the app.</p>';
+  return h;
 }
 
 /** The same figures with a DIFFERENT split, so the residual can follow the field
@@ -7281,12 +7312,10 @@ function cutoffCashHTML(per, f){
       row('App cash less wages already in paper',r.comparable === null ? 'Enter wages' : peso(r.comparable));
     if (r.paperDifference !== null) h += row('App minus paper',peso(r.paperDifference),true);
   }
-  h += '<details class="check-detail"><summary>How the cash balance is worked out</summary>' +
-    '<p class="hint">Cash movement only. GCash and unpaid allocations are kept out. Other deposits or withdrawals are not included—check any such movement separately.</p>' +
-    row('Takoyaki cash received',peso(f.cash)) + row('Nori / separate cash sales',peso(f.excluded)) +
-    row('Cash already in tin at start',checkMoney(c.opening) === null ? 'Not checked' : peso(c.opening)) +
-    row('Actually paid from tin','−' + peso(r.paid)) +
-    row('Borrowed this cutoff, not returned',checkMoney(c.borrowed) === null ? 'Not checked' : '−' + peso(c.borrowed)) + '</details>';
+  // The arithmetic itself, every line of it, in the open (v2.26.1). It used to
+  // sit folded under a summary with every payment lumped into one figure —
+  // unreadable against a paper list.
+  h += '<div class="r-sep" role="presentation"></div>' + cashLinesHTML(f, r);
   if (issues.length || r.conflicts.length) h += '<details class="check-detail"><summary>' +
     (issues.length + r.conflicts.length) + ' checks need attention</summary><ul class="check-issues">' + issues.concat(r.conflicts).map(s => '<li>' + esc(s) + '</li>').join('') + '</ul></details>';
   return h;

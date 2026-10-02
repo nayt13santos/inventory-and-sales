@@ -66,6 +66,37 @@ test('Sept paper and cash reconcile without re-deducting paid wages/minor or pen
   assert.equal(r.conflicts.length,2,'Mama/electric remain inconsistent with Expenses');
   assert.doesNotMatch(a.cutoffCashHTML(per,f),/Cash balances against/);
 });
+test('the cash remaining is listed line by line, in the open, with where each figure came from (v2.26.1)',()=>{
+  // Owner: "i need to see the cash remaining in the breakdown, list everything."
+  const {a,f,c}=fixture(),r=a.cutoffCashCheck(per,f,c);
+  assert.deepEqual(r.lines.map(l=>[l.key,l.cash,l.source]),[
+    ['minor',7276,'confirmed'],['salary',2800,'confirmed'],['mama',0,'pending'],
+    ['electric',0,'pending'],['split',0,'pending'],['major',0,'pending']],
+    'every category on its own line: confirmed figures, and still-to-pay at nothing');
+  assert.equal(r.opening,0); assert.equal(r.borrowed,4620);
+  assert.equal(r.lines.reduce((s,l)=>s+l.cash,0),r.paid,'the lines add up to exactly what the arithmetic subtracts');
+  const h=a.cutoffCashHTML(per,f);
+  assert.match(h,/Cash remaining, line by line/);
+  assert.doesNotMatch(h,/How the cash balance is worked out/,'no longer folded away');
+  assert.doesNotMatch(h,/Actually paid from tin/,'no lump sum');
+  for (const s of ['Takoyaki cash received','Nori cash','Cash already in tin at start','Supplies \\(minor\\)','Salary',
+    'Mama \\(still to pay\\)','Electric bill \\(still to pay\\)','Split \\(still to pay\\)','Supplies \\(major\\) \\(still to pay\\)',
+    'Borrowed this cutoff, not returned','Cash remaining \\(expected in tin\\)']) assert.match(h,new RegExp(s),s);
+  assert.match(h,/−₱4,620/,'borrowed is shown as money leaving');
+  assert.match(h,/Cash remaining \(expected in tin\)<\/span><span class="v">₱10,006/,'and the list ends where the paper does');
+  // Once Mama is marked paid with the cash box left blank, the line carries the
+  // Expenses figure and says so; a status nobody set reads as "not checked".
+  const c2=confirmed(); c2.statuses.mama='paid'; c2.statuses.electric='unknown'; c2.basis=a.cutoffCheckBasis(per,f);
+  const r2=a.cutoffCashCheck(per,f,c2);
+  assert.deepEqual(r2.lines.find(l=>l.key==='mama'),{key:'mama',label:'Mama',status:'paid',cash:500,source:'expenses'});
+  assert.deepEqual(r2.lines.find(l=>l.key==='electric'),{key:'electric',label:'Electric bill',status:'unknown',cash:500,source:'unknown'});
+  assert.equal(r2.expected,9006,'and the cash remaining moves by exactly those lines');
+  a.applyLocalCutoffCheck({...per,entryId:'period',check:c2});
+  const h2=a.cutoffCashHTML(per,f);
+  assert.match(h2,/Mama \(from Expenses\)<\/span><span class="v">−₱500/);
+  assert.match(h2,/Electric bill \(not checked\)<\/span><span class="v">−₱500/);
+  assert.match(h2,/Cash remaining \(expected in tin\)<\/span><span class="v">₱9,006/);
+});
 test('the incorrect Sept18 nori record still surfaces as a 275 difference, never hidden',()=>{
   const {a,f,c}=fixture(); f.excluded=375;
   const r=a.cutoffCashCheck(per,f,c);

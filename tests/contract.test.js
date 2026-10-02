@@ -8169,6 +8169,9 @@ test('SOURCE PIN: cash check names unknown money and keeps counted cash separate
   assert.match(card, /of logged expenses has no payment source/);
   assert.match(card, /Provisional cash balance/);
   assert.match(card, /Still unaccounted/);
+  // v2.26.1: the arithmetic is printed line by line, in the open.
+  assert.match(card, /cashLinesHTML\(f, r\)/, 'the card prints every line of the cash arithmetic');
+  assert.ok(card.indexOf('How the cash balance is worked out') < 0, 'and no longer folds it away');
   assert.match(HTML, /id="tinCountIn"/);
   assert.match(HTML, /data-act="tin-save"/);
   assert.match(HTML, /data-act="check-save"/);
