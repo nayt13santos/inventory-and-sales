@@ -240,7 +240,7 @@ return {
   applyLocalStockDelivery,
   applyLocalCutoffSplit, applyLocalPrices, applyLocalStockItems, applyServerDay, reapplyQueue,
   backlogBalance,
-  loadBentaForm, bentaPayload, computeDay, computeCutoff, buildNote,
+  loadBentaForm, bentaPayload, computeDay, computeCutoff, buildNote, gcashCutoffHTML,
   // The stock ledger the phone computes for itself (never stored) and the two
   // figures the cutoff needs from Settings.
   stockStatusOf, stockStatusList, qtyWithUnit, daySalary, splitFor, dailySalary,
@@ -402,7 +402,7 @@ const CONTRACT = {
   'cutoff':                [['note_text', 'noteText']],
   // excluded_lines is the DISPLAY-ONLY block under the note. It enters no other
   // figure, but the Cutoff screen has to be able to read it.
-  'cutoff.figures':        [['per_partner', 'perPartner'], ['excluded_lines', 'excludedLines']],
+  'cutoff.figures':        [['per_partner', 'perPartner'], ['excluded_lines', 'excludedLines'], ['gcash_out', 'gcashOut'], ['gcash_expected', 'gcashExpected']],
   'bootstrap.lastCutoff':  [['per_partner', 'perPartner'], ['note_text', 'noteText'], ['generated_at', 'generatedAt']],
   // v2.8.0 `costing`. Every one of these is read by the costing screen and by
   // nothing else, so a camelCase slip is silent: costPeso(undefined) prints the
@@ -1181,6 +1181,8 @@ const SHARED_FIGURES = ['total', 'cash', 'gcash', 'mama', 'supplies', 'octopus',
    comparison covered it only as formatted text, which fmt() can round into
    agreement when the raw figures are a centavo apart. */
 const SHARED_FIGURES_MAPPED = [
+  ['gcash_out', 'gcashOut'],
+  ['gcash_expected', 'gcashExpected'],
   ['supplies_used', 'suppliesUsed'],
   ['supplies_minor', 'suppliesMinor'],
   ['backlog_paid', 'backlogPaid'],
@@ -1659,8 +1661,10 @@ test('a custom-order-only day paid entirely by GCash: Cash prints 0, not blank',
   const lines = cut.data.note_text.split('\n');
   assert.strictEqual(lines[2], 'Total - 300');
   assert.strictEqual(lines[4], 'Cash - 0', 'a zero Cash line must print 0, never blank');
-  assert.strictEqual(lines[5], 'GCash - 300');
-  assert.strictEqual(lines[7], 'Mama - ', 'a zero CATEGORY keeps its trailing space');
+  assert.strictEqual(lines[5], 'GCash received - 300');
+  assert.strictEqual(lines[6], 'GCash expenses paid - 0');
+  assert.strictEqual(lines[7], 'GCash left (this cutoff) - 300');
+  assert.strictEqual(lines[9], 'Mama - ', 'a zero CATEGORY keeps its trailing space');
 
   // The phone agrees, from its own local mirror.
   const boot = post(ctx, { token, action: 'bootstrap', payload: {} });
@@ -1671,7 +1675,7 @@ test('a custom-order-only day paid entirely by GCash: Cash prints 0, not blank',
   // The residual is the day's takings minus the entered Split and the wage.
   assert.strictEqual(cut.data.figures.remaining, 300 - 3000 - 200);
   // Index -1 net: v2.15.1 added a line above, v2.20.0 removed two.
-  assert.strictEqual(lines[14], 'Short - 2,900');
+  assert.strictEqual(lines[16], 'Short - 2,900');
 });
 
 test('customGcash may never exceed customAmount, and says so in plain English', () => {
@@ -1704,7 +1708,9 @@ const SPEC_NOTE = [
   'Total - 11,857',
   '',
   'Cash - 10,530',
-  'GCash - 1,327',
+  'GCash received - 1,327',
+  'GCash expenses paid - 0',
+  'GCash left (this cutoff) - 1,327',
   '',
   'Mama - 500',
   'Split - 3,000(1,500 each)',
@@ -1866,18 +1872,18 @@ test('the SERVER note is character-identical to the SPEC sample', () => {
     'every line but the opened value and the residual is the note it always was');
   // Spelled out, so a future edit cannot "tidy" one of these away unnoticed.
   const lines = SP.cutoff.note_text.split('\n');
-  assert.strictEqual(lines.length, 15,
-    'v2.20.0: Octopus and Other payments folded into Supplies (minor), so two fewer');
-  assert.deepStrictEqual([lines[1], lines[3], lines[6], lines[13]], ['', '', '', ''],
+  assert.strictEqual(lines.length, 17,
+    'v2.25.2: received, expenses paid and GCash left are separate');
+  assert.deepStrictEqual([lines[1], lines[3], lines[8], lines[15]], ['', '', '', ''],
     'blank-line placement, including the one before the residual');
-  assert.strictEqual(lines[8], 'Split - 3,000(1,500 each)', 'no space before the bracket');
-  assert.strictEqual(lines[9], 'Supplies (minor) - 5,857',
+  assert.strictEqual(lines[10], 'Split - 3,000(1,500 each)', 'no space before the bracket');
+  assert.strictEqual(lines[11], 'Supplies (minor) - 5,857',
     'EVERYTHING paid on the Expenses screen: 5,440 + 0 octopus + 417 other — the 1,000 backlog payment is not money spent, it is debt settled');
   // Directly beneath the Supplies line it belongs with — the owner's placement.
-  assert.strictEqual(lines[10], 'Supplies used (opened) - 2,940', 'the value OPENED');
-  assert.strictEqual(lines[11], 'Salary - 3,000');
-  assert.strictEqual(lines[12], 'Electric bill - 500');
-  assert.strictEqual(lines[14], 'Short - 3,940',
+  assert.strictEqual(lines[12], 'Supplies used (opened) - 2,940', 'the value OPENED');
+  assert.strictEqual(lines[13], 'Salary - 3,000');
+  assert.strictEqual(lines[14], 'Electric bill - 500');
+  assert.strictEqual(lines[16], 'Short - 3,940',
     'the label carries the sign, never "- -4,940" — and it is 2,940 lower than ' +
     'it was before v2.22.0 deducted the opened stock');
   assert.ok(!/^Octopus - /m.test(SP.cutoff.note_text), 'the folded lines are GONE, not blank');
@@ -5628,8 +5634,10 @@ test('SOURCE PIN: a backlog payment is REPORTED on the card as settled debt (v2.
   const card = src.slice(at, at + 1400);
   assert.match(card, /num\(f\.backlogPaid\) > 0/, 'drawn only when a payment was made');
   assert.match(card, /esc\(peso\(f\.backlogPaid\)\)/, 'with the amount, escaped');
-  assert.match(card, /settled debt, not in the figures above or in the note/,
-    'and it SAYS the payment is outside every figure');
+  assert.match(card, /settled debt, not deducted from Remaining again/,
+    'debt settlement is still outside allocations');
+  assert.match(card, /included in GCash expenses paid/,
+    'but a marked GCash payment does leave that account');
   assert.ok(card.indexOf('backlogInMinor') < 0, 'the overlap warning is gone with the overlap');
   assert.ok(card.indexOf('deducted twice') < 0, 'and so is its sentence — there is no double-count left to name');
 });
@@ -8026,6 +8034,176 @@ test('THE TIN: cash in, less what she took out of it, and what it cannot say (v2
   const app2 = syncedClient(boot.data);
   assert.strictEqual(app2.state.expenses['srv-tin'].paid_from, 'tin', 'and the phone keeps it');
   assert.strictEqual(app2.state.expenses['srv-legacy'].paid_from, '', 'a legacy row stays blank');
+});
+
+// GCash paid expenses reconcile the payment account, not sales or allocations.
+function gcashExpenseFixture(){
+  const srv = loadServer();
+  const date = ymdDaysAgo(2);
+  const per = loadClient().currentPeriod(date);
+  const call = (action, payload) => {
+    const r = post(srv.ctx, { token: srv.token, action, payload });
+    assert.strictEqual(r.ok, true, r.error);
+    return r.data;
+  };
+  call('saveDay', { date, closed: false, staff: 'Mama', customAmount: 6000,
+    customGcash: 5000, counts: [], notes: '', entryId: 'gcash-day' });
+  const spend = (amount, source, id, when = date, category = 'Supplies') => call('saveExpense', {
+    date: when, category, item: 'Payment', amount, paidFrom: source, entryId: id,
+    backlogRef: category === 'Backlog' ? 'Ref' : '', notes: ''
+  });
+  const read = (dryRun = true) => {
+    const served = call('cutoff', { ...per, dryRun });
+    const app = syncedClient(call('bootstrap', {}));
+    const local = app.computeCutoff(per), f = served.figures;
+    assert.strictEqual(local.gcashOut, f.gcash_out, 'phone and sheet agree on GCash paid');
+    assert.strictEqual(local.gcashExpected, f.gcash_expected, 'phone and sheet agree on GCash left');
+    assert.strictEqual(app.buildNote(local, per), served.note_text, 'generated and offline notes agree');
+    return { served, app, local, f };
+  };
+  return { ...srv, date, per, call, spend, read };
+}
+
+test('GCASH EXPENSES: received minus paid is shown, without deducting the expense twice', () => {
+  const t = gcashExpenseFixture();
+  const before = t.read();
+  t.spend(500, 'gcash', 'gc-pay');
+  const { served, local, f } = t.read();
+  assert.strictEqual(f.total, 6000);
+  assert.strictEqual(f.cash, 1000);
+  assert.strictEqual(f.gcash, 5000, 'gross receipts and Total = Cash + GCash are preserved');
+  assert.strictEqual(f.gcash_out, 500);
+  assert.strictEqual(f.gcash_expected, 4500);
+  assert.strictEqual(f.supplies_minor, 500);
+  assert.strictEqual(f.remaining, before.f.remaining - 500, 'one deduction, not two');
+  assert.strictEqual(local.tinExpected, 1000, 'GCash does not leave the cash tin');
+  assert.match(served.note_text, /GCash received - 5,000\nGCash expenses paid - 500\nGCash left \(this cutoff\) - 4,500/);
+  assert.strictEqual(f.total, f.mama + f.split + f.supplies_minor + f.supplies_used + f.salary + f.electric + f.remaining);
+});
+
+test('GCASH EXPENSES: only marked payments within both cutoff boundaries reduce GCash', () => {
+  const t = gcashExpenseFixture();
+  const dates = loadClient();
+  t.spend(100, 'gcash', 'gc-start', t.per.start);
+  t.spend(200, 'gcash', 'gc-end', t.per.end);
+  t.spend(900, 'gcash', 'gc-before', dates.addDays(t.per.start, -1));
+  t.spend(800, 'gcash', 'gc-after', dates.addDays(t.per.end, 1));
+  t.spend(50, 'tin', 'cash-paid');
+  t.spend(60, 'own', 'own-paid');
+  t.spend(70, '', 'unknown-paid');
+  const { local, f } = t.read();
+  assert.strictEqual(f.gcash_out, 300);
+  assert.strictEqual(f.gcash_expected, 4700);
+  assert.strictEqual(local.tinOut, 50);
+  assert.strictEqual(local.tinUnknown, 70, 'unknown payments are never guessed to be GCash');
+});
+
+test('GCASH EXPENSES: all categories debit the account, but backlog stays out of allocations', () => {
+  const t = gcashExpenseFixture();
+  const before = t.read().f;
+  for (const category of ['Supplies', 'Octopus', 'Other', 'Electric', 'Mama', 'Backlog']){
+    t.spend(100, 'gcash', 'gc-' + category, t.date, category);
+  }
+  const { f } = t.read();
+  assert.strictEqual(f.gcash_out, 600);
+  assert.strictEqual(f.gcash_expected, 4400);
+  assert.strictEqual(f.backlog_paid, 100);
+  assert.strictEqual(f.remaining, before.remaining - 500, 'debt is settled, not expensed again');
+});
+
+test('GCASH EXPENSES: editing, replaying and deleting a payment recalculate instead of accumulating', () => {
+  const t = gcashExpenseFixture();
+  t.spend(500, 'gcash', 'gc-edit');
+  t.spend(500, 'gcash', 'gc-edit');
+  assert.strictEqual(t.read().f.gcash_out, 500, 'replay is idempotent');
+  t.spend(200, 'gcash', 'gc-edit');
+  assert.strictEqual(t.read().f.gcash_out, 200, 'an amount edit replaces the old value');
+  t.spend(200, 'own', 'gc-edit');
+  assert.strictEqual(t.read().f.gcash_out, 0, 'changing payment source restores GCash');
+  t.spend(300, 'gcash', 'gc-edit');
+  t.call('deleteExpense', { entryId: 'gc-edit' });
+  assert.strictEqual(t.read().f.gcash_expected, 5000);
+});
+
+test('GCASH EXPENSES: transfers already in receipts are applied once, including cash-outs', () => {
+  const t = gcashExpenseFixture();
+  t.spend(500, 'gcash', 'gc-transfer-pay');
+  for (const transfer of [600, -600]){
+    t.call('saveDay', { date: t.date, closed: false, staff: 'Mama', customAmount: 6000,
+      customGcash: 5000, gcashConverted: transfer, counts: [], notes: '', entryId: 'gcash-day' });
+    const { f } = t.read();
+    assert.strictEqual(f.gcash, 5000 + transfer);
+    assert.strictEqual(f.gcash_expected, 4500 + transfer);
+    assert.strictEqual(f.cash + f.gcash, f.total);
+  }
+});
+
+test('GCASH EXPENSES: centavos, zero and negative balances stay honest', () => {
+  const t = gcashExpenseFixture();
+  let result = t.read();
+  assert.strictEqual(result.f.gcash_out, 0);
+  assert.match(result.served.note_text, /GCash expenses paid - 0/);
+  t.spend(4999.7, 'gcash', 'gc-large');
+  t.spend(0.1, 'gcash', 'gc-small1');
+  t.spend(0.2, 'gcash', 'gc-small2');
+  result = t.read();
+  assert.strictEqual(result.f.gcash_expected, 0);
+  t.spend(12.34, 'gcash', 'gc-extra');
+  result = t.read();
+  assert.strictEqual(result.f.gcash_expected, -12.34, 'do not clamp a short cutoff to zero');
+  assert.match(result.served.note_text, /GCash short \(this cutoff\) - 12.34/);
+  assert.ok(!result.served.note_text.includes('- -'));
+});
+
+test('GCASH EXPENSES: generated and regenerated archives keep the reconciliation in the note', () => {
+  const t = gcashExpenseFixture();
+  t.spend(500, 'gcash', 'gc-archive');
+  let result = t.read(false);
+  assert.strictEqual(t.call('bootstrap', {}).lastCutoff.note_text, result.served.note_text);
+  t.spend(750, 'gcash', 'gc-archive');
+  result = t.read(false);
+  const archived = t.call('bootstrap', {}).lastCutoff;
+  assert.strictEqual(archived.note_text, result.served.note_text);
+  assert.match(archived.note_text, /GCash left \(this cutoff\) - 4,250/);
+  assert.strictEqual(archived.gcash, 5000, 'the archive column remains gross receipts');
+});
+
+test('GCASH EXPENSES: the cutoff screen shows the same breakdown, with scope and unknown-source caveats', () => {
+  const t = gcashExpenseFixture();
+  t.spend(500, 'gcash', 'gc-screen');
+  t.spend(90, '', 'unknown-screen');
+  const { app, local } = t.read();
+  const html = app.gcashCutoffHTML(local);
+  assert.match(html, /GCash received<\/span><span class="v">₱5,000/);
+  assert.match(html, /GCash expenses paid<\/span><span class="v">−₱500/);
+  assert.match(html, /GCash left \(this cutoff\)<\/span><span class="v">₱4,500/);
+  assert.match(html, /not your full wallet balance/);
+  assert.match(html, /After cash\/GCash transfers/);
+  assert.match(html, /₱90 of payments have no source recorded/);
+  assert.match(html, /not deducted from Remaining again/);
+  assert.match(app.gcashCutoffHTML({ ...local, gcashExpected: -100 }), /GCash short \(this cutoff\).*₱100/);
+  assert.ok(!app.gcashCutoffHTML({ ...local, tinUnknown: 0 }).includes('no source recorded'));
+  const src = fs.readFileSync(INDEX_HTML, 'utf8');
+  const render = src.slice(src.indexOf('function renderCutoff(){'), src.indexOf('function stockCutoffHTML(per){'));
+  assert.match(render, /gcashCutoffHTML\(f\)/, 'the tested breakdown is actually rendered');
+});
+
+test('GCASH EXPENSES: unsynced expense edits and deletion update the preview and invalidate old notes', () => {
+  const t = gcashExpenseFixture();
+  const { app } = t.read();
+  const p = { date: t.date, category: 'Supplies', item: 'Offline payment', amount: 500,
+    paidFrom: 'gcash', entryId: 'gc-local', backlogRef: '', notes: '' };
+  app.lastNote = { key: app.periodKey(t.per), text: 'Old note' };
+  app.applyLocalExpense(p);
+  assert.strictEqual(app.lastNote, null);
+  assert.strictEqual(app.computeCutoff(t.per).gcashExpected, 4500);
+  app.applyLocalExpense({ ...p, amount: 250 });
+  assert.strictEqual(app.computeCutoff(t.per).gcashExpected, 4750);
+  app.applyLocalExpense({ ...p, paidFrom: 'tin' });
+  assert.strictEqual(app.computeCutoff(t.per).gcashExpected, 5000);
+  app.applyLocalExpense(p);
+  app.applyLocalDeleteExpense({ entryId: p.entryId });
+  assert.strictEqual(app.computeCutoff(t.per).gcashOut, 0);
 });
 
 test('SOURCE PIN: the tin card names its unknown money and asks for a count (v2.12.0)', () => {

@@ -610,7 +610,7 @@ select.input{ appearance:auto; }
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.25.1';
+const APP_VERSION = '2.25.2';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -2088,14 +2088,20 @@ function computeCutoff(per){
   }
   usedList.sort((a, b) => (b.cost || 0) - (a.cost || 0) || b.qty - a.qty);
 
-  let tinOut = 0, unknownOut = 0;
+  let tinOut = 0, gcashOut = 0, unknownOut = 0;
   for (const id in exps){
     const e = asObj(exps[id]);
     if (!inPeriod(e.date, per)) continue;
     const from = txt(e.paid_from);
     if (from === 'tin') tinOut += num(e.amount);
+    else if (from === 'gcash') gcashOut += num(e.amount);
     else if (from === '') unknownOut += num(e.amount);
   }
+  // Account reconciliation only. Receipts already include signed transfers;
+  // payments (including debt settlements) leave GCash, but must never reduce
+  // sales or be deducted from the allocations/Remaining a second time.
+  gcashOut = r2(gcashOut);
+  const gcashExpected = r2(gcash - gcashOut);
   const supplies = r2(b.Supplies);
   // Backlog payments are OUT of every allocation since v2.23.0 (see Code.gs):
   // the stock they bought is deducted the night it is opened, so counting the
@@ -2132,7 +2138,7 @@ function computeCutoff(per){
   // partner does not change by a single byte.
   const x = excludedForPeriod(per);
   return {
-    total, cash, gcash, daysWithSales, openDays,
+    total, cash, gcash, gcashOut, gcashExpected, daysWithSales, openDays,
     mama, supplies, octopus, electric, other, salary,
     /* SUPPLIES (MINOR): everything entered on the Expenses screen, in ONE figure
        (v2.20.0). Owner, after his ₱3,957 of daily buying landed under "Other"
@@ -2234,6 +2240,7 @@ function buildNote(f, per){
   const residual = remaining < 0
     ? 'Short - ' + fmt(-remaining)
     : 'Remaining - ' + fmt(remaining);
+  const gcashLeft = r2(num(f.gcash) - num(f.gcashOut));
   return [
     branch + ': ' + notePeriodLabel(per) + ' Breakdown',
     '',
@@ -2244,7 +2251,9 @@ function buildNote(f, per){
     'Total - ' + fmt(f.total),
     '',
     'Cash - ' + fmt(f.cash),
-    'GCash - ' + fmt(f.gcash),
+    'GCash received - ' + fmt(f.gcash),
+    'GCash expenses paid - ' + fmt(num(f.gcashOut)),
+    (gcashLeft < 0 ? 'GCash short (this cutoff) - ' : 'GCash left (this cutoff) - ') + fmt(Math.abs(gcashLeft)),
     '',
     'Mama - ' + noteVal(f.mama),
     'Split - ' + (num(f.split) !== 0 ? fmt(f.split) + '(' + fmt(f.perPartner) + ' each)' : ''),
@@ -2263,6 +2272,20 @@ function buildNote(f, per){
     '',
     residual
   ].join('\n');
+}
+
+/** Same three figures as the note. This is the cutoff's movement, not the
+ *  full wallet balance: no opening wallet balance is recorded by this app. */
+function gcashCutoffHTML(f){
+  const left = num(f.gcashExpected);
+  return '<div class="co-row gcash"><span>GCash received</span><span class="v">' + peso(f.gcash) + '</span></div>' +
+    '<div class="co-row gcash"><span>GCash expenses paid</span><span class="v">−' + peso(f.gcashOut) + '</span></div>' +
+    '<div class="co-row gcash"><span>GCash ' + (left < 0 ? 'short' : 'left') +
+      ' (this cutoff)</span><span class="v">' + peso(Math.abs(left)) + '</span></div>' +
+    '<p class="hint" style="margin-top:6px;">After cash/GCash transfers. This cutoff only, not your full wallet balance. ' +
+      'These payments are not deducted from Remaining again.</p>' +
+    (num(f.tinUnknown) > 0 ? '<p class="hint" style="margin-top:6px;">' + esc(peso(f.tinUnknown)) +
+      ' of payments have no source recorded. Any paid via GCash are not deducted here.</p>' : '');
 }
 
 /** The supplies-OPENED figure, from either side's casing. The formatter below
@@ -7209,7 +7232,7 @@ function renderCutoff(){
       ' · ' + f.openDays + (f.openDays === 1 ? ' day open' : ' days open') + '</div>' +
     '<div class="r-sep" role="presentation"></div>' +
     '<div class="co-row"><span>Cash</span><span class="v">' + peso(f.cash) + '</span></div>' +
-    '<div class="co-row gcash"><span>GCash</span><span class="v">' + peso(f.gcash) + '</span></div>' +
+    gcashCutoffHTML(f) +
     '<div class="r-sep" role="presentation"></div>' +
     '<div class="co-row"><span>Mama</span><span class="v">' + peso(f.mama) + '</span></div>' +
     '<div class="co-row"><span>Split</span><span class="v" id="coSplit">' + peso(live.split) + '</span></div>' +
@@ -7228,7 +7251,8 @@ function renderCutoff(){
     // were made, so money that left the tin is never simply absent.
     (num(f.backlogPaid) > 0
       ? '<p class="hint" style="margin:2px 0 6px 14px;">' +
-        esc(peso(f.backlogPaid)) + ' paid on backlogs this cutoff — settled debt, not in the figures above or in the note.</p>'
+        esc(peso(f.backlogPaid)) + ' paid on backlogs this cutoff — settled debt, not deducted from Remaining again. ' +
+        'If marked paid via GCash, it is included in GCash expenses paid.</p>'
       : '') +
     // Octopus and Other payments are inside Supplies (minor) now (v2.20.0), so
     // they are not shown again here — the column has to add up.

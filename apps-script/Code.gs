@@ -282,7 +282,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.25.0';
+var VERSION = '2.25.2';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -2044,6 +2044,15 @@ function apiCutoff(ss, settings, payload, dryRun) {
   salary = round2(salary);
   var cash = round2(total - gcash);
 
+  // Reconcile GCash separately from sales and allocations (v2.25.2).
+  // gcash already contains cash/GCash transfers. Only explicitly marked
+  // payments leave this account; unknown and personal-money rows never do.
+  // Include debt payments here too, without expensing those debts again.
+  var gcashOut = round2(expenses.reduce(function (sum, x) {
+    return sum + (x.paid_from === 'gcash' ? x.amount : 0);
+  }, 0));
+  var gcashExpected = round2(gcash - gcashOut);
+
   var mama = 0, supplies = 0, octopus = 0, electric = 0, other = 0, backlogPaid = 0;
   expenses.forEach(function (x) {
     switch (x.category) {
@@ -2224,6 +2233,7 @@ function apiCutoff(ss, settings, payload, dryRun) {
   var figures = {
     start: start, end: end,
     total: total, cash: cash, gcash: gcash,
+    gcash_out: gcashOut, gcash_expected: gcashExpected,
     mama: mama, split: split, per_partner: perPartner,
     supplies: supplies, octopus: octopus, salary: salary,
     other: other, electric: electric, remaining: remaining,
@@ -2267,7 +2277,8 @@ function apiCutoff(ss, settings, payload, dryRun) {
     // The archive keeps the columns SPEC defines for it. Salary and Remaining
     // are not columns of their own: the archived note_text carries them
     // verbatim, and both are recomputed from DailyLog + Expenses + CutoffInputs
-    // whenever the period is asked for again.
+    // whenever the period is asked for again. The GCash reconciliation follows
+    // the same rule; the existing gcash column remains receipts, not net money.
     var obj = {
       start: start, end: end, total: total, cash: cash, gcash: gcash,
       mama: mama, split: split, per_partner: perPartner, supplies: supplies,
@@ -2902,13 +2913,16 @@ function buildNoteText(branch, start, end, f) {
   var residual = (f.remaining < 0)
     ? 'Short - ' + fmtAmt(-f.remaining)
     : 'Remaining - ' + fmtAmt(f.remaining);
+  var gcashLeft = round2(asNum(f.gcash) - asNum(f.gcash_out));
   return [
     branch + ': ' + periodLabel(start, end) + ' Breakdown',
     '',
     'Total - ' + fmtAmt(f.total),
     '',
     'Cash - ' + fmtAmt(f.cash),
-    'GCash - ' + fmtAmt(f.gcash),
+    'GCash received - ' + fmtAmt(f.gcash),
+    'GCash expenses paid - ' + fmtAmt(asNum(f.gcash_out)),
+    (gcashLeft < 0 ? 'GCash short (this cutoff) - ' : 'GCash left (this cutoff) - ') + fmtAmt(Math.abs(gcashLeft)),
     '',
     'Mama - ' + orBlank(f.mama),
     'Split - ' + splitVal,

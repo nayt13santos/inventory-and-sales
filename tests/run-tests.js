@@ -88,7 +88,9 @@ const SPEC_NOTE = [
   'Total - 11,857',
   '',
   'Cash - 10,530',
-  'GCash - 1,327',
+  'GCash received - 1,327',
+  'GCash expenses paid - 0',
+  'GCash left (this cutoff) - 1,327',
   '',
   'Mama - 500',
   'Split - 3,000(1,500 each)',
@@ -149,18 +151,18 @@ test('buildNoteText reproduces the spec sample EXACTLY', () => {
   assert.strictEqual(note, SPEC_NOTE);
   // Spelled out so a future edit cannot quietly "tidy" one of these away.
   const lines = note.split('\n');
-  assert.strictEqual(lines.length, 15,
-    'v2.20.0: Octopus and Other payments folded into Supplies (minor), so two fewer');
-  assert.deepStrictEqual([lines[1], lines[3], lines[6], lines[13]], ['', '', '', ''],
+  assert.strictEqual(lines.length, 17,
+    'v2.25.2: received, expenses paid and GCash left are separate');
+  assert.deepStrictEqual([lines[1], lines[3], lines[8], lines[15]], ['', '', '', ''],
     'blank-line placement, including the one before the residual');
-  assert.strictEqual(lines[8], 'Split - 3,000(1,500 each)', 'no space before the bracket');
-  assert.strictEqual(lines[9], 'Supplies (minor) - 5,857',
+  assert.strictEqual(lines[10], 'Split - 3,000(1,500 each)', 'no space before the bracket');
+  assert.strictEqual(lines[11], 'Supplies (minor) - 5,857',
     'EVERYTHING paid on the Expenses screen: 5,440 supplies + 0 octopus + 1,417 other');
-  assert.strictEqual(lines[10], 'Supplies used (opened) - ',
+  assert.strictEqual(lines[12], 'Supplies used (opened) - ',
     'the value OPENED sits directly beneath it, blank like any empty category');
-  assert.strictEqual(lines[11], 'Salary - 3,000');
-  assert.strictEqual(lines[12], 'Electric bill - 500');
-  assert.strictEqual(lines[14], 'Short - 1,000', 'the LABEL carries the sign');
+  assert.strictEqual(lines[13], 'Salary - 3,000');
+  assert.strictEqual(lines[14], 'Electric bill - 500');
+  assert.strictEqual(lines[16], 'Short - 1,000', 'the LABEL carries the sign');
   // THE TWO FOLDED LINES ARE GONE, not merely blank — printing them beside the
   // merged figure would show the same money twice.
   assert.ok(!/^Octopus - /m.test(note), 'no Octopus line');
@@ -266,12 +268,14 @@ test('a zero Salary blanks like the other categories, and never blanks Total', (
   const note = ctx.buildNoteText('Tañong', '2025-07-01', '2025-07-15',
     Object.assign({}, SPEC_FIGURES, { salary: 0, total: 0, cash: 0, gcash: 0, remaining: 0 }));
   const lines = note.split('\n');
-  // Indices moved again in v2.20.0: Octopus and Other payments folded away.
-  assert.strictEqual(lines[11], 'Salary - ', 'a zero Salary keeps the line and blanks the value');
+  // v2.25.2 adds the GCash paid/left reconciliation above the allocations.
+  assert.strictEqual(lines[13], 'Salary - ', 'a zero Salary keeps the line and blanks the value');
   assert.strictEqual(lines[2], 'Total - 0');
   assert.strictEqual(lines[4], 'Cash - 0');
-  assert.strictEqual(lines[5], 'GCash - 0');
-  assert.strictEqual(lines[14], 'Remaining - 0');
+  assert.strictEqual(lines[5], 'GCash received - 0');
+  assert.strictEqual(lines[6], 'GCash expenses paid - 0');
+  assert.strictEqual(lines[7], 'GCash left (this cutoff) - 0');
+  assert.strictEqual(lines[16], 'Remaining - 0');
 });
 
 test('periodLabel spans months: "July 30 - August 2"', () => {
@@ -920,8 +924,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.25.0', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.25.0');
+  assert.strictEqual(g.data.version, '2.25.2', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.25.2');
 });
 
 // ---------------------------------------------------------------------------
@@ -3124,7 +3128,7 @@ test('the cutoff shows nori as excluded and in NOTHING else, and the identity cl
   // (4) The note names no excluded sku and gains no line of its own: the only
   // line added since is v2.15.1's supplies-used, which the owner asked for.
   assert.ok(!/nori/i.test(withNori.note_text), 'nori must not be named in the note');
-  assert.strictEqual(withNori.note_text.split('\n').length, 15,
+  assert.strictEqual(withNori.note_text.split('\n').length, 17,
     'no "Excluded" line was added to the note');
 });
 
@@ -3977,7 +3981,7 @@ test('branch strips CR/LF on both paths, and a null body gets the friendly error
   const cut = cutoffFor(ctx, token, '2026-07-16', '2026-07-31');
   assert.strictEqual(cut.ok, true, cut.error);
   assert.match(cut.data.note_text, /^Tañong Main: /, 'the note heading stays ONE line');
-  assert.strictEqual(cut.data.note_text.split('\n').length, 15, 'and the line structure is intact');
+  assert.strictEqual(cut.data.note_text.split('\n').length, 17, 'and the line structure is intact');
   assert.strictEqual(post(ctx, { token, action: 'bootstrap', payload: {} }).data.settings.branch,
     'Tañong Main', 'the phone previews with the same cleaned branch');
 
