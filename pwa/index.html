@@ -621,7 +621,7 @@ details > summary{cursor:pointer;font-weight:700;min-height:44px;}
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.27.0';
+const APP_VERSION = '2.28.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -988,7 +988,11 @@ function normCutoffInput(r){
   if (!isObj(r) || !isDateStr(r.start) || !isDateStr(r.end)) return null;
   return {
     start: txt(r.start), end: txt(r.end),
-    split_amount: num(pick(r, 'split_amount', 'splitAmount')),
+    // RAW since v2.28.0: a row written by a tin count or a checklist alone has
+    // NO split, and coercing that blank to 0 made the Split read ₱0 — "Split - "
+    // on the note — on every such cutoff (found by the v2.26.0 review). Blank
+    // means "not entered"; splitFor falls back to the usual amount.
+    split_amount: rawNum(pick(r, 'split_amount', 'splitAmount')),
     // What the tin actually held (v2.12.1). RAW on purpose: a blank means nobody
     // has counted this cutoff, and coercing it to 0 would report a shortage of
     // the whole tin on every cutoff nobody has got round to counting.
@@ -1961,7 +1965,9 @@ function excludedForPeriod(per){
         agg[sku] = { qty:0, amount:0 };
         if (!asArr(state.prices).some(p => isObj(p) && txt(p.sku) === sku)) orphans.push(sku);
       }
-      agg[sku].qty += num(c.sold);
+      // PAID units (v2.28.0): `sold` keeps what left the tray, but the block's
+      // quantity must multiply out to its money, so a give-away is not counted.
+      agg[sku].qty += num(c.sold) - num(c.free_qty);
       agg[sku].amount += num(c.amount);
     }
   }
@@ -2198,7 +2204,7 @@ function cutoffCheckSaved(per){
     out.statuses[key] = Object.prototype.hasOwnProperty.call(CHECK_STATUS, asObj(c.statuses)[key]) ? c.statuses[key] : 'unknown';
     out.tin[key] = checkMoney(asObj(c.tin)[key]) ?? '';
   }
-  for (const key of ['opening','borrowed','paper','paperSalary']) out[key] = checkMoney(c[key]) ?? '';
+  for (const key of ['opening','paper','paperSalary']) out[key] = checkMoney(c[key]) ?? '';
   return out;
 }
 function cutoffCheckDraft(per){ return checkEdits[periodKey(per)] || cutoffCheckSaved(per); }
@@ -2222,11 +2228,28 @@ function checkLoggedTin(per){
 function cutoffCheckBasis(per, f){
   // A changed source total invalidates the old confirmation. No transaction
   // text or private notes are copied into this comparison fingerprint.
-  return JSON.stringify([f.total, f.cash, f.gcash, f.excluded, f.salary, f.split, f.mama,
+  const s = JSON.stringify([f.total, f.cash, f.gcash, f.excluded, f.salary, f.split, f.mama,
     f.electric, noteMinorVal(f), noteUsedFig(f), f.backlogPaid, f.tinOut, f.tinUnknown,
     Object.entries(asObj(state.days)).filter(([d]) => inPeriod(d,per)).sort().map(([d,r]) => [d,r.total,r.gcash,r.salary,r.excluded_total]),
     Object.values(asObj(state.expenses)).filter(e => isObj(e) && inPeriod(e.date,per))
       .map(e => [e.entry_id,e.date,e.category,e.amount,e.paid_from]).sort()]);
+  return basisDigest(s);
+}
+/** The fingerprint, DIGESTED (v2.28.0). The raw list grew by one line per
+ *  expense and the server caps the field at 20,000 characters — a fortnight of
+ *  ~260 purchases would have been refused on every replay with no way out from
+ *  the phone (v2.26.0 review). Two 32-bit multiply-xor lanes over the string —
+ *  FNV-1a, and a second lane on MurmurHash2's constants: the comparison in
+ *  cutoffCashCheck is equality, which a digest serves exactly as well. A checklist saved with the old raw string reads as changed once, and
+ *  is right again the moment it is re-saved. */
+function basisDigest(s){
+  let a = 0x811c9dc5, b = 0x9747b28c;
+  for (let i = 0; i < s.length; i++){
+    const ch = s.charCodeAt(i);
+    a = Math.imul(a ^ ch, 0x01000193) >>> 0;
+    b = Math.imul(b ^ ch, 0x5bd1e995) >>> 0;
+  }
+  return 'v2:' + a.toString(16).padStart(8, '0') + b.toString(16).padStart(8, '0') + ':' + s.length.toString(16);
 }
 function cutoffCashCheck(per, f, check){
   const c = check || cutoffCheckDraft(per), logged = checkLoggedTin(per);
@@ -2256,37 +2279,43 @@ function cutoffCashCheck(per, f, check){
       if (relevant) issues.push(label + ': confirm cash actually taken from the tin (0 if paid elsewhere)');
     }
   }
-  const opening = checkMoney(c.opening), borrowed = checkMoney(c.borrowed);
+  const opening = checkMoney(c.opening);
   if (opening === null) issues.push('Opening cash not checked');
-  if (borrowed === null) issues.push('Outstanding borrowing not checked');
+  // BORROWING IS GONE (v2.28.0). Owner: "lets not input borrowed anymore, its
+  // paid every cutoff anyway", then "not optional, remove it at all" — a loan
+  // from the tin is back before the count, so the tin is compared whole. A
+  // figure an older checklist saved under that key is ignored, not subtracted.
   if (c.basis && c.basis !== cutoffCheckBasis(per,f)) issues.push('Source figures changed since the checklist was saved; review it again');
-  const expected = r2(num(opening) + num(f.cash) + num(f.excluded) - paid - num(borrowed));
+  const expected = r2(num(opening) + num(f.cash) + num(f.excluded) - paid);
   const counted = tinCountFor(per,f).counted;
   const paper = checkMoney(c.paper), paperSalary = checkMoney(c.paperSalary);
   const comparable = paperSalary === null ? null : r2(num(f.cash) + num(f.excluded) - paperSalary);
   return { expected, paid:r2(paid), counted, difference:counted === null ? null : r2(counted-expected),
     paper, comparable, paperDifference:paper === null || comparable === null ? null : r2(comparable-paper),
-    lines, opening, borrowed,
+    lines, opening,
     issues, conflicts, complete:issues.length === 0 };
 }
 
 /** The cash remaining, worked out line by line (v2.26.1) — the paper's own
  *  shape: what came in, then every payment out of the tin on its own line with
- *  where the figure comes from, then what was borrowed, then what should be
- *  left. Always on screen, never folded away: this is the figure he reconciles
+ *  where the figure comes from, then what should be left (the borrowed line
+ *  left in v2.28.0). Always on screen, never folded away: this is the figure he reconciles
  *  the tin against, and a lump sum cannot be checked against a paper list. */
 function cashLinesHTML(f, r){
   const row = (label, value, cls) => '<div class="co-row' + (cls ? ' ' + cls : '') + '"><span>' + label + '</span><span class="v">' + value + '</span></div>';
   const SOURCE = { confirmed:'', expenses:' (from Expenses)', pending:' (still to pay)', unknown:' (not checked)' };
+  // The kept-out skus by name (nori today), never a hard-coded sku: the ones
+  // that sold this cutoff, else every sku the price list keeps out.
+  let keptOut = asArr(f.excludedLines).map(l => txt(asObj(l).label)).filter(Boolean);
+  if (!keptOut.length) keptOut = asArr(state.prices).filter(p => isObj(p) && !inCutoffFlag(p.in_cutoff)).map(p => txt(p.label)).filter(Boolean);
   let h = '<div class="pay-intro" style="margin-top:14px;">Cash remaining, line by line</div>' +
     row('Takoyaki cash received', peso(f.cash)) +
-    row('Nori cash', num(f.excluded) ? '+' + peso(f.excluded) : '—') +
+    row((keptOut.length ? esc(keptOut.join(', ')) : 'Kept-out') + ' cash', num(f.excluded) ? '+' + peso(f.excluded) : '—') +
     row('Cash already in tin at start', r.opening === null ? 'Not checked' : (num(r.opening) ? '+' + peso(r.opening) : '—'));
   for (const l of asArr(r.lines)){
     h += row(esc(l.label) + SOURCE[l.source], l.source === 'pending' ? '—' : (num(l.cash) ? '−' + peso(l.cash) : '—'));
   }
-  h += row('Borrowed this cutoff, not returned', r.borrowed === null ? 'Not checked' : (num(r.borrowed) ? '−' + peso(r.borrowed) : '—')) +
-    '<div class="r-sep" role="presentation"></div>' +
+  h += '<div class="r-sep" role="presentation"></div>' +
     row('Cash remaining (expected in tin)', peso(r.expected), 'big') +
     '<p class="hint">Cash only: GCash and anything still to pay are not in this list. Other money put in or taken out of the tin is not known to the app.</p>';
   return h;
@@ -3457,6 +3486,25 @@ function applyLocalCutoffSplit(p){
   invalidateNoteFor(per.start);
 }
 
+/** The split the sheet RECORDED when a note was generated, mirrored here
+ *  (v2.28.0). The server stamps the split it used onto the period's row when
+ *  none was entered (v2.5.0; since v2.28.0 also onto a row a tin count or a
+ *  checklist created with a blank split). This phone has no archive to read,
+ *  so without the mirror it would show the Settings default for that period
+ *  until its next bootstrap, while the sheet holds the recorded figure. Not
+ *  queued: the sheet already has it. An entered split is never touched. */
+function mirrorRecordedSplit(per, data){
+  ensureShape();
+  const fig = asObj(asObj(data).figures), split = Number(fig.split);
+  if (!isDateStr(txt(per.start)) || !isDateStr(txt(per.end)) || !Number.isFinite(split) || split < 0) return;
+  const key = periodKey(per), was = asObj(asObj(state.cutoffInputs)[key]);
+  if (was.split_amount !== '' && was.split_amount != null) return;
+  state.cutoffInputs[key] = Object.assign({}, was, {
+    start:txt(per.start), end:txt(per.end), split_amount:r2(split),
+    entry_id:txt(was.entry_id), updated_at:new Date().toISOString()
+  });
+}
+
 /** What the tin actually held, for one cutoff. Shares CutoffInputs with the
  *  split and touches only its own field — same rule, opposite direction. */
 function applyLocalCutoffCheck(p){
@@ -3465,10 +3513,12 @@ function applyLocalCutoffCheck(p){
   if (!isDateStr(per.start) || !isDateStr(per.end)) return;
   const key = periodKey(per);
   const was = asObj(state.cutoffInputs[key]);
+  // No split is invented here (v2.28.0): a checklist that is the first input
+  // for a cutoff leaves split_amount absent, which splitFor reads as "not
+  // entered" — the usual amount, or the archived one on the server. Writing
+  // today's default restated an archived note's Split (v2.26.0 review).
   state.cutoffInputs[key] = Object.assign({}, was, {
     start:per.start, end:per.end,
-    // Preserve the usual split when a checklist is the first input this cutoff.
-    split_amount: was.split_amount == null ? splitDefault() : was.split_amount,
     reconciliation_json:JSON.stringify(p.check), entry_id:txt(p.entryId), updated_at:new Date().toISOString()
   });
 }
@@ -5878,7 +5928,11 @@ function updateReceipt(){
     if (xl.length){
       h += '<div class="r-excl">';
       for (const l of xl){
-        h += '<div class="r-sub excl"><span>' + esc(l.label + ' ×' + l.sold) + ' — not in the total</span>' +
+        // ×sold with the give-away named, exactly as the in-cutoff lines do
+        // (v2.28.0): "Nori ×8, less 2 given away or ruined … ₱150" multiplies
+        // out; "Nori ×8 ₱150" did not, and disagreed with the 6 she typed.
+        h += '<div class="r-sub excl"><span>' + esc(l.label + ' ×' + l.sold +
+          (num(l.free_qty) > 0 ? ', less ' + num(l.free_qty) + ' given away or ruined' : '')) + ' — not in the total</span>' +
           '<span class="r-amt">' + peso(l.amount) + '</span></div>';
       }
       const what = xl.length === 1 ? txt(xl[0].label) : 'kept out';
@@ -6243,7 +6297,10 @@ function validateBenta(){
       errs[freeKey] = label + ': given away or ruined must be a whole number (got "' + txt(r.free) + '").';
     } else if (fq < 0){
       errs[freeKey] = label + ': given away or ruined cannot be negative.';
-    } else if (fq > Math.max(0, sold) - customQty){
+    } else if (!(noriUsesSoldField(r.sku) && (isBlankVal(noriSoldVal(r)) || !Number.isFinite(Number(r.sod)))) &&
+               fq > Math.max(0, sold) - customQty){
+      // (Nori with its paid quantity still blank is refused in the sku slot —
+      // "enter the quantity sold" — not blamed here for a tray it has not got.)
       errs[freeKey] = label + ': ' + fq + ' given away or ruined, but only ' +
         (Math.max(0, sold) - customQty) + ' left the tray' +
         (customQty > 0 ? ' after the special order took ' + customQty : '') +
@@ -7329,7 +7386,7 @@ function cutoffCheckFormHTML(per){
   const input = (id,label,value,hint) => '<div class="field"><label for="check-' + id + '">' + label + '</label>' +
     '<input class="input money" id="check-' + id + '" data-check-money="' + id + '" inputmode="decimal" autocomplete="off" placeholder="Not checked" value="' + esc(value) + '">' +
     (hint ? '<p class="hint">' + hint + '</p>' : '') + '</div>';
-  // Rendered INSIDE the cash box's "Change what was paid or borrowed" fold
+  // Rendered INSIDE the cash box's "Change what was paid" fold
   // (v2.27.0) — the caller wraps it; this is the form alone.
   let h = '<p class="hint" style="margin:12px 0;">For each line: has it been paid, and how much cash actually left the tin? Payments already in Expenses count once — do not add them again. 0 if paid some other way.</p>';
   for (const [key,label] of CHECK_ITEMS){
@@ -7340,7 +7397,6 @@ function cutoffCheckFormHTML(per){
         'Expenses currently label ' + esc(peso(logged[key])) + ' as taken from the tin.' + (key === 'major' ? ' Include supplier/backlog cash payments once, not the value of stock opened.' : '')) + '</div>';
   }
   h += input('opening','Cash already in tin at start (₱)',c.opening,'Enter 0 if the tin was empty at the last cutoff.') +
-    input('borrowed','Borrowed this cutoff and still unpaid (₱)',c.borrowed,'Only loans taken from this cutoff’s tin, not older borrowing or amounts included in the payments above. Enter 0 if none.') +
     input('paper','Paper cash-sales total (₱, optional)',c.paper,'Include nori; exclude GCash.') +
     input('paperSalary','Wages already subtracted in that paper total (₱)',c.paperSalary,'For example, six days at ₱200 = ₱1,200. This is only for comparing sales—not another cash deduction.') +
     '<p class="err" id="err-check" hidden></p><button type="button" class="btn block" data-act="check-save">Save this cutoff checklist</button>' +
@@ -7371,7 +7427,7 @@ function saveCutoffCheck(){
       check.tin[key] = read(c.tin[key],label);
       if (c.statuses[key] === 'pending' && check.tin[key] > 0) throw new Error(label + ' is still to pay but has cash paid. Choose Partly paid or clear the cash amount.');
     }
-    for (const key of ['opening','borrowed','paper','paperSalary']) check[key] = read(c[key],key);
+    for (const key of ['opening','paper','paperSalary']) check[key] = read(c[key],key);
   } catch(e){ setErr('err-check',e.message); return; }
   const existing = asObj(asObj(state.cutoffInputs)[periodKey(per)]);
   const payload = { start:per.start, end:per.end, entryId:txt(existing.entry_id) || uuid(), check };
@@ -7504,7 +7560,7 @@ function renderCutoff(){
       '<input class="input money" id="tinCountIn" inputmode="decimal" autocomplete="off" placeholder="Not counted" value="' + esc(countedDraft) + '">' +
       '<p class="err" id="err-tin" hidden></p></div>' +
     '<button type="button" class="btn block" data-act="tin-save">Save the cash count</button>' +
-    '<details class="check-detail"><summary>Change what was paid or borrowed</summary>' +
+    '<details class="check-detail"><summary>Change what was paid</summary>' +
       '<div id="coPaymentGroups">' + cutoffPaymentHTML(per,live) + '</div>' +
       cutoffCheckFormHTML(per) +
     '</details>' +
@@ -7796,10 +7852,12 @@ function openingCountFor(product, per){
     }
   }
   if (!best) return null;
-  // A count at closing on the day before the retained window is sufficient;
-  // an older count needs movements this phone cannot guarantee it still holds.
   const win = txt(asObj(state).window_start);
-  if (isDateStr(win) && addDays(best.date, 1) < win) return null;
+  // Only a count the server still ships to EVERY phone (dated on or after
+  // window_start) may anchor the opening (v2.28.0). A count the day before the
+  // window survived on a phone that had synced earlier and was absent on a
+  // freshly set-up one, so two phones disagreed about the same opening.
+  if (isDateStr(win) && best.date < win) return null;
   const inOpeningSpan = d => isDateStr(d) && d > best.date && d < start;
   let qty = best.qty;
   const deliveries = asObj(state.stockDeliveries);
@@ -7955,6 +8013,11 @@ async function generateNote(){
       // (note_text) — older deployments answered noteText, so accept both.
       const data = await api('cutoff', { start:per.start, end:per.end, dryRun:false });
       const served = isObj(data) ? txt(pick(data, 'note_text', 'noteText')) : '';
+      // The sheet has just recorded the split this note was built with; read
+      // the same figure here from now on (v2.28.0). Before the note is kept:
+      // the mirror does not invalidate it, but the order makes that plain.
+      mirrorRecordedSplit(per, data);
+      persistState();
       lastNote = { key:periodKey(per), text: served || buildNote(computeCutoff(per), per), demo:false };
       renderCutoff();
       return;
@@ -10016,7 +10079,9 @@ function paperCrossHTML(errs){
   // count is filled in. (The other way round — an end count with no start —
   // is a negative Sold, which validateBenta already refuses by name.)
   const half = asArr(asObj(benta).rows)
-    .filter(r => isBlankVal(r.eod) && !isBlankVal(r.sod) && num(r.sod) > 0)
+    // Nori has no end count on its card any more (v2.26.0); validateBenta's own
+    // sentence — "enter the quantity sold" — covers a half-read nori line.
+    .filter(r => !noriUsesSoldField(r.sku) && isBlankVal(r.eod) && !isBlankVal(r.sod) && num(r.sod) > 0)
     .map(r => esc(skuLabel(r.sku)));
   if (half.length){
     h += '<p class="paper-cross differ">The end count is still empty on <b>' + listPhrase(half) +
@@ -10152,7 +10217,12 @@ function paperReviewHTML(rd){
     h += '<div class="paper-row' + (first ? ' first' : '') + '">' +
       '<div class="paper-sku">' + esc(c.label) + '</div>' +
       '<div class="paper-figs">' +
-        'Start of day ' + fig(f.sod) + ' · End of day ' + fig(f.eod) + ' · Sold ' + fig(f.sold) +
+        (noriUsesSoldField(c.sku)
+          // The figure the nori card actually asks for (v2.28.0): what the
+          // reading's start and end come to as a paid quantity, blank if either
+          // was unread — the card then asks for it in so many words.
+          ? 'Quantity sold ' + fig(f.sold)
+          : 'Start of day ' + fig(f.sod) + ' · End of day ' + fig(f.eod) + ' · Sold ' + fig(f.sold)) +
       '</div>' +
       '<div class="paper-figs">' +
         'Cheese ' + fig(f.cheeseAll) + ' · GCash regular ' + fig(f.gcashAll) +
@@ -10555,7 +10625,7 @@ document.addEventListener('input', (ev) => {
     const key = periodKey(cutoffPer), c = checkEdits[key] || (checkEdits[key] = cutoffCheckSaved(cutoffPer));
     const field = ds.checkMoney;
     if (field.startsWith('tin-') && CHECK_ITEMS.some(([k]) => k === field.slice(4))) c.tin[field.slice(4)] = ev.target.value;
-    else if (['opening','borrowed','paper','paperSalary'].includes(field)) c[field] = ev.target.value;
+    else if (['opening','paper','paperSalary'].includes(field)) c[field] = ev.target.value;
     updateCutoffCheckPreview();
     return;
   }
@@ -10681,6 +10751,9 @@ document.addEventListener('input', (ev) => {
   // the four figures it moves are rewritten, so the keyboard stays put.
   else if (id === 'tinCountIn'){
     if (cutoffPer) tinEdits[periodKey(cutoffPer)] = ev.target.value;
+    // The card above says "not saved yet" the moment the figure changes
+    // (v2.28.0); it used to keep a stale "Cash balances" until the save.
+    updateCutoffCheckPreview();
   }
   else if (id === 'coSplitIn'){
     if (cutoffPer) splitEdits[periodKey(cutoffPer)] = ev.target.value;

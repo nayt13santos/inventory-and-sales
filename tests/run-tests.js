@@ -924,8 +924,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.27.0', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.27.0');
+  assert.strictEqual(g.data.version, '2.28.0', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.28.0');
 });
 
 // ---------------------------------------------------------------------------
@@ -4358,6 +4358,17 @@ test("A LATER NIGHT'S CONVERSION IS PROTECTED: re-saving an earlier night smalle
     check.data.findings.join('\n'));
 });
 
+test('the kept-out block counts PAID units: a nori given away is not in its quantity (v2.28.0)', () => {
+  const { ctx, token } = freshSetup();
+  const r = saveDay(ctx, token, { date: '2026-07-20', counts: [{ sku: 'nori', sod: 8, eod: 0, freeQty: 2 }, { sku: 'box4', sod: 1, eod: 0 }], entryId: 'nori-free' });
+  assert.strictEqual(r.ok, true, r.error);
+  const cut = post(ctx, { token, action: 'cutoff', payload: { start: '2026-07-16', end: '2026-07-31', dryRun: true } });
+  assert.strictEqual(cut.ok, true, cut.error);
+  const nori = cut.data.figures.excluded_lines.find(l => l.sku === 'nori');
+  assert.deepStrictEqual([nori.qty, nori.amount], [6, 150], 'six paid at ₱25; the two given away are not in the quantity');
+  assert.strictEqual(cut.data.figures.excluded, 150);
+});
+
 test('a closed day zeroes gcashConverted and lidBoxes whatever the payload says', () => {
   const { ctx, ss, token } = freshSetup();
   const r = saveDay(ctx, token, {
@@ -6365,14 +6376,14 @@ test('an unknown action is refused by name, and doGet answers without a token', 
   assert.strictEqual(r.error, 'Unknown action: "saveDay".',
     'this app cannot save a day, and says so rather than pretending');
   const g = JSON.parse(ctx.doGet({}).getContent());
-  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.27.0' } });
+  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.28.0' } });
 });
 
 test('ping proves the setup WITHOUT spending a unit of quota — even with no key yet', () => {
   const ctx = loadVision({ keepKeyPlaceholder: true });
   const r = vpost(ctx, { token: VISION_TOK, action: 'ping', payload: {} });
   assert.strictEqual(r.ok, true, r.error);
-  assert.strictEqual(r.data.version, '2.27.0', 'the vision project ships with the release it belongs to');
+  assert.strictEqual(r.data.version, '2.28.0', 'the vision project ships with the release it belongs to');
   assert.strictEqual(r.data.model, 'gemini-3.6-flash');
   assert.strictEqual(r.data.key_configured, false, 'a yes/no — never the key itself');
   keepsSecrets(JSON.stringify(r));

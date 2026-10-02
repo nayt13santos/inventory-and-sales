@@ -282,7 +282,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.27.0';
+var VERSION = '2.28.0';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -1562,15 +1562,18 @@ function apiSaveCutoffCheck(ss, payload) {
     out.tin[key] = money(src.tin && src.tin[key], key + ' cash paid');
     if (status === 'pending' && Number(out.tin[key]) > 0) throw new Error(key + ' is still to pay, but has cash paid. Choose Partly paid or clear the cash amount.');
   });
+  // `borrowed` was dropped in v2.28.0 (owner: "remove it at all"); a value an
+  // older phone still sends is validated like any money and kept, unused.
   ['opening', 'borrowed', 'paper', 'paperSalary'].forEach(function (key) { out[key] = money(src[key], key); });
   // Checklist metadata only: never creates Expenses, changes sales, or alters
   // the partner's allocation note. A payment confirmation is not a new payment.
   migrateTab(ss, schemaFor(TAB.CUTOFF_INPUTS));
   var encoded = JSON.stringify(out);
+  // No split is written here (v2.28.0). A first checklist used to stamp the
+  // row with TODAY'S default split, which then outranked the archived split of
+  // a note already sent and restated its Split and Remaining lines (v2.26.0
+  // review). A blank split is read as "not entered" by apiCutoff.
   var row = { start:start, end:end, reconciliation_json:encoded, entry_id:entryId, updated_at:nowStamp() };
-  if (!readCutoffInputs(ss).some(function (r) { return r.start === start && r.end === end; })) {
-    row.split_amount = splitDefaultOf(readSettings(ss));
-  }
   upsertRows(ss, TAB.CUTOFF_INPUTS, [row], ['start', 'end']);
   return { start:start, end:end, entry_id:entryId, reconciliation_json:encoded };
 }
@@ -2159,7 +2162,11 @@ function apiCutoff(ss, settings, payload, dryRun) {
     return r.start === start && r.end === end;
   });
   var split;
-  if (entered.length > 0) {
+  // A row with a BLANK split (written by a tin count or a checklist alone) is
+  // not an entered split (v2.28.0): it falls through to the archive and the
+  // default exactly as a missing row does. Reading it as 0 printed "Split - "
+  // and moved Remaining by the whole split (found by the v2.26.0 review).
+  if (entered.length > 0 && entered[0].split_amount !== '') {
     split = round2(entered[0].split_amount);
   } else {
     var archived = archivedSplitFor(ss, start, end);
@@ -2289,15 +2296,17 @@ function apiCutoff(ss, settings, payload, dryRun) {
   var noteText = buildNoteText(branch, start, end, figures);
 
   if (!dryRun) {
-    // A real generation with NO CutoffInputs row RECORDS the split it used
+    // A real generation with NO entered split RECORDS the split it used
     // (v2.5.0), so the figure this note was built with is a fact in the sheet —
     // never something a later split_default edit can quietly move. An entered
-    // row, when there is one, already is that record.
-    if (entered.length === 0) {
-      upsertRows(ss, TAB.CUTOFF_INPUTS, [{
-        start: start, end: end, split_amount: split,
-        entry_id: Utilities.getUuid(), updated_at: nowStamp()
-      }], ['start', 'end']);
+    // row already is that record. A row a tin count or a checklist created
+    // with a BLANK split is not (v2.28.0): it is stamped too, on its own row
+    // (the upsert keeps its entry_id, count and checklist), or the phone, which
+    // has no archive, would read the default where the sheet reads the archive.
+    if (entered.length === 0 || entered[0].split_amount === '') {
+      var record = { start: start, end: end, split_amount: split, updated_at: nowStamp() };
+      if (entered.length === 0) record.entry_id = Utilities.getUuid();
+      upsertRows(ss, TAB.CUTOFF_INPUTS, [record], ['start', 'end']);
     }
 
     // Upsert by (start, end) — the period is the natural key. Retries and
@@ -2404,7 +2413,9 @@ function excludedForPeriod(ss, start, end) {
       agg[c.sku] = { qty: 0, amount: 0 };
       if (!prices.map[c.sku]) orphans.push(c.sku);
     }
-    agg[c.sku].qty += asNum(c.sold);
+    // PAID units (v2.28.0): the quantity must multiply out to the money, so a
+    // give-away is not counted — the phone's excludedForPeriod does the same.
+    agg[c.sku].qty += asNum(c.sold) - asNum(c.free_qty);
     agg[c.sku].amount += asNum(c.amount);
   });
   var lines = [];
@@ -3593,7 +3604,9 @@ function readCutoffInputs(ss) {
     out.push({
       start: start,
       end: end,
-      split_amount: asNum(cellOf(r, t, 'split_amount')),
+      // RAW blank kept (v2.28.0): a row a tin count or a checklist created has
+      // no split, and 0 is a different claim. apiCutoff treats '' as not entered.
+      split_amount: asStr(cellOf(r, t, 'split_amount')) === '' ? '' : asNum(cellOf(r, t, 'split_amount')),
       // What the tin actually held (v2.12.1). Kept RAW: a blank means nobody has
       // counted this cutoff yet, which is different from counting it and finding
       // nothing — and only the raw value can tell those apart.

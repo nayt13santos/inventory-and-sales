@@ -3818,6 +3818,8 @@ return {
   entryDateError, cutoffExpenseDate, previewIncomplete, cutoffMissingDays,
   cutoffMissingMoney,
   currentPeriod, periodKey, storedPricesFor, priceOnDay, conversionRoom, cutoffConversionCheck, cutoffOtherNights,
+  // v2.28.0: the checklist fingerprint and its digest.
+  cutoffCheckBasis, basisDigest,
   // v2.5.1: the server-derived figures the drain must refresh, the day-effective
   // flag, the blank-omitting settings payload and the phone's note refusal.
   backlogBalance, cutoffOnDay, stockStatusOf, stockStatusList,
@@ -6265,7 +6267,7 @@ test('CUTOFF CARRYOVER: incomplete history is unknown, including a baseline befo
   app.state.window_start = '2026-09-02';
   assert.strictEqual(app.openingCountFor('Bonito', per), null, 'the Sep 1 delivery is outside the guaranteed history');
   app.state.window_start = '2026-09-01';
-  assert.strictEqual(app.openingCountFor('Bonito', per).qty, 1, 'count on the evening before the window is sufficient');
+  assert.strictEqual(app.openingCountFor('Bonito', per), null, 'v2.28.0: a count dated before the window is not shipped to every phone, so no phone may anchor on it');
   delete app.state.stockCounts['2026-08-31'];
   assert.strictEqual(app.openingCountFor('Bonito', per), null, 'deliveries alone do not prove a starting balance');
 });
@@ -8179,7 +8181,7 @@ test('SOURCE PIN: the Cutoff screen is three boxes, and the live regions never s
     '<div class="pay-intro">Already deducted / still to pay</div>', 'These fixed expenses are not logged yet', 'Total sales (without nori)']){
     assert.ok(render.indexOf(gone) < 0, 'no longer a box of its own: ' + gone);
   }
-  assert.match(render, /<summary>Change what was paid or borrowed<\/summary>/, 'the checklist is folded inside the cash box');
+  assert.match(render, /<summary>Change what was paid<\/summary>/, 'the checklist is folded inside the cash box');
   assert.match(render, /<summary>How Supplies \(major\) was valued<\/summary>/, 'and the stock valuation inside the note box');
   // The two regions rewritten on every keystroke are INNER divs holding only
   // the computed HTML, so the count field and the checklist inputs beside them
@@ -10518,6 +10520,55 @@ test('THE PHONE REFUSES A RE-SAVE THAT WOULD UNCOVER A LATER NIGHT\'S CONVERSION
   assert.strictEqual(fresh.cutoffConversionCheck(D, { converted: 5000, cash: -4900, gcash: 5000 }), null, 'the server decides');
   fresh.cfg.apiUrl = '';
   assert.strictEqual(fresh.conversionRoom(D, 100, 0).cash, 100, 'demo mode: the phone\'s own days are the whole story');
+});
+
+// ---------------------------------------------------------------------------
+// v2.28.0 — the v2.26.0 review's remaining findings, fixed and pinned.
+// ---------------------------------------------------------------------------
+
+test('THE KEPT-OUT BLOCK COUNTS PAID UNITS, and the receipt names the give-away (v2.28.0)', () => {
+  // Review: nori entered as 6 sold and 2 given away printed "Nori ×8 ₱150" on
+  // the receipt and "Nori × 8 ₱150" in the Cutoff block — ×8 does not multiply
+  // out to ₱150, and disagrees with the 6 she typed.
+  const app = loadClient();
+  app.applyBootstrap(F.boot);
+  const per = { start: '2026-07-16', end: '2026-07-31' };
+  app.state.counts['2026-07-20'] = [{ date: '2026-07-20', sku: 'nori', sod: 8, eod: 0, sold: 8, free_qty: 2, regular_qty: 6,
+    cheese_qty: 0, gcash_qty: 0, gcash_cheese_qty: 0, gcash_amount: 0, amount: 150, in_cutoff: false, price: 25, cheese_price: 0, custom_qty: 0, entry_id: 'n' }];
+  const x = app.excludedForPeriod(per);
+  const nori = x.lines.find(l => l.sku === 'nori');
+  assert.deepStrictEqual([nori.qty, nori.amount], [6, 150], 'six paid at ₱25; the two given away are not in the quantity');
+  const receipt = slab('function updateReceipt(){', 'function rLine(label, amt){');
+  assert.match(receipt, /esc\(l\.label \+ ' ×' \+ l\.sold \+\s*\(num\(l\.free_qty\) > 0 \? ', less ' \+ num\(l\.free_qty\) \+ ' given away or ruined' : ''\)\) \+ ' — not in the total/,
+    'the excluded receipt line says ×sold, less N given away — the same shape as the in-cutoff lines');
+});
+
+test('REVIEW FIXES: nori with its quantity blank is refused once, the paper copy names the right box, the fingerprint is short, the count refreshes the card (v2.28.0)', () => {
+  // (a) A blank nori quantity with a give-away typed used to raise TWO errors,
+  // one blaming the give-away for a tray nori has not got.
+  const { app } = nightOn(ymdDaysAgo(1));
+  const nori = app.benta.rows.find(r => r.sku === 'nori');
+  nori.sod = ''; nori.eod = ''; nori.free = 3;
+  const errs = app.validateBenta();
+  assert.match(String(errs['sku:nori']), /enter the quantity sold — 0 if none/);
+  assert.strictEqual(errs['free:nori'], undefined, 'the give-away is not blamed for the blank quantity');
+  // (b) The paper reader's two sentences follow the card: no "end count" for nori.
+  assert.match(slab('function paperCrossHTML(', 'function paperReviewHTML(rd){'), /!noriUsesSoldField\(r\.sku\) && isBlankVal\(r\.eod\)/);
+  assert.match(slab('function paperReviewHTML(rd){', 'function paperShoot(){'), /'Quantity sold ' \+ fig\(f\.sold\)/);
+  // (c) The checklist fingerprint is a digest, not the expense list: the server
+  // caps the field at 20,000 characters and the list grew with every purchase.
+  const per = app.currentPeriod(ymdDaysAgo(1));
+  const f = app.computeCutoff(per);
+  const b1 = app.cutoffCheckBasis(per, f);
+  assert.match(b1, /^v2:[0-9a-f]{16}:[0-9a-f]+$/, 'two 32-bit lanes and the length, nothing else');
+  assert.ok(b1.length < 40);
+  assert.strictEqual(app.cutoffCheckBasis(per, f), b1, 'deterministic');
+  assert.notStrictEqual(app.cutoffCheckBasis(per, Object.assign({}, f, { total: app.num(f.total) + 1 })), b1, 'and a changed source figure changes it');
+  for (let i = 0; i < 300; i++) app.state.expenses['e' + i] = { entry_id: 'e' + i, date: per.start, category: 'Other', item: '', amount: 10 + i, paid_from: 'tin' };
+  assert.ok(app.cutoffCheckBasis(per, app.computeCutoff(per)).length < 40, 'three hundred purchases later it is still short');
+  // (d) Typing a new count refreshes the cash card at once.
+  const input = slab("document.addEventListener('input'", "document.addEventListener('change'");
+  assert.match(input, /if \(id === 'tinCountIn'\)\{\s*if \(cutoffPer\) tinEdits\[periodKey\(cutoffPer\)\] = ev\.target\.value;[\s\S]{0,260}updateCutoffCheckPreview\(\);/);
 });
 
 test('REVIEW: the paper review\'s Cheese figure is what the card will show (v2.24.0)', () => {
