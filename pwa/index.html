@@ -621,7 +621,7 @@ details > summary{cursor:pointer;font-weight:700;min-height:44px;}
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.26.1';
+const APP_VERSION = '2.27.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -2405,13 +2405,17 @@ function buildNote(f, per){
 /** Same three figures as the note. This is the cutoff's movement, not the
  *  full wallet balance: no opening wallet balance is recorded by this app. */
 function gcashCutoffHTML(f){
-  const left = num(f.gcashExpected);
+  const left = num(f.gcashExpected), out = num(f.gcashOut);
+  // One line on an ordinary cutoff; the paid-out and left lines only when
+  // something was paid from GCash (v2.27.0 — "too many boxes").
+  const moved = out !== 0 || left !== num(f.gcash);
   return '<div class="co-row gcash"><span>GCash received</span><span class="v">' + peso(f.gcash) + '</span></div>' +
-    '<div class="co-row gcash"><span>GCash expenses paid</span><span class="v">−' + peso(f.gcashOut) + '</span></div>' +
-    '<div class="co-row gcash"><span>GCash ' + (left < 0 ? 'short' : 'left') +
-      ' (this cutoff)</span><span class="v">' + peso(Math.abs(left)) + '</span></div>' +
-    '<p class="hint" style="margin-top:6px;">After cash/GCash transfers. This cutoff only, not your full wallet balance. ' +
-      'These payments are not deducted from Remaining again.</p>' +
+    (moved
+      ? '<div class="co-row gcash"><span>GCash expenses paid</span><span class="v">−' + peso(out) + '</span></div>' +
+        '<div class="co-row gcash"><span>GCash ' + (left < 0 ? 'short' : 'left') +
+          ' (this cutoff)</span><span class="v">' + peso(Math.abs(left)) + '</span></div>'
+      : '') +
+    '<p class="hint" style="margin-top:6px;">After cash/GCash transfers — this cutoff only, not your full wallet balance. GCash payments are not deducted from Remaining again.</p>' +
     (num(f.tinUnknown) > 0 ? '<p class="hint" style="margin-top:6px;">' + esc(peso(f.tinUnknown)) +
       ' of payments have no source recorded. Any paid via GCash are not deducted here.</p>' : '');
 }
@@ -7325,8 +7329,9 @@ function cutoffCheckFormHTML(per){
   const input = (id,label,value,hint) => '<div class="field"><label for="check-' + id + '">' + label + '</label>' +
     '<input class="input money" id="check-' + id + '" data-check-money="' + id + '" inputmode="decimal" autocomplete="off" placeholder="Not checked" value="' + esc(value) + '">' +
     (hint ? '<p class="hint">' + hint + '</p>' : '') + '</div>';
-  let h = '<details class="card"><summary>Review paid / pending and cash details</summary>' +
-    '<p class="hint" style="margin:12px 0;">Confirm each category for this cutoff. Enter cash actually taken from the tin, including payments already in Expenses—do not add them twice. Enter 0 if paid elsewhere. Use Partly paid when only some was paid.</p>';
+  // Rendered INSIDE the cash box's "Change what was paid or borrowed" fold
+  // (v2.27.0) — the caller wraps it; this is the form alone.
+  let h = '<p class="hint" style="margin:12px 0;">For each line: has it been paid, and how much cash actually left the tin? Payments already in Expenses count once — do not add them again. 0 if paid some other way.</p>';
   for (const [key,label] of CHECK_ITEMS){
     h += '<div class="check-edit"><label for="check-status-' + key + '">' + esc(label) + '</label>' +
       '<select class="input" id="check-status-' + key + '" data-check-status="' + key + '">' +
@@ -7339,7 +7344,7 @@ function cutoffCheckFormHTML(per){
     input('paper','Paper cash-sales total (₱, optional)',c.paper,'Include nori; exclude GCash.') +
     input('paperSalary','Wages already subtracted in that paper total (₱)',c.paperSalary,'For example, six days at ₱200 = ₱1,200. This is only for comparing sales—not another cash deduction.') +
     '<p class="err" id="err-check" hidden></p><button type="button" class="btn block" data-act="check-save">Save this cutoff checklist</button>' +
-    '<p class="hint" style="margin-top:8px;">Saved to this cutoff in Google Sheets when connected. Does not change sales, Expenses, or the partner’s cutoff note.</p></details>';
+    '<p class="hint" style="margin-top:8px;">Saved to this cutoff in the sheet. Changes no sale, no expense and no line of the note.</p>';
   return h;
 }
 function updateCutoffCheckPreview(){
@@ -7481,32 +7486,58 @@ function renderCutoff(){
   const typed = Object.prototype.hasOwnProperty.call(splitEdits, key) ? splitEdits[key] : null;
   const splitVal = typed == null ? f.split : typed;
   const live = liveCutoff(per);
-  // First answer the owner's question: what is still unaccounted for?
-  h += '<div class="card" id="coCashCheck">' + cutoffCashHTML(per,live) + '</div>';
+  /* THREE BOXES (v2.27.0). Owner, 2026-10-03: "too many boxes" — the screen
+     had grown to nine stacked cards. It is now the cash box, the note box and
+     the backlog box, with the detail that used to be cards folded inside them.
+     Every id the live updaters write to (coCashCheck, coPaymentGroups, coSplit,
+     coResidual*, coEach, coSplitHint, noteBlock, tinCountIn) is unchanged, and
+     the two regions replaced on every keystroke — the cash arithmetic and the
+     status groups — are INNER divs, so the inputs beside them keep focus. */
+
+  // BOX 1 — THE CASH IN THE TIN. The paper's own question first: the figures,
+  // the line-by-line arithmetic, the count, and — folded — what was paid.
   const t = tinCountFor(per,f);
   const countedDraft = Object.prototype.hasOwnProperty.call(tinEdits,key) ? tinEdits[key] : (t.counted === null ? '' : String(t.counted));
-  h += '<div class="card"><div class="field"><label for="tinCountIn">Cash counted in the tin (₱)</label>' +
-    '<input class="input money" id="tinCountIn" inputmode="decimal" autocomplete="off" placeholder="Not counted" value="' + esc(countedDraft) + '">' +
-    '<p class="err" id="err-tin" hidden></p></div><button type="button" class="btn block" data-act="tin-save">Save the cash count</button></div>';
-  h += '<div class="card"><div class="pay-intro">Already deducted / still to pay</div>' +
-    '<div id="coPaymentGroups">' + cutoffPaymentHTML(per,live) + '</div></div>';
-  h += cutoffCheckFormHTML(per);
+  h += '<div class="card">' +
+    '<div id="coCashCheck">' + cutoffCashHTML(per,live) + '</div>' +
+    '<div class="field" style="margin-top:12px;"><label for="tinCountIn">Cash counted in the tin (₱)</label>' +
+      '<input class="input money" id="tinCountIn" inputmode="decimal" autocomplete="off" placeholder="Not counted" value="' + esc(countedDraft) + '">' +
+      '<p class="err" id="err-tin" hidden></p></div>' +
+    '<button type="button" class="btn block" data-act="tin-save">Save the cash count</button>' +
+    '<details class="check-detail"><summary>Change what was paid or borrowed</summary>' +
+      '<div id="coPaymentGroups">' + cutoffPaymentHTML(per,live) + '</div>' +
+      cutoffCheckFormHTML(per) +
+    '</details>' +
+  '</div>';
 
-  h += '<div class="card"><div class="pay-intro">Sales and allocation result</div>' +
-    '<div class="co-row big"><span>Total sales (without nori)</span><span class="v">' + peso(f.total) + '</span></div>' +
+  // BOX 2 — THE NOTE. What the partner gets: the sales, the split, what is
+  // left after the allocations, and the note itself.
+  h += '<div class="card">' +
+    '<div class="co-row big"><span>Total sales</span><span class="v">' + peso(f.total) + '</span></div>' +
     '<div class="co-sub">' + f.daysWithSales + ' days with sales · ' + f.openDays + ' days open</div>' +
     '<div class="co-row"><span>Cash</span><span class="v">' + peso(f.cash) + '</span></div>' + gcashCutoffHTML(f) +
     '<div class="r-sep" role="presentation"></div>' +
-    '<div class="co-row"><span>Split allocated</span><span class="v" id="coSplit">' + peso(live.split) + '</span></div>' +
+    '<div class="field" style="margin-bottom:0;">' +
+      '<label for="coSplitIn">Split for this cutoff (₱)</label>' +
+      '<div class="split-row">' +
+        '<input class="input money" id="coSplitIn" inputmode="decimal" autocomplete="off" placeholder="' +
+          esc(fmt(splitDefault())) + '" value="' + esc(splitVal === '' ? '' : splitVal) + '">' +
+        '<span class="split-each" id="coEach">' + peso(live.perPartner) + ' each</span>' +
+      '</div>' +
+      '<p class="hint" style="margin-top:8px;" id="coSplitHint">' + esc(splitHintText(per, f)) + '</p>' +
+      '<p class="err" id="err-split" hidden></p>' +
+      '<button type="button" class="btn block" data-act="split-save" id="splitBtn" style="margin-top:10px;">Save this split</button>' +
+    '</div>' +
+    '<div class="r-sep" role="presentation"></div>' +
+    '<div class="co-row"><span>Split</span><span class="v" id="coSplit">' + peso(live.split) + '</span></div>' +
     '<div class="co-row split' + (live.remaining < 0 ? ' neg' : '') + '" id="coResidualRow">' +
       '<span id="coResidualLabel">' + (live.remaining < 0 ? 'Short after allocations' : 'Remaining after allocations') + '</span>' +
       '<span class="v" id="coResidual">' + peso(Math.abs(live.remaining)) + '</span></div>' +
     '<div class="co-sub" id="coResidualNote">' + esc(residualNote(live.remaining)) + '</div>' +
-    (num(f.backlogPaid) > 0 ? '<p class="hint">' + esc(peso(f.backlogPaid)) + ' in backlog payments is separate from the allocations; do not deduct it twice in the cash checklist.</p>' : '') +
-  '</div>';
+    (num(f.backlogPaid) > 0 ? '<p class="hint">' + esc(peso(f.backlogPaid)) + ' in backlog payments is separate from the allocations; do not deduct it twice in the cash checklist.</p>' : '');
 
-  // Stock quantities explain the allocation, but do not obscure the cash check.
-  h += '<details><summary class="card">How major supplies were valued</summary>';
+  // Stock quantities explain the Supplies (major) line; folded, inside the box.
+  h += '<details class="check-detail"><summary>How Supplies (major) was valued</summary>';
   /* SUPPLIES USED, IN MONEY (v2.14.0). Owner's ask: see the cost of what was
      opened, on this tab, kept current. Its own card, ABOVE the settlement
      figures and clearly separated from them, because the "Supplies" line below
@@ -7519,8 +7550,7 @@ function renderCutoff(){
     // reads as a fortnight that consumed nothing of value. Say what is actually
     // true: the quantities are known, the money is not, and where to fix it.
     const anyPriced = asArr(f.suppliesUsedRows).some(r => r.cost !== null);
-    h += '<div class="card">' +
-      '<div class="pay-intro">Supplies used this cutoff</div>' +
+    h += '<div style="padding-top:8px;"><div class="pay-intro">Supplies used this cutoff</div>' +
       (anyPriced
         ? '<div class="co-row big"><span>Value opened</span><span class="v">' + peso(f.suppliesUsed) + '</span></div>'
         : '<p class="err" style="margin-top:0;">No product has a cost on file, so what was opened cannot be valued — ' +
@@ -7541,34 +7571,52 @@ function renderCutoff(){
     // sentence has to name the rows that are actually on screen, or it sends him
     // looking for a line that no longer exists.
     h += '<p class="hint" style="margin-top:8px;">This is what was <b>opened</b>, priced at what each unit costs you. ' +
-      'It shows below as <b>Supplies (major)</b> and it IS deducted from Remaining (v2.22.0) — ' +
+      'It shows below as <b>Supplies (major)</b> on the note and it IS deducted from Remaining (v2.22.0) — ' +
       'your suppliers deliver on credit, so what you opened is a cost this cutoff has already run up ' +
       'whether the bill is paid or not. It is not <b>Supplies (minor)</b>: that one is money you ' +
       '<b>paid</b> for the daily buying.</p>' +
     '</div>';
+  } else {
+    h += '<p class="hint" style="padding-top:8px;">Nothing logged as opened this cutoff.</p>';
   }
-
-
   h += '</details>';
 
-  // The editable Split.
-  h += '<div class="card">' +
-    '<div class="field" style="margin-bottom:0;">' +
-      '<label for="coSplitIn">Split for this cutoff (₱)</label>' +
-      '<div class="split-row">' +
-        '<input class="input money" id="coSplitIn" inputmode="decimal" autocomplete="off" placeholder="' +
-          esc(fmt(splitDefault())) + '" value="' + esc(splitVal === '' ? '' : splitVal) + '">' +
-        '<span class="split-each" id="coEach">' + peso(live.perPartner) + ' each</span>' +
-      '</div>' +
-      '<p class="hint" style="margin-top:8px;" id="coSplitHint">' + esc(splitHintText(per, f)) + '</p>' +
-      '<p class="err" id="err-split" hidden></p>' +
-      '<button type="button" class="btn block" data-act="split-save" id="splitBtn" style="margin-top:10px;">Save this split</button>' +
-    '</div>' +
-  '</div>';
+  // Suggested fixed expenses (one tap), inside the note box: they are lines of
+  // the note that are still missing.
+  const mamaAmt = num(asObj(state.settings).mama_per_cutoff);
+  const elecAmt = num(asObj(state.settings).electric_per_cutoff);
+  const sugg = [];
+  if (f.mama === 0 && mamaAmt > 0) sugg.push({ cat:'Mama', item:'Mama', amount:mamaAmt });
+  if (f.electric === 0 && elecAmt > 0) sugg.push({ cat:'Electric', item:'Electric bill', amount:elecAmt });
+  if (sugg.length){
+    h += '<p style="font-weight:600; margin:12px 0 8px;">Not logged yet:</p><div class="chips">';
+    for (const sg of sugg){
+      h += '<button type="button" class="chip" data-act="cutoff-suggest" data-cat="' + sg.cat + '" data-item="' + esc(sg.item) + '" data-amt="' + sg.amount + '">+ ' + sg.cat + ' ' + peso(sg.amount) + '</button>';
+    }
+    h += '</div>';
+  }
 
-  // Paying a backlog out of what is left. It is an ordinary Backlog expense —
-  // that is what "Other payments" on the note is made of — but it belongs here,
-  // beside the figure it comes out of.
+  h += '<button type="button" class="btn primary block" data-act="cutoff-generate" id="genBtn" style="margin-top:14px;">Generate cutoff note</button>';
+
+  if (lastNote && lastNote.key === periodKey(per)){
+    // Hidden the moment the Split field stops agreeing with what is saved: this
+    // note was built from the SAVED figure, so leaving it on screen under a
+    // preview that now says something else is the same contradiction generateNote
+    // refuses to create. updateSplitLive un-hides it if she types the figure back.
+    h += '<div id="noteBlock" style="margin-top:14px;"' + (pendingSplit(per) ? ' hidden' : '') + '>' +
+      (lastNote.demo ? '<p class="hint" style="margin-bottom:8px;">Demo — this was not saved to the sheet.</p>'
+                     : '<p class="ok-note" style="margin-bottom:8px;">✓ Saved to the Cutoffs tab of the sheet.</p>') +
+      '<pre class="note-pre" id="notePre">' + esc(lastNote.text) + '</pre>' +
+      '<div class="btn-row">' +
+        '<button type="button" class="btn" data-act="copy-note">Copy</button>' +
+        (navigator.share ? '<button type="button" class="btn" data-act="share-note">Share</button>' : '') +
+      '</div>' +
+    '</div>';
+  }
+  h += '</div>';   // end of the note box
+
+  // BOX 3 — Paying a backlog out of what is left. It is an ordinary Backlog
+  // expense, but it belongs here, beside the figure it comes out of.
   const activeBl = asArr(state.backlogs).filter(b => isObj(b) && truthy(b.active));
   h += '<div class="section-title">Pay a backlog</div><div class="card">';
   if (!activeBl.length){
@@ -7604,38 +7652,6 @@ function renderCutoff(){
       '<button type="button" class="btn block" data-act="pay-backlog">Log this payment</button>';
   }
   h += '</div>';
-
-  // Suggested fixed expenses (one tap)
-  const mamaAmt = num(asObj(state.settings).mama_per_cutoff);
-  const elecAmt = num(asObj(state.settings).electric_per_cutoff);
-  const sugg = [];
-  if (f.mama === 0 && mamaAmt > 0) sugg.push({ cat:'Mama', item:'Mama', amount:mamaAmt });
-  if (f.electric === 0 && elecAmt > 0) sugg.push({ cat:'Electric', item:'Electric bill', amount:elecAmt });
-  if (sugg.length){
-    h += '<div class="card"><p style="font-weight:600; margin-bottom:10px;">These fixed expenses are not logged yet:</p><div class="chips">';
-    for (const sg of sugg){
-      h += '<button type="button" class="chip" data-act="cutoff-suggest" data-cat="' + sg.cat + '" data-item="' + esc(sg.item) + '" data-amt="' + sg.amount + '">+ ' + sg.cat + ' ' + peso(sg.amount) + '</button>';
-    }
-    h += '</div></div>';
-  }
-
-  h += '<button type="button" class="btn primary block" data-act="cutoff-generate" id="genBtn">Generate cutoff note</button>';
-
-  if (lastNote && lastNote.key === periodKey(per)){
-    // Hidden the moment the Split field stops agreeing with what is saved: this
-    // note was built from the SAVED figure, so leaving it on screen under a
-    // preview that now says something else is the same contradiction generateNote
-    // refuses to create. updateSplitLive un-hides it if she types the figure back.
-    h += '<div id="noteBlock" style="margin-top:14px;"' + (pendingSplit(per) ? ' hidden' : '') + '>' +
-      (lastNote.demo ? '<p class="hint" style="margin-bottom:8px;">Demo — this was not saved to the sheet.</p>'
-                     : '<p class="ok-note" style="margin-bottom:8px;">✓ Saved to the Cutoffs tab of the sheet.</p>') +
-      '<pre class="note-pre" id="notePre">' + esc(lastNote.text) + '</pre>' +
-      '<div class="btn-row">' +
-        '<button type="button" class="btn" data-act="copy-note">Copy</button>' +
-        (navigator.share ? '<button type="button" class="btn" data-act="share-note">Share</button>' : '') +
-      '</div>' +
-    '</div>';
-  }
 
   // BELOW the note, and outside it in every sense: the money this cutoff does not
   // count. Nothing above depends on it and the note does not mention it.

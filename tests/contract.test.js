@@ -8140,6 +8140,14 @@ test('GCASH EXPENSES: the cutoff screen shows the same breakdown, with scope and
   assert.match(html, /not deducted from Remaining again/);
   assert.match(app.gcashCutoffHTML({ ...local, gcashExpected: -100 }), /GCash short \(this cutoff\).*₱100/);
   assert.ok(!app.gcashCutoffHTML({ ...local, tinUnknown: 0 }).includes('no source recorded'));
+  // v2.27.0: on a cutoff where nothing was paid from GCash, one line — the
+  // paid-out and left lines appear only when something moved.
+  const quiet = app.gcashCutoffHTML({ ...local, gcashOut: 0, gcashExpected: local.gcash, tinUnknown: 0 });
+  assert.match(quiet, /GCash received<\/span><span class="v">₱5,000/);
+  assert.ok(!/GCash expenses paid/.test(quiet) && !/GCash left \(this cutoff\)/.test(quiet),
+    'nothing paid from GCash: no paid-out line and no left line');
+  assert.match(app.gcashCutoffHTML({ ...local, gcashOut: 0, gcashExpected: local.gcash - 50 }), /GCash left \(this cutoff\)/,
+    'but a figure that moved for any reason is still shown');
   const src = fs.readFileSync(INDEX_HTML, 'utf8');
   const render = src.slice(src.indexOf('function renderCutoff(){'), src.indexOf('function stockCutoffHTML(per){'));
   assert.match(render, /gcashCutoffHTML\(f\)/, 'the tested breakdown is actually rendered');
@@ -8161,6 +8169,33 @@ test('GCASH EXPENSES: unsynced expense edits and deletion update the preview and
   app.applyLocalExpense(p);
   app.applyLocalDeleteExpense({ entryId: p.entryId });
   assert.strictEqual(app.computeCutoff(t.per).gcashOut, 0);
+});
+
+test('SOURCE PIN: the Cutoff screen is three boxes, and the live regions never swallow an input (v2.27.0)', () => {
+  // Owner, 2026-10-03: "too many boxes" — nine stacked cards became the cash
+  // box, the note box and the backlog box, with the detail folded inside them.
+  const render = slab('function renderCutoff(){', 'function stockCutoffHTML(per){');
+  for (const gone of ['Sales and allocation result', 'Review paid / pending and cash details',
+    '<div class="pay-intro">Already deducted / still to pay</div>', 'These fixed expenses are not logged yet', 'Total sales (without nori)']){
+    assert.ok(render.indexOf(gone) < 0, 'no longer a box of its own: ' + gone);
+  }
+  assert.match(render, /<summary>Change what was paid or borrowed<\/summary>/, 'the checklist is folded inside the cash box');
+  assert.match(render, /<summary>How Supplies \(major\) was valued<\/summary>/, 'and the stock valuation inside the note box');
+  // The two regions rewritten on every keystroke are INNER divs holding only
+  // the computed HTML, so the count field and the checklist inputs beside them
+  // keep their focus while the figures move.
+  assert.match(render, /<div id="coCashCheck">' \+ cutoffCashHTML\(per,live\) \+ '<\/div>'/);
+  assert.match(render, /<div id="coPaymentGroups">' \+ cutoffPaymentHTML\(per,live\) \+ '<\/div>'/);
+  assert.ok(render.indexOf('id="coCashCheck"') < render.indexOf('id="tinCountIn"'), 'the count field follows the live region');
+  assert.ok(render.indexOf('id="coPaymentGroups"') < render.indexOf('cutoffCheckFormHTML(per)'), 'the form follows its live region');
+  // The three boxes, in order, each still carrying what the older pins expect.
+  const iCash = render.indexOf('id="coCashCheck"'), iNote = render.indexOf('>Total sales<'), iSplit = render.indexOf('id="coSplitIn"'),
+    iGen = render.indexOf('id="genBtn"'), iBl = render.indexOf('Pay a backlog</div><div class="card">');
+  assert.ok(iCash > 0 && iCash < iNote && iNote < iSplit && iSplit < iGen && iGen < iBl, 'cash, then the note with its split and generate button, then the backlogs');
+  // The form itself no longer wraps itself in a card.
+  const form = slab('function cutoffCheckFormHTML(per){', 'function updateCutoffCheckPreview(){');
+  assert.ok(form.indexOf('<details class="card">') < 0 && form.indexOf('</details>') < 0, 'the caller folds it');
+  assert.match(form, /data-act="check-save"/);
 });
 
 test('SOURCE PIN: cash check names unknown money and keeps counted cash separate', () => {
