@@ -10,12 +10,12 @@
    engine — and the owner found it on his phone. This script renders the REAL
    page in headless Chromium at phone size so that class of bug fails CI.
 
-   WHAT IT CHECKS, on each of the four tabs (Sales, Expenses, Cutoff, More), at
+   WHAT IT CHECKS, on each of the five tabs (Home, Sales, Expenses, Cutoff, More), at
    375×812 and 360×740, deviceScaleFactor 2, mobile emulation on, with a
    realistic fixture injected so every screen has content:
      a. no sideways overflow — documentElement.scrollWidth <= the SCREEN width
         (on failure it names every element whose right edge is past the screen)
-     b. all four nav.tabbar buttons are on the screen and visible
+     b. all five nav.tabbar buttons are on the screen and visible
      c. no console errors and no uncaught page errors
      d. the tab's panel rendered some text
    Expenses and Cutoff are also stepped back one cutoff and re-checked.
@@ -60,6 +60,7 @@ const VIEWPORTS = [
 // key = the argument showTab() takes; prev = the data-act that steps that
 // screen back one cutoff (re-checked after the click).
 const TABS = [
+  { key: 'home',   label: 'Home' },
   { key: 'benta',  label: 'Sales' },
   { key: 'gastos', label: 'Expenses', prev: 'gastos-prev' },
   { key: 'cutoff', label: 'Cutoff',   prev: 'cutoff-prev' },
@@ -340,9 +341,9 @@ function auditInPage(args){
       (offenders.length > 25 ? '\n        … and ' + (offenders.length - 25) + ' more' : ''));
   }
 
-  // b. All four tab-bar buttons on the screen and visible.
+  // b. All five tab-bar buttons on the screen and visible.
   const tabs = Array.from(document.querySelectorAll('nav.tabbar button'));
-  if (tabs.length !== 4) problems.push('tab bar: expected 4 buttons, found ' + tabs.length);
+  if (tabs.length !== 5) problems.push('tab bar: expected 5 buttons, found ' + tabs.length);
   for (const b of tabs){
     const r = b.getBoundingClientRect();
     const cs = getComputedStyle(b);
@@ -431,7 +432,7 @@ async function runViewport(browser, baseUrl, vp){
       allOk = false;
       console.log('FAIL ' + size + ' ' + label + problems.map(p => '\n    - ' + p).join(''));
     } else {
-      console.log('PASS ' + size + ' ' + label + ' — panel ' + r.textLength + ' chars, document ' + r.scrollWidth + 'px wide on a ' + r.screenWidth + 'px screen, 4 tabs on screen, no errors');
+      console.log('PASS ' + size + ' ' + label + ' — panel ' + r.textLength + ' chars, document ' + r.scrollWidth + 'px wide on a ' + r.screenWidth + 'px screen, 5 tabs on screen, no errors');
     }
   };
 
@@ -441,10 +442,39 @@ async function runViewport(browser, baseUrl, vp){
       await step(tab.label + ' (previous cutoff)', tab.key, () => page.click('[data-act="' + tab.prev + '"]'));
     }
   }
+  await step('Home (shortcuts preserve drafts and dates)', 'home', async () => {
+    await page.evaluate(() => {
+      loadBentaForm(todayStr());benta.notes='Home draft test';benta.dirty=true;
+      showTab('home');
+    });
+    const historical=await page.$eval('.home-day',e=>e.dataset.date);
+    await page.click('.home-day');
+    if(await page.evaluate(()=>benta.date)!==historical)throw new Error('Chart opened the wrong date.');
+    await page.click('#tab-home');
+    await page.click('.home-actions [data-act="home-sales"]');
+    if(!await page.evaluate(()=>benta.date===todayStr() && benta.notes==='Home draft test'))throw new Error('Sales shortcut lost today’s draft.');
+    await page.evaluate(()=>{gx.amount='123';gx.date=addDays(todayStr(),-2);showTab('home');});
+    await page.click('[data-act="home-expense"]');
+    if(!await page.evaluate(()=>activeTab==='gastos' && gx.open && gx.amount==='123' && gx.date===addDays(todayStr(),-2)))throw new Error('Expense shortcut lost its draft.');
+    await page.evaluate(()=>{gx.amount='';gxBulk.open=true;gxBulk.text='Eggs 100';showTab('home');});
+    await page.click('[data-act="home-expense"]');
+    if(!await page.evaluate(()=>gx.date===todayStr() && !gxBulk.open && gxBulk.text==='Eggs 100'))throw new Error('New expense is not dated today or bulk draft was lost.');
+    await page.click('#tab-home');
+    await page.click('.home-last-cutoff [data-act="home-cutoff"]');
+    if(!await page.evaluate(()=>cutoffPer.start===currentPeriod(addDays(currentPeriod(todayStr()).start,-1)).start))throw new Error('Previous cutoff shortcut opened the wrong period.');
+    await page.click('#tab-home');
+    for(const [action,heading] of [['home-stock','stockHeading'],['home-backlogs','backlogHeading']]){
+      await page.$eval('[data-act="'+action+'"]',e=>e.scrollIntoView({block:'center'}));
+      await page.click('[data-act="'+action+'"]');
+      if(!await page.evaluate(id=>activeTab==='ibapa' && document.getElementById(id).getBoundingClientRect().top>=0 && document.getElementById(id).getBoundingClientRect().top<200,heading))throw new Error('Shortcut did not reach '+heading);
+      await page.click('#tab-home');
+    }
+  });
   await step('Expenses (compact picker, 14 types)', 'gastos', async () => {
     await page.evaluate(() => {
       state.settings.supply_picklist='Veggies,Eggs,Flour,Box,Oil,Sauce,Mayo,Bonito,Aonori,Togarashi,Gas,Cleaning';
-      gx.open=true;showTab('gastos');
+      gastosPer=currentPeriod(addDays(currentPeriod(todayStr()).start,-1));
+      gx.date=gastosPer.end;gx.open=true;showTab('gastos');
     });
     const picker=await page.evaluate(() => ({count:document.getElementById('gxPick').options.length,
       height:document.getElementById('gxPick').getBoundingClientRect().height,
@@ -605,7 +635,7 @@ async function main(){
     server.close();
   }
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
-  const checks = VIEWPORTS.length * (TABS.reduce((n, t) => n + 1 + (t.prev ? 1 : 0), 0) + 8);
+  const checks = VIEWPORTS.length * (TABS.reduce((n, t) => n + 1 + (t.prev ? 1 : 0), 0) + 9);
   if (ok) console.log('\nPASS — ' + checks + ' screens fit the phone, no errors (' + secs + 's)');
   else console.log('\nFAIL — see the FAIL lines above (' + secs + 's)');
   process.exitCode = ok ? 0 : 1;

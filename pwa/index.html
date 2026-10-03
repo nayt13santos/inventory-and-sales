@@ -552,7 +552,7 @@ details > summary{cursor:pointer;font-weight:700;min-height:44px;}
 /* Tab bar */
 .tabbar{
   position:fixed; left:0; right:0; bottom:0; z-index:30;
-  display:grid; grid-template-columns:repeat(4,1fr);
+  display:grid; grid-template-columns:repeat(5,minmax(0,1fr));
   background:var(--paper); border-top:1px solid var(--line);
   padding-bottom:env(safe-area-inset-bottom);
 }
@@ -565,6 +565,64 @@ details > summary{cursor:pointer;font-weight:700;min-height:44px;}
    eye and washed out in sunlight. It now carries a bar as well (v2.9.3). */
 .tab[aria-selected="true"]{ color:var(--accent-text); box-shadow:inset 0 3px 0 var(--deep); }
 .tab svg{ width:24px; height:24px; }
+
+/* Home: a sales receipt, a short daily rhythm, and the next useful actions. */
+.home-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:4px 0 18px;}
+.home-heading h1{font:800 30px/1.15 var(--display);}
+.home-heading p{color:var(--muted);font-size:14px;margin-top:4px;}
+.home-stamp{width:46px;height:46px;border:1px solid var(--line-strong);border-radius:50%;display:grid;place-items:center;color:var(--deep);}
+.home-stamp svg{width:25px;height:25px;}
+.home-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:22px;}
+.home-actions button{min-height:54px;border:1px solid var(--deep);border-radius:12px;background:var(--paper);font:700 17px var(--display);display:flex;align-items:center;justify-content:center;gap:8px;}
+.home-actions button:first-child{background:var(--deep);color:#fff;}
+.home-actions svg{width:20px;height:20px;flex-shrink:0;}
+.home-today{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);margin-bottom:13px;}
+.home-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);flex-shrink:0;}
+.home-dot.done{background:var(--ok);}
+.home-receipt{position:relative;padding:22px 22px 27px;background:var(--ink);color:var(--bg);border-radius:18px 18px 0 0;margin-bottom:26px;}
+.home-receipt:after{content:'';position:absolute;left:0;right:0;bottom:-9px;height:10px;background:linear-gradient(135deg,var(--ink) 25%,transparent 25%) -5px 0/20px 20px,linear-gradient(225deg,var(--ink) 25%,transparent 25%) -5px 0/20px 20px;}
+.home-receipt-top{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+.home-receipt-top span{font-size:15px;color:#E8D8C5;}
+.home-receipt-top button{border:1px solid #8B715A;background:transparent;border-radius:99px;color:var(--bg);font-size:13px;padding:7px 12px;min-height:36px;}
+.home-receipt .home-amount{font:800 clamp(38px,10vw,52px)/1.15 var(--display);margin:13px 0 5px;overflow-wrap:anywhere;}
+.home-receipt .home-date{font-size:14px;color:#E8D8C5;}
+.home-wallets{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:20px;padding-top:16px;border-top:1px dashed #8B715A;}
+.home-wallets span{display:block;font-size:13px;color:#E8D8C5;}
+.home-wallets strong{display:block;margin-top:3px;font:700 21px var(--display);font-variant-numeric:tabular-nums;}
+.home-section{margin:0 0 22px;}
+.home-section-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;}
+.home-section-head h2{font:800 21px var(--display);}
+.home-section-head .home-link{flex-shrink:0;}
+.home-link{border:0;background:transparent;color:var(--accent-text);font:700 15px var(--display);min-height:40px;padding:4px 0;cursor:pointer;}
+.home-sub{font-size:13px;color:var(--muted);}
+.home-trend{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:7px;margin-top:16px;}
+.home-day{padding:0;border:0;background:none;min-width:0;cursor:pointer;}
+.home-day-value{display:block;font-size:11px;color:var(--muted);white-space:nowrap;}
+.home-bar-track{height:92px;display:flex;align-items:flex-end;justify-content:center;margin:7px 0;}
+.home-bar{display:block;width:70%;max-width:38px;border-radius:5px 5px 2px 2px;background:#D5BA99;min-height:3px;}
+.home-day:last-child .home-bar{background:var(--accent);}
+.home-day.missing .home-bar{background:none;border:1px dashed var(--line-strong);min-height:8px;}
+.home-day.closed .home-bar{background:var(--line-strong);}
+.home-day-label{font:700 13px var(--display);color:var(--muted);}
+.home-ledger{background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:17px 18px;}
+.home-ledger-row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:8px 0;font-size:15px;}
+.home-ledger-row strong{font:700 21px var(--display);text-align:right;white-space:nowrap;}
+.home-ledger-row.muted{color:var(--muted);font-size:13px;}
+.home-ledger-row.muted strong{font-size:16px;}
+.home-last-cutoff{margin-top:12px;padding-top:13px;border-top:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:8px;}
+.home-last-cutoff strong{display:block;font:700 17px var(--display);}
+.home-stock-row{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:12px 0;border-bottom:1px solid var(--line);}
+.home-stock-row:last-child{border-bottom:0;padding-bottom:0;}
+.home-stock-row:first-child{padding-top:0;}
+.home-stock-row strong{font-size:15px;}
+.home-stock-row small{display:block;color:var(--muted);font-size:13px;margin-top:3px;}
+.home-stock-qty{font:700 16px var(--display);color:var(--deep);white-space:nowrap;}
+.home-badge{font:700 13px var(--display);color:var(--deep);background:var(--soft);border-radius:99px;padding:4px 9px;}
+.home-backlogs{width:100%;text-align:left;display:flex;justify-content:space-between;align-items:center;gap:14px;background:transparent;border:0;border-top:1px solid var(--line-strong);padding:18px 0;cursor:pointer;}
+.home-backlogs strong{font:700 21px var(--display);display:block;}
+.home-backlogs span{font-size:13px;color:var(--muted);}
+.home-notice{border-left:3px solid var(--accent);padding:8px 12px;margin:0 0 16px;font-size:14px;}
+#stockHeading,#backlogHeading{scroll-margin-top:85px;}
 
 /* Expense entry stays within thumb reach even on a long history/form. */
 #panel-gastos{ padding-bottom:84px; }
@@ -618,14 +676,19 @@ body:has(#panel-gastos:not([hidden]) .expense-actions) #toast{ bottom:calc(166px
     <button type="button" data-act="goto-ibapa">Set up →</button>
   </div>
 
-  <section id="panel-benta" role="tabpanel" aria-labelledby="tab-benta"></section>
+  <section id="panel-home" role="tabpanel" aria-labelledby="tab-home"></section>
+  <section id="panel-benta" role="tabpanel" aria-labelledby="tab-benta" hidden></section>
   <section id="panel-gastos" role="tabpanel" aria-labelledby="tab-gastos" hidden></section>
   <section id="panel-cutoff" role="tabpanel" aria-labelledby="tab-cutoff" hidden></section>
   <section id="panel-ibapa" role="tabpanel" aria-labelledby="tab-ibapa" hidden></section>
 </main>
 
 <nav class="tabbar" role="tablist" aria-label="Main tabs">
-  <button class="tab" id="tab-benta" role="tab" aria-selected="true" aria-controls="panel-benta" data-tab="benta">
+  <button class="tab" id="tab-home" role="tab" aria-selected="true" aria-controls="panel-home" data-tab="home">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z"/></svg>
+    Home
+  </button>
+  <button class="tab" id="tab-benta" role="tab" aria-selected="false" aria-controls="panel-benta" data-tab="benta">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 2h12v20l-2-1.5L14 22l-2-1.5L10 22l-2-1.5L6 22Z"/><path d="M9 7h6M9 11h6M9 15h4"/></svg>
     Sales
   </button>
@@ -662,7 +725,7 @@ body:has(#panel-gastos:not([hidden]) .expense-actions) #toast{ bottom:calc(166px
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.30.4';
+const APP_VERSION = '2.31.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -4456,7 +4519,7 @@ function visibleBacklogs(){
 /* ============================================================
    Shared chrome — status pill, demo banner, toast, tabs
    ============================================================ */
-let activeTab = 'benta';
+let activeTab = 'home';
 const $ = id => document.getElementById(id);
 
 function updateStatus(){
@@ -4489,7 +4552,7 @@ function toast(msg){
   toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
 }
 
-const TABS = ['benta','gastos','cutoff','ibapa'];
+const TABS = ['home','benta','gastos','cutoff','ibapa'];
 function showTab(name){
   activeTab = name;
   for (const t of TABS){
@@ -4521,7 +4584,8 @@ function flushBentaRender(){
 function renderPanel(name){
   ensureShape();
   try{
-    if (name === 'benta'){
+    if (name === 'home') renderHome();
+    else if (name === 'benta'){
       if (bentaIsEditing()){ bentaRenderPending = true; return; }
       bentaRenderPending = false;
       renderBenta();
@@ -4537,6 +4601,85 @@ function renderPanel(name){
     if (panel) panel.innerHTML = '<div class="card"><p class="err">This screen could not be shown.</p>' +
       '<p class="hint" style="margin-top:6px;">Close the app and open it again. Your saved data is still on this phone.</p></div>';
   }
+}
+
+/* Home reads the same saved mirror as the other panels. Missing days stay
+   missing, and an entry waiting to sync is never described as server-saved. */
+function homeSnapshot(){
+  const today=todayStr(), days=asObj(state.days);
+  const dates=Object.keys(days).filter(d=>isDateStr(d) && d<=today && isObj(days[d])).sort();
+  const latest=dates.length ? dates[dates.length-1] : null;
+  const end=latest || today;
+  const week=Array.from({length:7},(_,i)=>{
+    const date=addDays(end,i-6), row=days[date];
+    return {date,missing:!isObj(row),closed:truthy(asObj(row).closed),
+      total:isObj(row)?r2(num(row.total)+excludedForPeriod({start:date,end:date}).total):null};
+  });
+  const per=currentPeriod(today), f=computeCutoff(per);
+  const previous=currentPeriod(addDays(per.start,-1));
+  const previousHasData=dates.some(d=>inPeriod(d,previous));
+  const prior=previousHasData ? cutoffGuide(previous,computeCutoff(previous)) : null;
+  const stock=stockStatusList();
+  const low=stock.filter(s=>s.low).sort((a,b)=>Number(b.out)-Number(a.out) || a.on_hand-b.on_hand);
+  const debts=visibleBacklogs().map(b=>({name:b.name,balance:r2(backlogBalance(b))}));
+  const pending=date=>asArr(queue).some(q=>q.action==='saveDay' && asObj(q.payload).date===date);
+  return {today,latest,day:latest?days[latest]:null,week,per,previous,prior,
+    excluded:latest?excludedForPeriod({start:latest,end:latest}).total:0,
+    entered:dates.filter(d=>inPeriod(d,per)).length,
+    receipts:r2(num(f.total)+num(f.excluded)),daily:r2(noteMinorVal(f)+num(f.salary)),
+    partial:previewIncomplete(per),stock,low,
+    debts:debts.filter(b=>b.balance>0),debtTotal:r2(debts.reduce((s,b)=>s+Math.max(0,b.balance),0)),
+    credits:r2(debts.reduce((s,b)=>s+Math.max(0,-b.balance),0)),
+    todayPending:pending(today),latestPending:pending(latest)};
+}
+function renderHome(){
+  const s=homeSnapshot(), d=asObj(s.day), hasToday=isObj(asObj(state.days)[s.today]);
+  const todayClosed=hasToday && truthy(state.days[s.today].closed);
+  const dateLabel=date=>new Date(date+'T12:00:00+08:00').toLocaleDateString('en-PH',
+    {timeZone:'Asia/Manila',month:'short',day:'numeric',weekday:'short'});
+  const plus='<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>';
+  let h='<div class="home-heading"><div><h1>Home</h1><p>'+esc(dateLabel(s.today))+'</p></div>'+
+    '<span class="home-stamp" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 7h14v13H5zM8 4v6M16 4v6M5 12h14M9 16h6"/></svg></span></div>';
+  h+='<div class="home-today"><span class="home-dot'+(hasToday&&!s.todayPending?' done':'')+'"></span>'+
+    (s.todayPending?'Today’s entry is waiting to sync':todayClosed?'Today is marked closed':hasToday?'Today’s sales are recorded':'Today’s sales haven’t been entered yet')+'</div>'+
+    '<div class="home-actions"><button type="button" data-act="home-sales">'+plus+(hasToday?'Today’s sales':'Add sales')+'</button>'+
+    '<button type="button" data-act="home-expense">'+plus+'Add expense</button></div>';
+  if(asArr(attention).length) h+='<div class="home-notice">An entry needs a look. <button class="home-link" data-act="goto-ibapa">Review →</button></div>';
+  h+='<section class="home-receipt" aria-label="Latest recorded day"><div class="home-receipt-top"><span>'+
+    (s.latest===s.today?'Today’s sales':'Latest recorded day')+'</span>'+
+    (s.latest?'<button type="button" data-act="home-sales" data-date="'+s.latest+'">View day ↗</button>':'')+'</div>'+
+    '<div class="home-amount">'+(s.latest?peso(num(d.total)+s.excluded):'—')+'</div>'+
+    '<p class="home-date">'+(s.latest?esc(dateLabel(s.latest))+(truthy(d.closed)?' · Shop closed':''):'Your first entry will appear here')+
+    (s.latestPending?' · Waiting to sync':'')+'</p>'+
+    '<div class="home-wallets"><div><span>Cash received</span><strong>'+(s.latest?peso(num(d.total)-num(d.gcash)+s.excluded):'—')+'</strong></div>'+
+    '<div><span>GCash received</span><strong>'+(s.latest?peso(d.gcash):'—')+'</strong></div></div>'+
+    (s.excluded?'<p class="home-date" style="margin-top:12px;">Includes '+peso(s.excluded)+' kept separate for excluded sales.</p>':'')+'</section>';
+  const peak=Math.max(1,...s.week.map(w=>w.total||0));
+  const compact=n=>n>=1000?(n/1000).toFixed(1).replace(/\.0$/,'')+'k':String(r2(n));
+  h+='<section class="home-section"><div class="home-section-head"><h2>Sales at a glance</h2><span class="home-badge">7 days</span></div>'+
+    '<p class="home-sub">'+esc(fmtShort(s.week[0].date))+' – '+esc(fmtShort(s.week[6].date))+' · Cash + GCash</p><div class="home-trend">';
+  for(const w of s.week){
+    const label=fmtShort(w.date)+': '+(w.missing?'No entry':w.closed?'Closed':peso(w.total));
+    h+='<button type="button" class="home-day'+(w.missing?' missing':w.closed?' closed':'')+'" data-act="home-sales" data-date="'+w.date+'" aria-label="'+esc(label)+'" title="'+esc(label)+'">'+
+      '<span class="home-day-value">'+(w.missing?'—':w.closed?'Closed':compact(w.total))+'</span><span class="home-bar-track"><span class="home-bar" style="height:'+Math.max(3,Math.round((w.total||0)/peak*92))+'px;"></span></span>'+
+      '<span class="home-day-label">'+Number(w.date.slice(-2))+'</span></button>';
+  }
+  h+='</div>'+(s.week.some(w=>w.missing)?'<p class="home-sub" style="margin-top:9px;">— means no entry. Tap a day to open it.</p>':'')+'</section>';
+  h+='<section class="home-section"><div class="home-section-head"><h2>This cutoff</h2><button type="button" class="home-link" data-act="home-cutoff" data-date="'+s.per.start+'">Open guide →</button></div>'+
+    '<div class="home-ledger"><p class="home-sub">'+esc(periodLabel(s.per))+' · '+s.entered+' days entered</p>'+
+    '<div class="home-ledger-row"><span>Received so far</span><strong>'+peso(s.receipts)+'</strong></div>'+
+    '<div class="home-ledger-row muted"><span>Daily expenses recorded</span><strong>'+peso(s.daily)+'</strong></div>'+
+    '<p class="home-sub">'+(s.partial?'Sync to load all records for this cutoff.':'Open the guide to see where to put the money.')+'</p>';
+  if(s.prior) h+='<div class="home-last-cutoff"><div><span class="home-sub">'+esc(periodLabel(s.previous))+'</span><strong>'+
+    (s.prior.remaining===null?'Review the previous cutoff':s.prior.remaining<0?peso(Math.abs(s.prior.remaining))+' shortfall':peso(s.prior.remaining)+' left to assign')+
+    '</strong></div><button type="button" class="home-link" data-act="home-cutoff" data-date="'+s.previous.start+'" aria-label="Open previous cutoff">View →</button></div>';
+  h+='</div></section><section class="home-section"><div class="home-section-head"><h2>Stock to watch</h2><button type="button" class="home-link" data-act="home-stock">All stock →</button></div><div class="home-ledger">';
+  for(const item of s.low.slice(0,3)) h+='<div class="home-stock-row"><div><strong>'+esc(item.product)+'</strong><small>'+
+    (item.on_hand<0?'Check the stock count':item.out?'Time to restock':'Getting low')+'</small></div><span class="home-stock-qty">'+esc(String(item.on_hand)+' '+item.unit)+'</span></div>';
+  if(!s.low.length) h+='<p class="home-sub">'+(s.stock.length?'No low-stock alerts in the current records.':'Add stock items to keep an eye on supplies.')+'</p>';
+  if(s.low.length>3) h+='<p class="home-sub" style="margin-top:12px;">'+(s.low.length-3)+' more items to check in All stock.</p>';
+  h+='</div></section><button type="button" class="home-backlogs" data-act="home-backlogs"><div><strong>Backlogs</strong><span>'+s.debts.length+' outstanding'+(s.credits?' · '+peso(s.credits)+' credit recorded':'')+'</span></div><strong>'+peso(s.debtTotal)+' <span aria-hidden="true">↗</span></strong></button>';
+  $('panel-home').innerHTML=h;
 }
 
 /* ============================================================
@@ -8341,7 +8484,7 @@ function renderIbapa(){
   '</div>';
 
   // Backlogs
-  h += '<div class="section-title">Backlogs</div><div class="card">';
+  h += '<div class="section-title" id="backlogHeading">Backlogs</div><div class="card">';
   const bls = visibleBacklogs();
   if (!bls.length){
     h += '<p class="hint">No unpaid backlogs. Fully paid items are cleared from this list; their payment history stays saved.</p>';
@@ -8531,7 +8674,7 @@ function updateCatchUp(){
 function stockOnHandHTML(){
   let list = [];
   try{ list = stockStatusList(); }catch(err){ console.error(err); }
-  let h = '<div class="section-title">Stock on hand</div><div class="card">';
+  let h = '<div class="section-title" id="stockHeading">Stock on hand</div><div class="card">';
   if (!list.length){
     h += '<p class="hint">No products yet. Add them under Maintenance below.</p></div>';
     return h;
@@ -10408,6 +10551,27 @@ document.addEventListener('click', (ev) => {
   const act = el.dataset.act;
 
   if (act === 'goto-ibapa') showTab('ibapa');
+  else if (act === 'home-sales'){
+    stashBentaDraft();
+    loadBentaForm(isDateStr(el.dataset.date)?el.dataset.date:todayStr());
+    showTab('benta');
+  }
+  else if (act === 'home-expense'){
+    if (!txt(gx.amount)) gx.date=todayStr();
+    gastosPer=currentPeriod(gx.date);
+    gx.open=true;
+    gxBulk.open=false;
+    showTab('gastos');
+  }
+  else if (act === 'home-cutoff'){
+    cutoffPer=currentPeriod(isDateStr(el.dataset.date)?el.dataset.date:todayStr());
+    showTab('cutoff');
+  }
+  else if (act === 'home-stock' || act === 'home-backlogs'){
+    showTab('ibapa');
+    const heading=$(act==='home-stock'?'stockHeading':'backlogHeading');
+    if(heading) heading.scrollIntoView({block:'start'});
+  }
 
   // Needs attention
   else if (act === 'attn-open') openAttentionEntry(el.dataset.key);
@@ -11005,7 +11169,7 @@ try{ flagLegacyGcashQueue(); }catch(err){ console.error(err); }
 // Bound the stored history on the way in, not only on the way out.
 try{ pruneState(); persistState(); persistDrafts(); }catch(err){ console.error(err); }
 updateStatus();
-showTab('benta');
+showTab('home');
 (async () => {
   // Drain BEFORE bootstrap so the snapshot can't clobber queued edits.
   await drainQueue();

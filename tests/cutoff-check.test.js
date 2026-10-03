@@ -23,6 +23,8 @@ function app() {
     ${slab('function invalidateNoteFor(date){','function enqueue(action, payload){')}
     ${slab('function cutoffPaymentHTML(per, f){','function renderCutoff(){')}
     ${slab('function suppliesSplit(f){','function excludedBlockHTML(f){')}
+    ${slab('function backlogBalance(bl){', "let activeTab = 'home';")}
+    ${slab('function homeSnapshot(){', 'function renderHome(){')}
     let state=freshState(),queue=[],attention=[],config=freshConfig(),drafts={},lastNote=null;
     const tinEdits={};
     function previewIncomplete(){return false;}
@@ -34,7 +36,7 @@ function app() {
       applyLocalCutoffCheck,applyLocalTinCount,applyLocalCutoffSplit,normCutoffInput,splitFor,cashLinesHTML,mirrorRecordedSplit,
       sanitizeState,sanitizeQueue,reapplyQueue,computeCutoff,buildNote,
       cutoffMoneyFlow,cutoffMoneyFlowHTML,cutoffUnknownSource,gcashCutoffHTML,splitEdits,applyLocalExpense,backlogPayable,
-      cutoffGuide,cutoffGuideHTML};
+      cutoffGuide,cutoffGuideHTML,homeSnapshot,todayStr,addDays,currentPeriod};
   `)();
 }
 const per={start:'2026-09-16',end:'2026-09-30'}, key=per.start+'_'+per.end;
@@ -61,6 +63,34 @@ function fixture() {
 }
 let passed=0;
 function test(name,fn){fn();passed++;console.log('  PASS  '+name);}
+test('Home distinguishes missing days, closed days and the latest entry, including excluded sales',()=>{
+  const a=app(),today=a.todayStr(),prior=a.addDays(today,-1),closed=a.addDays(today,-2);
+  a.state.days[prior]={date:prior,total:1000,gcash:250,excluded:50,salary:200};
+  a.state.counts[prior]=[{sku:'nori',sold:2,amount:50,in_cutoff:false}];
+  a.state.days[closed]={date:closed,total:0,closed:true};
+  a.state.days[a.addDays(today,1)]={total:9999};
+  a.queue.push({action:'saveDay',payload:{date:prior}});
+  const before=JSON.stringify(a.state),s=a.homeSnapshot();
+  assert.equal(s.latest,prior);assert.equal(s.latestPending,true);assert.equal(s.todayPending,false);
+  assert.equal(s.week[6].total,1050);assert.equal(s.week[5].closed,true);assert.equal(s.week[5].total,0);
+  assert.equal(s.week[4].missing,true);assert.equal(s.week[4].total,null);
+  assert.equal(JSON.stringify(a.state),before,'Home never changes business data');
+});
+test('Home uses the cutoff totals and separates outstanding debts from credits and paid balances',()=>{
+  const a=app(),today=a.todayStr();
+  a.state.days[today]={date:today,total:1000,gcash:250,excluded:50,salary:200};
+  a.state.counts[today]=[{sku:'nori',sold:2,amount:50,in_cutoff:false}];
+  a.state.expenses.x={date:today,category:'Other',amount:75};
+  a.state.backlogs=[{name:'Open',active:true,balance:500},{name:'Paid',active:true,balance:0},{name:'Credit',active:true,balance:-50}];
+  a.queue.push({action:'saveExpense',payload:{date:today,category:'Backlog',backlogRef:'Open',amount:100}});
+  const s=a.homeSnapshot();
+  assert.equal(s.receipts,1050);assert.equal(s.daily,275);assert.equal(s.entered,1);
+  assert.equal(s.debts.length,1);assert.equal(s.debtTotal,400);assert.equal(s.credits,50);
+});
+test('Home with no records has no invented sales or completed cutoff',()=>{
+  const s=app().homeSnapshot();assert.equal(s.latest,null);assert.equal(s.prior,null);
+  assert(s.week.every(w=>w.missing && w.total===null));assert.equal(s.entered,0);
+});
 function reconciledFixture(){
   const x=fixture();
   x.a.state.expenses.mama.paid_from='';x.a.state.expenses.electric.paid_from='';

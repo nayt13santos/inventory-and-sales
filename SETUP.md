@@ -176,7 +176,7 @@ Nothing to do — the app updates itself. When a new version is published, the n
 
 It deliberately **waits** if Mama is mid-entry: a half-typed day is never interrupted, and the update applies after she saves or the next time the app is opened. Nothing queued is ever lost across an update.
 
-To confirm which version a phone is on: **More → About**. Current release: **app 2.30.4**, **script 2.30.1**. The separate photo reader remains at 2.29.0.
+To confirm which version a phone is on: **More → About**. Current live release: **app 2.30.4**, **script 2.30.1**. The Home dashboard is in local preview at **app 2.31.0**. The separate photo reader remains at 2.29.0.
 
 ## Updating by hand (if you skip the automation)
 

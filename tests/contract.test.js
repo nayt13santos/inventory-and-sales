@@ -132,7 +132,7 @@ const S_ATTN      = slab('function noteAttention(kind, action, payload, message)
 // applyServerDay — consumes the saveDay RESPONSE.
 const S_SERVERDAY = slab('function applyServerDay(p, data){', 'async function doBootstrap(){');
 // applyBootstrap (runs every row through the normalizers) + backlogBalance.
-const S_BOOTSTRAP = slab('function applyBootstrap(data){', "let activeTab = 'benta';");
+const S_BOOTSTRAP = slab('function applyBootstrap(data){', "let activeTab = 'home';");
 // The Sales form: reads a stored day back out, and re-emits the request payload.
 const S_FORM      = slab('function loadBentaForm(date){', '// SKU list to render:');
 // The two collapsible Sales cards (wage + stock used) as HTML STRINGS: what is

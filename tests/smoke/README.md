@@ -2,7 +2,7 @@
 
 `phone.js` opens the real `pwa/index.html` in headless Chromium, emulating a
 phone (375×812 and 360×740, both @2x, mobile mode on), injects a realistic
-fixture into `state` so every screen has content, and walks the four tabs.
+fixture into `state` so every screen has content, and walks the five tabs.
 
 It exists because of v2.22.1: a sentence landed inside a `white-space:nowrap`
 span on the Cutoff tab, the document grew wider than the phone, the fixed
@@ -12,13 +12,13 @@ phone. This makes that class of bug fail CI.
 
 ## What it checks
 
-On each tab (Sales, Expenses, Cutoff, More), and again after stepping the
+On each tab (Home, Sales, Expenses, Cutoff, More), and again after stepping the
 Expenses and Cutoff screens back one cutoff:
 
 | | check | on failure |
 |---|---|---|
 | a | `documentElement.scrollWidth` ≤ the **screen** width (375 / 360) — no sideways overflow | names every element whose right edge is past the screen (tag, class, first 60 chars of text) |
-| b | all four `nav.tabbar` buttons are on the screen and visible | names the tab and which edge is off |
+| b | all five `nav.tabbar` buttons are on the screen and visible | names the tab and which edge is off |
 | c | no console errors, no uncaught page errors | quotes them |
 | d | the tab's `<section id="panel-…">` rendered some text | says it was empty |
 
@@ -33,7 +33,8 @@ that state and would have passed.
 Exit code is non-zero if anything fails; otherwise one `PASS` line per screen
 per viewport.
 
-The 28 screen checks also exercise the allocation guide, split editing/saving,
+The 32 screen checks also exercise Home shortcuts (including draft preservation,
+expense dates and stock/backlog anchors), the allocation guide, split editing/saving,
 backlog payments, and daily expense flow. The guide has no payment checklist or
 cash-count requirement.
 With 14 expense types, the picker remains one field. The real controls save one
