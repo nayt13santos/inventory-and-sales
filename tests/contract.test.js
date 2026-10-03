@@ -2884,11 +2884,10 @@ test('the screens actually use the guards: note, toast, wage card, prices, split
   assert.ok(/liveCutoff\(/.test(cutoff), 'the preview must read the Split field the way a save does');
   const live = slab('function updateSplitLive(){', 'function saveSplit(){');
   assert.ok(/liveCutoff\(/.test(live), 'and so must the live update while she types');
-  // A note ALREADY on screen was built from the saved split, so it must come off
-  // the screen while the field disagrees — the same contradiction, two taps away.
-  assert.ok(/noteBlock/.test(cutoff) && /pendingSplit\(/.test(cutoff),
-    'the rendered note block must be hidden when the Split field is unsaved');
-  assert.ok(/noteBlock/.test(live), 'and hidden/shown as she types, without a re-render');
+  // Owner removed the duplicate note UI in v2.30.3. Split editing still
+  // updates the one guide without replacing the field being typed into.
+  assert.doesNotMatch(cutoff, /id="noteBlock"|id="genBtn"/);
+  assert.match(live, /updateCutoffCheckPreview\(\)/);
 });
 
 // ===========================================================================
@@ -5317,17 +5316,11 @@ test('SOURCE PIN: the Cutoff card separates opened from paid, and a negative exp
   const card = src.slice(at - 1200, at + 2400);
   assert.match(card, /if \(num\(f\.suppliesUsed\) > 0 \|\| asArr\(f\.suppliesUsedRows\)\.length\)/,
     'it stays away when nothing has been opened');
-  // v2.16.0: the sentence must name the rows that are actually on screen. The
-  // single "Supplies" row it used to point at no longer exists.
-  assert.match(card, /shows below as <b>Supplies \(major\)<\/b>/, 'it names its own row');
-  assert.match(card, /not <b>Supplies \(minor\)<\/b>/, 'and the row it is NOT');
-  assert.match(card, /money you '\s*\+\n?\s*'<b>paid<\/b>/, 'it says what that other one is');
-  assert.match(card, /may be opened across the next two/, 'and why they differ');
+  // v2.30.3: the note box is gone; valuation points to the one guide above.
+  assert.match(card, /Stock opened, valued at its saved unit cost/);
+  assert.match(card, /major supplies amount in the guide above/);
   assert.ok(!/It is not the “Supplies” line below/.test(card),
     'and it no longer points at a label the total card stopped printing');
-  assert.match(card, /it IS deducted from Remaining/,
-    'v2.22.0: the card no longer claims this is outside the totals — it is one of them');
-  assert.match(card, /deliver on credit/, 'and says WHY a cost you have not paid still counts');
   assert.ok(!/Nothing here is added to any total/.test(card),
     'the old promise is gone, not merely softened');
 
@@ -5632,8 +5625,6 @@ test('THE OPENED VALUE IS AN ALLOCATION, and the block adds to Total (v2.22.0)',
 
 test('SOURCE PIN: backlog payments remain outside allocations and are named in the guide', () => {
   const card = slab('function renderCutoff(){', 'function stockCutoffHTML(per){');
-  assert.match(card, /num\(f\.backlogPaid\) > 0/);
-  assert.match(card, /Backlog payments are shown separately in the guide above/);
   assert.match(card, /cutoffGuideHTML\(per,live\)/);
   assert.match(HTML, /row\('Backlog payments recorded',deduct\(g.backlogUsed\)\)/);
 });
@@ -8176,7 +8167,7 @@ test('GCASH EXPENSES: legacy breakdown stays readable while the new guide shows 
   const src = fs.readFileSync(INDEX_HTML, 'utf8');
   const render = src.slice(src.indexOf('function renderCutoff(){'), src.indexOf('function stockCutoffHTML(per){'));
   assert.doesNotMatch(render, /gcashCutoffHTML\(f,per\)/, 'manual wallet distribution is no longer part of the guide');
-  assert.match(render, /GCash received<\/span><span class="v">' \+ peso\(f.gcash\)/);
+  assert.match(HTML, /row\('GCash received',peso\(f.gcash\)\)/, 'receipts are shown once in the guide');
 });
 
 test('GCASH EXPENSES: unsynced expense edits and deletion update the preview and invalidate old notes', () => {
@@ -8197,7 +8188,7 @@ test('GCASH EXPENSES: unsynced expense edits and deletion update the preview and
   assert.strictEqual(app.computeCutoff(t.per).gcashOut, 0);
 });
 
-test('SOURCE PIN: the Cutoff guide replaces payment tracking and keeps the note and backlog controls', () => {
+test('SOURCE PIN: the Cutoff guide owns split editing and removes the duplicate note section', () => {
   // Owner, 2026-10-03: "too many boxes" — nine stacked cards became the cash
   // box, the note box and the backlog box, with the detail folded inside them.
   const render = slab('function renderCutoff(){', 'function stockCutoffHTML(per){');
@@ -8207,15 +8198,16 @@ test('SOURCE PIN: the Cutoff guide replaces payment tracking and keeps the note 
   }
   // Owner, 2026-10-04: only values are needed; cash/GCash distribution is manual.
   assert.doesNotMatch(render, /Change what was paid|cutoffCheckFormHTML|id="tinCountIn"|cutoffCashHTML|gcashCutoffHTML/);
-  assert.match(render, /<summary>How Supplies \(major\) was valued<\/summary>/, 'and the stock valuation inside the note box');
+  assert.match(render, /<summary>How Supplies \(major\) was valued<\/summary>/, 'stock valuation remains available within the guide');
   // The two regions rewritten on every keystroke are INNER divs holding only
   // the computed HTML, so the count field and the checklist inputs beside them
   // keep their focus while the figures move.
   assert.match(render, /<div id="coMoneyFlow">' \+ cutoffGuideHTML\(per,live\)/);
-  // The three boxes, in order, each still carrying what the older pins expect.
-  const iCash = render.indexOf('id="coMoneyFlow"'), iNote = render.indexOf('>Total sales<'), iSplit = render.indexOf('id="coSplitIn"'),
-    iGen = render.indexOf('id="genBtn"'), iBl = render.indexOf('Pay a backlog</div><div class="card">');
-  assert.ok(iCash > 0 && iCash < iNote && iNote < iSplit && iSplit < iGen && iGen < iBl, 'cash, then the note with its split and generate button, then the backlogs');
+  assert.doesNotMatch(render, /Split and cutoff note|cutoff-note|id="noteBlock"|id="genBtn"|Generate cutoff note|data-act="copy-note"|data-act="share-note"|>Total sales</);
+  assert.match(render, /id="cutoffSplitEditor"><summary>Change split amount<\/summary>/);
+  const iCash = render.indexOf('id="coMoneyFlow"'), iSplit = render.indexOf('id="coSplitIn"'),
+    iBl = render.indexOf('Pay a backlog</div><div class="card">');
+  assert.ok(iCash>0 && iCash<iSplit && iSplit<iBl, 'one guide with its split editor, followed by backlogs');
   // The form itself no longer wraps itself in a card.
   const form = slab('function cutoffCheckFormHTML(per){', 'function updateCutoffCheckPreview(){');
   assert.ok(form.indexOf('<details class="card">') < 0 && form.indexOf('</details>') < 0, 'the caller folds it');

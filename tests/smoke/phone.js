@@ -518,22 +518,21 @@ async function runViewport(browser, baseUrl, vp){
     await page.click('#tab-cutoff');
   });
   await step('Cutoff (allocation guide needs no payment checklist)', 'cutoff', async () => {
-    await page.evaluate(()=>{
-      document.querySelector('.cutoff-note').open=true;
-    });
     const text=await page.$eval('#coMoneyFlow',e=>e.innerText);
     if(!text.includes('Set aside for') || !text.includes('Backlog payments recorded') || text.includes('Cash matches') || text.includes('Still to deduct'))
       throw new Error('The cutoff did not show an allocation guide.');
     if(await page.$('#tinCountIn') || await page.$('[data-act="check-save"]') || await page.$('[data-check-status]'))
       throw new Error('The guide still requires a cash count or payment checklist.');
+    if(await page.$('.cutoff-note') || await page.$('#noteBlock') || await page.$('[data-act="cutoff-generate"]'))
+      throw new Error('The duplicate cutoff note section is still present.');
   });
   // The owner edits allocation amounts, not payment statuses. The real split
   // field must keep focus while its guide updates and save through its button.
   await step('Cutoff (split updates the allocation guide)', 'cutoff', async () => {
     await page.evaluate(() => {
       showTab('cutoff');
-      document.querySelector('.cutoff-note').open=true;
     });
+    await page.click('#cutoffSplitEditor > summary');
     await page.focus('#coSplitIn');
     await page.$eval('#coSplitIn',e=>e.select());
     await page.keyboard.press('Backspace');
@@ -548,6 +547,10 @@ async function runViewport(browser, baseUrl, vp){
     const saved = await page.evaluate(() => ({split:computeCutoff(cutoffPer).split,pending:pendingSplit(cutoffPer),
       guide:cutoffGuide(cutoffPer,computeCutoff(cutoffPer)).allocations.find(l=>l.key==='split').amount}));
     if(saved.split!==6000||saved.pending||saved.guide!==6000)throw new Error('The saved split and guide disagree: '+JSON.stringify(saved));
+    await page.click('#cutoffSplitEditor > summary');
+    await page.click('[data-act="split-save"]');
+    if(await page.evaluate(()=>computeCutoff(cutoffPer).split)!==6000)
+      throw new Error('Saving the untouched split replaced it with the usual amount.');
     if (process.env.OCTOGO_SCREENSHOT_DIR) {
       fs.mkdirSync(process.env.OCTOGO_SCREENSHOT_DIR,{recursive:true});
       await page.evaluate(() => window.scrollTo(0,0));
