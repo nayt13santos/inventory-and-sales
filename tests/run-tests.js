@@ -924,8 +924,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.28.0', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.28.0');
+  assert.strictEqual(g.data.version, '2.29.0', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.29.0');
 });
 
 // ---------------------------------------------------------------------------
@@ -5954,9 +5954,10 @@ test('readSheet: a good photo becomes a reading, and the PHOTO IS KEPT FIRST', (
   // The DATE IS THE PHONE'S: it knows which night it photographed.
   assert.strictEqual(d.date, PAPER_NIGHT);
   assert.deepStrictEqual(d.counts[0],
-    { sku: 'box4', sod: 31, eod: 28, cheese: 1, gcash: 0, gcash_cheese: 0, confidence: 0.95 });
+    { sku: 'box4', sod: 31, eod: 28, sold: '', cheese: 1, gcash: 0, gcash_cheese: 0, confidence: 0.95 },
+    'v2.29.0: a lone sold figure travels beside the pair — blank when the paper wrote the pair');
   assert.deepStrictEqual(d.counts[1],
-    { sku: 'box10', sod: 55, eod: 34, cheese: 0, gcash: 14, gcash_cheese: 0, confidence: 0.9 });
+    { sku: 'box10', sod: 55, eod: 34, sold: '', cheese: 0, gcash: 14, gcash_cheese: 0, confidence: 0.9 });
   // The night's own total, the figure the phone's cross-check rests on.
   assert.strictEqual(d.total_on_paper, 2605);
   assert.deepStrictEqual(d.unread, [], 'a clean page names nothing as unread');
@@ -6031,8 +6032,35 @@ test('the request: the model in the URL, muteHttpExceptions on, and THE KEY NOT 
   assert.deepStrictEqual(schema.properties.counts.items.required, ['sku'],
     'every FIGURE is optional on purpose — an omitted field is an unread field');
   assert.deepStrictEqual(Object.keys(schema.properties.counts.items.properties).sort(),
-    ['cheese', 'confidence', 'eod', 'gcash', 'gcash_cheese', 'sku', 'sod']);
+    ['cheese', 'confidence', 'eod', 'gcash', 'gcash_cheese', 'sku', 'sod', 'sold'],
+    'v2.29.0: a row may carry one sold figure instead of a start-and-end pair');
   assert.ok(schema.properties.total_on_paper, 'the paper carries its own total, so the schema asks for it');
+});
+
+test('a row written as ONE sold figure reads as sold, with no start or end to be unread (v2.29.0)', () => {
+  // The paper no longer needs a start and an end count (the phone takes boxes
+  // sold since v2.29.0), so a row may carry the one number. It travels as
+  // `sold`; the pair stays blank and is NOT named as unread beside it.
+  let ctx = loadVision();
+  const said = JSON.parse(JSON.stringify(GOOD_READING));
+  said.counts[0] = { sku: 'box4', sold: 3, cheese: 1, gcash: 0, gcash_cheese: 0, confidence: 0.9 };
+  ctx.UrlFetchApp._reply(200, geminiSaid(said));
+  const r = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r.ok, true, r.error);
+  assert.deepStrictEqual(r.data.counts.find(c => c.sku === 'box4'),
+    { sku: 'box4', sod: '', eod: '', sold: 3, cheese: 1, gcash: 0, gcash_cheese: 0, confidence: 0.9 });
+  assert.ok(!r.data.unread.some(u => /^Box 4 (at the start|left at the end)/.test(u)),
+    'the pair is not missing when the figure is there: ' + JSON.stringify(r.data.unread));
+  // With neither the pair nor the figure, the counts ARE unread, and named.
+  ctx = loadVision();
+  const said2 = JSON.parse(JSON.stringify(GOOD_READING));
+  said2.counts[0] = { sku: 'box4', cheese: 1, gcash: 0, gcash_cheese: 0, confidence: 0.9 };
+  ctx.UrlFetchApp._reply(200, geminiSaid(said2));
+  const r2 = vpost(ctx, { token: VISION_TOK, action: 'readSheet', payload: readPayload() });
+  assert.strictEqual(r2.ok, true, r2.error);
+  assert.strictEqual(r2.data.counts.find(c => c.sku === 'box4').sold, '');
+  assert.ok(r2.data.unread.indexOf('Box 4 at the start of the day') > -1 && r2.data.unread.indexOf('Box 4 left at the end of the day') > -1,
+    JSON.stringify(r2.data.unread));
 });
 
 test("the prompt teaches the model the owner's OWN shorthand, and leaks neither secret", () => {
@@ -6376,14 +6404,14 @@ test('an unknown action is refused by name, and doGet answers without a token', 
   assert.strictEqual(r.error, 'Unknown action: "saveDay".',
     'this app cannot save a day, and says so rather than pretending');
   const g = JSON.parse(ctx.doGet({}).getContent());
-  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.28.0' } });
+  assert.deepStrictEqual(g, { ok: true, data: { name: 'octogo-vision', version: '2.29.0' } });
 });
 
 test('ping proves the setup WITHOUT spending a unit of quota — even with no key yet', () => {
   const ctx = loadVision({ keepKeyPlaceholder: true });
   const r = vpost(ctx, { token: VISION_TOK, action: 'ping', payload: {} });
   assert.strictEqual(r.ok, true, r.error);
-  assert.strictEqual(r.data.version, '2.28.0', 'the vision project ships with the release it belongs to');
+  assert.strictEqual(r.data.version, '2.29.0', 'the vision project ships with the release it belongs to');
   assert.strictEqual(r.data.model, 'gemini-3.6-flash');
   assert.strictEqual(r.data.key_configured, false, 'a yes/no — never the key itself');
   keepsSecrets(JSON.stringify(r));

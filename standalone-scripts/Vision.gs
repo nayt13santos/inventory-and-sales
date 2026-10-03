@@ -43,7 +43,7 @@
  * ========================================================================== */
 'use strict';
 
-var VERSION = '2.28.0';
+var VERSION = '2.29.0';
 var TZ = 'Asia/Manila';
 
 /** The Gemini API key, from aistudio.google.com. This project's only paid
@@ -391,6 +391,9 @@ function buildPrompt_(date, skus) {
     '  * One row per product. A real row reads:   B4 | 31-28 | 1c = 60 | 2 = 100',
     '  * The first token names the product: "B4" is the label "Box 4", shortened.',
     '  * "31-28" is SOD-EOD: 31 boxes at the start of the day, 28 left at the end.',
+    '  * A row may instead carry ONE number of boxes sold with no dash, e.g.  B4 | 3 | 1c = 60 | 2 = 100',
+    '    Report that single figure as "sold" and leave sod and eod out. When a SOD-EOD pair is',
+    '    written, report sod and eod and leave "sold" out. Never report both for one row.',
     '  * "1c = 60" is ONE box WITH CHEESE, priced at that product\'s cheese price.',
     '  * "2 = 100" is TWO plain boxes at that product\'s plain price.',
     '  * "Gc" (also "GC", "gc", "gcash") marks a figure as PAID BY GCASH rather than cash.',
@@ -419,7 +422,7 @@ function buildPrompt_(date, skus) {
     '  2. If the paper shows NONE of something (no cheese on that row, no GCash), report 0.',
     '     If you CANNOT READ something, LEAVE THAT FIELD OUT COMPLETELY and name it in "unread".',
     '     Never write 0 for a figure you could not read, and never estimate one.',
-    '  3. sod, eod, cheese, gcash and gcash_cheese are whole counts of boxes, never pesos.',
+    '  3. sod, eod, sold, cheese, gcash and gcash_cheese are whole counts of boxes, never pesos.',
     '  4. confidence is your own certainty for that row, 0 to 1.',
     '  5. The prices above are for CHECKING your reading ("2 = 100" at 50 each is consistent).',
     '     They are never a reason to change a figure you can plainly read.',
@@ -460,6 +463,9 @@ function readingSchema_() {
             sku: { type: 'STRING' },
             sod: count,
             eod: count,
+            // A lone "boxes sold" figure (v2.29.0): the paper no longer needs
+            // a start and an end count, so a row may carry just the one.
+            sold: count,
             cheese: count,
             gcash: count,
             gcash_cheese: count,
@@ -714,10 +720,14 @@ function normaliseReading_(reply, date, skus) {
     seenSku[sku] = true;
     var label = labelOf[sku];
     var line = { sku: sku };
+    // A row read as ONE sold figure (v2.29.0) has no start or end count to be
+    // unread: only its sold figure travels, and a blank there is what is noted.
+    var soldV = intOrBlank_(row.sold);
+    line.sold = soldV;
     ['sod', 'eod', 'cheese', 'gcash', 'gcash_cheese'].forEach(function (f) {
       var v = intOrBlank_(row[f]);
       line[f] = v;
-      if (v === '') note(label + ' ' + FIELD_WORDS[f]);
+      if (v === '' && !(soldV !== '' && (f === 'sod' || f === 'eod'))) note(label + ' ' + FIELD_WORDS[f]);
     });
     line.confidence = fracOrBlank_(row.confidence);
     counts.push(line);
@@ -755,6 +765,7 @@ function normaliseReading_(reply, date, skus) {
 }
 
 var FIELD_WORDS = {
+  sold: 'sold',
   sod: 'at the start of the day',
   eod: 'left at the end of the day',
   cheese: 'with cheese',

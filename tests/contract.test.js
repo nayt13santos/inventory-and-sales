@@ -309,9 +309,12 @@ return {
   cutoffOnDay, storedPricesFor, priceOnDay, applyLocalDeleteExpense,
   missingDaysInPeriod, previewIncomplete, addDays, todayStr,
   maintSettingsPayload, noteRefusal,
-  // v2.7.0: the SOD prefill's lookup, the one rule for the GCash card starting
-  // open, the expense form's picklist, and the two display-only builders.
-  prevEodFor, gcashHeld, supplyPicklist, cashRecapHTML, gcashSummaryText,
+  // v2.7.0: the one rule for the GCash card starting open, the expense form's
+  // picklist, and the conversion card's head figure. (prevEodFor and
+  // cashRecapHTML left with v2.29.0: no prefill, no cash recap.)
+  gcashHeld, supplyPicklist, gcashSummaryText,
+  // v2.29.0: the plain-card rule and the paid-figure readers.
+  directSoldSku, uiVal, soldVal, noriSoldVal,
   // v2.8.0: the costing screen. The three builders, the null helpers, the
   // invalidator a Maintenance save calls, and live handles on the section's
   // state so a test can put it in any of its rendering states.
@@ -3839,6 +3842,8 @@ return {
   // v2.24.0: the presentation map and the two state machines that edit through it,
   // and the given-away card with its two rules.
   rowUI, uiStep, uiTyped, freeCardHTML, freeHeld, freeSummaryText, gcashHeld,
+  // v2.29.0: the four paid figures, their encoder and the plain-card rule.
+  setBoxParts, payParts, directSoldSku, UI_FIELDS, PAY_KEY, stepperHTML, noriSoldVal, setNoriSold,
   // v2.10.0: tonight judged against the other nights.
   nightChecks, nightCheckHTML, soldHistory, totalHistory, medianOf,
   get paper(){ return paper; },
@@ -4934,9 +4939,9 @@ test('GIVEN AWAY OR RUINED: what left the tray unpaid is not revenue (v2.10.1)',
   assert.strictEqual(line.regular_qty, 8, 'only eight are priced');
   assert.strictEqual(Number(c.total), 8 * priceOf, 'the two given away add NO money');
 
-  // The receipt says it out loud, so the tin can be reconciled by eye.
-  const rec = app.cashRecapHTML(c);
-  assert.ok(/8 regular/.test(rec), 'the recap prices eight: ' + rec);
+  // (The "Sold with cash" recap that spelled this out left with v2.29.0: the
+  // card's own money line and the receipt say it now, and `regular_qty` above
+  // is the figure both read.)
 
   // THE SEAM: the server must agree to the peso, and store the snapshot.
   const payload = app.bentaPayload();
@@ -8534,6 +8539,13 @@ test('a sku that always sells, suddenly selling none, is QUESTIONED (v2.10.0)', 
   assert.doesNotMatch(said, /end count|all 20 are still there/, 'do not ask for hidden stock counts');
   // box4 sold normally, so it must not be dragged in.
   assert.ok(!/Box 4/.test(said), 'a sku that behaved is not mentioned');
+  // A BOX that always sells, with every figure on its card at 0 (v2.29.0: there
+  // is no shelf count to read a 0 against, so the question is nori's).
+  row('box4').sod = 0; row('box4').eod = 0;
+  const boxSaid = app.nightChecks().join('\n');
+  assert.match(boxSaid, /Box 4: nothing sold tonight, though it sold on 10 of the last 10 nights\. Every figure on its card says 0/);
+  row('box4').sod = 30; row('box4').eod = 10;
+  assert.ok(!/Box 4/.test(app.nightChecks().join('\n')), 'and is quiet again once it sold');
 
   // AN EMPTY SHELF IS NOT AN ANOMALY. If there was no nori to sell, not selling
   // any is the only possible outcome — saying "nothing sold, all 0 are still
@@ -8690,140 +8702,96 @@ test('a night far from the usual take is flagged, and the card waits its turn (v
     'it must say out loud that it is not a refusal');
 });
 
-test('the START COUNT carries for EVERY sku, nori included (v2.9.8)', () => {
-  // HIS REPORT, 2026-08-27: "Bug in the starting count of nori, doesnt get the
-  // count from the previous day." Reproduced in the browser first: prevEodFor
-  // returned the right figure all along (8), and `if (!isBoxSku(r.sku)) continue`
-  // threw it away. nori is ALWAYS group=simple, because the spec requires an
-  // excluded sku to be — so his own line of business was the one thing the
-  // prefill never carried. With a start of 0, counting 8 left read as
-  // max(0, 0 − 8) = NOTHING SOLD, and the nori money vanished quietly.
+test('NO START COUNT CARRIES ANY MORE — not for nori, not for a box (v2.29.0, owner-directed; reverses v2.7.0 item 4 and v2.9.8)', () => {
+  // v2.7.0 prefilled each sku's start count from its previous close; v2.9.8 (his
+  // report of 2026-08-27) widened that to nori. Owner, 2026-10-03: "lets not
+  // count box anymore, lets just input the number of boxes sold, just like the
+  // nori" — a box is tonight's sales now, not a shelf count, and nothing about
+  // last night belongs on a fresh form. The lookup itself is gone with it.
   const app = loadClient();
-  const D_OLD = ymdDaysAgo(5), D_MID = ymdDaysAgo(3), D_LAST = ymdDaysAgo(1), FRESH = ymdDaysAgo(0);
+  const D_OLD = ymdDaysAgo(5), D_LAST = ymdDaysAgo(1), FRESH = ymdDaysAgo(0);
   app.applyBootstrap(F.boot);
   const row = sku => app.benta.rows.find(r => r.sku === sku) || {};
   const counts = (obj) => { for (const k in app.state.counts) delete app.state.counts[k];
                             Object.assign(app.state.counts, obj); };
   const c = (sku, sod, eod) => ({ sku, sod, eod, cheese_qty:0, gcash_qty:0,
                                   gcash_cheese_qty:0, custom_qty:0 });
-
-  // 1. THE REPORTED BUG. Last night closed with 8 nori and 12 box4 on the shelf.
-  counts({ [D_LAST]: [c('box4', 30, 12), c('nori', 20, 8)] });
+  counts({ [D_OLD]: [c('box6', 20, 3)], [D_LAST]: [c('box4', 30, 12), c('nori', 20, 8)] });
   app.loadBentaForm(FRESH);
-  assert.strictEqual(row('nori').sod, 0, 'nori now starts with zero direct sales, never last night\'s stock');
-  assert.strictEqual(row('box4').sod, 12, 'and boxes must not have regressed');
-  // The figure this was really about: 8 on the shelf, 8 left, nothing sold —
-  // which is only sayable once the start count is right.
-  assert.strictEqual(app.bentaPayload().counts.find(x => x.sku === 'nori').sod, 0,
-    'and zero sales is what gets sent');
-
-  // 2. It reaches back past a night that did not count nori at all.
-  counts({ [D_OLD]: [c('nori', 10, 6)], [D_LAST]: [c('box4', 30, 9)] });
-  app.loadBentaForm(FRESH);
-  assert.strictEqual(row('nori').sod, 0, 'no earlier stock count becomes today\'s paid sales');
-
-  // 3. BLANK IS NEVER ZERO. Last night's nori EOD was never read, so nothing is
-  // known about what was left: prefill NOTHING and let her count it. Asserting 0
-  // would make tonight read high; reaching further back would carry a stale
-  // figure across a night we know happened.
-  counts({ [D_OLD]: [c('nori', 10, 6)], [D_LAST]: [c('nori', 20, '')] });
-  app.loadBentaForm(FRESH);
-  assert.notStrictEqual(row('nori').sod, 6,
-    'an unread close must NOT reach back past the night it belongs to — that figure is stale');
-  // Asserted on the LOOKUP, because through `sod` alone this is invisible: the
-  // fresh-row default is already 0, so "prefilled 0" and "not prefilled" look
-  // identical on the form. The lookup is where the distinction lives.
-  assert.strictEqual(app.prevEodFor('nori', D_LAST < FRESH ? FRESH : FRESH), '',
-    'an unread close is NOT an answer of zero — the lookup must say it has none');
-  // What is left is the form's own default for a fresh row (0), NOT a claim
-  // about last night. Worth stating plainly: a legacy row saved before v2.9.0's
-  // blank-EOD refusal is the only way to reach this, and the honest reading of
-  // it is "nobody knows", which the prefill declines to guess at.
-  const noHistory = (() => { counts({}); app.loadBentaForm(FRESH); return row('nori').sod; })();
-  counts({ [D_OLD]: [c('nori', 10, 6)], [D_LAST]: [c('nori', 20, '')] });
-  app.loadBentaForm(FRESH);
-  assert.strictEqual(row('nori').sod, noHistory,
-    'an unread close leaves the row exactly as if there were no history — it invents nothing');
-
-  // 4. A TYPED ZERO IS AN ANSWER — the tray emptied — and must carry as 0.
-  counts({ [D_LAST]: [c('nori', 20, 0)] });
-  app.loadBentaForm(FRESH);
-  assert.strictEqual(row('nori').sod, 0, 'zero is a real close and carries');
-
-  // 5. A day with its OWN saved counts is never overwritten by a prefill.
-  counts({ [D_MID]: [c('nori', 20, 8)], [D_LAST]: [c('nori', 15, 4)] });
+  for (const sku of ['box4', 'box6', 'box10', 'nori']){
+    assert.strictEqual(row(sku).sod, 0, sku + ': a fresh night starts with nothing sold, whatever last night closed at');
+    assert.strictEqual(row(sku).eod, 0);
+  }
+  assert.strictEqual(app.uiVal(row('box4'), 'payCashReg'), 0, 'the card shows 0 sold for cash — a figure to change, not a carried shelf');
+  assert.strictEqual(app.bentaPayload().counts.find(x => x.sku === 'box4').sod, 0, 'and zero is what would be sent');
+  assert.strictEqual(typeof app.prevEodFor, 'undefined', 'the lookup is gone with the prefill');
+  assert.ok(fs.readFileSync(INDEX_HTML, 'utf8').indexOf('prevEodFor') < 0, 'and nothing in the source still names it');
+  // A saved day still loads its own figures — history is never restated — and
+  // the card reads them as paid counts.
   app.loadBentaForm(D_LAST);
-  assert.strictEqual(row('nori').sod, 15, 'its own figures, never the night before\'s close');
-
-  // 6. Nothing before it at all: the row keeps the form's default, and no
-  // figure is conjured from an empty history.
-  counts({});
-  app.loadBentaForm(FRESH);
-  assert.strictEqual(app.prevEodFor('nori', FRESH), '',
-    'no history means the lookup itself says so, rather than answering 0');
+  assert.strictEqual(row('box4').sod, 30);
+  assert.strictEqual(row('box4').eod, 12);
+  assert.strictEqual(app.uiVal(row('box4'), 'payCashReg'), 18, '30 in, 12 left: eighteen sold for cash');
+  assert.deepStrictEqual((() => { const x = app.bentaPayload().counts.find(y => y.sku === 'box4'); return { sod: x.sod, eod: x.eod }; })(),
+    { sod: 30, eod: 12 }, 'a re-save with nothing touched sends the night back exactly as stored');
 });
 
-test('SOD prefill: a fresh date opens at the previous close; a saved day loads its own', () => {
+test('no prefill: a fresh date opens with nothing sold; a saved day loads its own figures and shows them as paid counts (v2.29.0)', () => {
   const srv = loadServer();
   const D1 = ymdDaysAgo(6), D2 = ymdDaysAgo(4), CLOSED = ymdDaysAgo(2), FRESH = ymdDaysAgo(3);
-  // Night one: box4 closes at 4, box6 at 5, nori (simple) at 3.
+  // Night one: box4 closes at 4, box6 at 5, nori (simple) at 3 — rows saved by an
+  // older phone, start and end counts and all.
   assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
     date: D1, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
     counts: [
       { sku: 'box4', sod: 10, eod: 4 }, { sku: 'box6', sod: 6, eod: 5 },
       { sku: 'nori', sod: 4, eod: 3 }
     ], entryId: 'pf-d1' } }).ok, true);
-  // Night two: only box4 was counted, closing at 2.
   assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
     date: D2, closed: false, staff: 'Mama', customAmount: 0, customGcash: 0, notes: '',
     counts: [{ sku: 'box4', sod: 7, eod: 2 }], entryId: 'pf-d2' } }).ok, true);
-  // A closed day after those: no counts on it, and it must not blank the chain.
   assert.strictEqual(post(srv.ctx, { token: srv.token, action: 'saveDay', payload: {
     date: CLOSED, closed: true, staff: '', customAmount: 0, customGcash: 0, notes: '',
     counts: [], entryId: 'pf-closed' } }).ok, true);
   const boot = post(srv.ctx, { token: srv.token, action: 'bootstrap', payload: {} });
-  const app = syncedClient(boot.data);
-
-  // A date with NO saved counts: each BOX sku opens at its latest prior close.
-  app.loadBentaForm(FRESH);
+  const app = loadSyncClient();
+  app.applyBootstrap(boot.data);
   const row = sku => app.benta.rows.find(r => r.sku === sku);
-  assert.strictEqual(row('box4').sod, 2, 'the LATEST prior day (D2) wins, not the older D1');
-  assert.strictEqual(row('box6').sod, 5, 'a sku D2 did not count reaches back to D1');
-  // PIN REVERSED (v2.9.8, owner-directed): v2.7.0 narrowed the prefill to
-  // group=box and gave no reason for it anywhere — not here, not in SPEC. nori
-  // is counted in and out exactly like a box, and `sold` is sod − eod for every
-  // sku, so the narrowing simply lost his nori money. It now carries like any
-  // other sku, reaching back to D1 because D2 did not count it.
-  assert.strictEqual(row('nori').sod, 0, 'nori uses quantity sold now; box carryover stays unchanged');
-  assert.strictEqual(row('box4').eod, 0, 'only the SOD is prefilled — EOD is tonight\'s count');
-  // A prefill, never a lock: it is an ordinary editable figure on the row.
-  row('box4').sod = 9;
-  assert.strictEqual(app.bentaPayload().counts.find(c => c.sku === 'box4').sod, 9);
 
-  // A SAVED day always loads its own figures — never a prefill over them.
+  // PIN REVERSED (v2.29.0, owner-directed): v2.7.0 item 4 opened each sku at its
+  // previous close, and v2.9.8 made that every sku. A box is tonight's sales
+  // now, so a date with NO saved counts opens with nothing sold — for every sku.
+  app.loadBentaForm(FRESH);
+  for (const sku of ['box4', 'box6', 'nori']){
+    assert.strictEqual(row(sku).sod, 0, sku + ' opened at last night\'s close');
+    assert.strictEqual(row(sku).eod, 0);
+  }
+  assert.strictEqual(app.uiVal(row('box4'), 'payCashReg'), 0);
+
+  // A SAVED day always loads its own figures, and the card reads them as paid counts.
   app.loadBentaForm(D2);
-  assert.strictEqual(row('box4').sod, 7, 'its own SOD, not D1\'s EOD');
+  assert.strictEqual(row('box4').sod, 7, 'its own start count, as stored');
   assert.strictEqual(row('box4').eod, 2);
-  assert.strictEqual(row('box6').sod, 0,
-    'a saved day shows exactly what it stored — box6 was not counted that night');
+  assert.strictEqual(app.uiVal(row('box4'), 'payCashReg'), 5, '7 in, 2 left: five sold for cash');
+  assert.strictEqual(row('box6').sod, 0, 'a saved day shows exactly what it stored — box6 was not counted that night');
+  // A re-save with nothing touched sends the night back exactly as stored: history is never restated.
+  const sent = app.bentaPayload().counts.find(c => c.sku === 'box4');
+  assert.deepStrictEqual({ sod: sent.sod, eod: sent.eod }, { sod: 7, eod: 2 });
+  // The first edit re-encodes the row the way nori is encoded: sod = sold, eod = 0.
+  app.uiStep(row('box4'), 'payCashReg', 1);
+  assert.deepStrictEqual({ sod: row('box4').sod, eod: row('box4').eod }, { sod: 6, eod: 0 }, 'six sold, no shelf');
+  assert.strictEqual(app.computeDay(app.bentaPayload()).lines.find(l => l.sku === 'box4').sold, 6);
 
-  // The day after the CLOSED day still opens at D2's close: a closed day has no
-  // counts and the lookup walks past it.
+  // The day after the CLOSED day opens at nothing too.
   app.loadBentaForm(ymdDaysAgo(1));
-  assert.strictEqual(row('box4').sod, 2);
-
-  // The lookup itself: strictly-before, latest-first, '' when nothing prior.
-  assert.strictEqual(app.prevEodFor('box4', FRESH), 2);
-  assert.strictEqual(app.prevEodFor('box4', D2), 4, 'from D2 the prior close is D1\'s');
-  assert.strictEqual(app.prevEodFor('box4', D1), '', 'no prior day: say nothing, not 0');
-
-  // And a phone with no history at all prefills nothing.
+  assert.strictEqual(row('box4').sod, 0);
+  // And a phone with no history at all is the same form.
   const blank = loadClient();
   blank.loadBentaForm(clientYmd(0));
   blank.benta.rows.forEach(r => assert.strictEqual(r.sod, 0, r.sku + ' invented an opening count'));
 });
 
-test('the GCash card starts collapsed only when every figure in it is 0', () => {
+test('the conversion card starts collapsed unless it holds a figure; GCash boxes live on the size cards now (v2.29.0)', () => {
   const srv = loadServer();
   const ALLCASH = ymdDaysAgo(5), CONV = ymdDaysAgo(4), BUCKET = ymdDaysAgo(3);
   const day = (date, extra, id) => post(srv.ctx, { token: srv.token, action: 'saveDay',
@@ -8837,16 +8805,20 @@ test('the GCash card starts collapsed only when every figure in it is 0', () => 
 
   const app = syncedClient(boot);
   app.loadBentaForm(ALLCASH);
-  assert.strictEqual(app.gcashHeld(), false, 'an all-cash night holds no GCash figure');
+  assert.strictEqual(app.gcashHeld(), false, 'an all-cash night holds no conversion');
   assert.strictEqual(app.benta.gcashOpen, false, 'so the card starts closed');
   app.loadBentaForm(CONV);
-  assert.strictEqual(app.gcashHeld(), true, 'converted cash alone counts — it lives in this card');
+  assert.strictEqual(app.gcashHeld(), true, 'converted cash is what this card holds');
   assert.strictEqual(app.benta.gcashOpen, true, 'nothing already entered is ever hidden');
+  assert.strictEqual(app.gcashSummaryText(app.computeDay(app.bentaPayload())), '₱20 to GCash', 'the head says the figure and its direction');
   const app2 = syncedClient(boot);
   app2.loadBentaForm(BUCKET);
-  assert.strictEqual(app2.benta.gcashOpen, true, 'a GCash bucket opens it too');
-  // The head figure is everything THIS card controls (sku GCash + conversion).
-  assert.strictEqual(app2.gcashSummaryText(app2.computeDay(app2.bentaPayload())), '₱50');
+  // PIN TURNED (v2.29.0): a GCash box used to open this card, because the box was
+  // entered here. It is entered on its own size's card now.
+  assert.strictEqual(app2.gcashHeld(), false, 'a GCash box no longer opens it');
+  assert.strictEqual(app2.benta.gcashOpen, false);
+  assert.strictEqual(app2.gcashSummaryText(app2.computeDay(app2.bentaPayload())), '', 'nothing converted, nothing in the head');
+  assert.strictEqual(app2.uiVal(app2.benta.rows.find(r => r.sku === 'box4'), 'payGcashReg'), 1, 'the GCash box shows on the card');
 });
 
 test('the phone refuses the conversion and the special order in the SERVER\'s own words', () => {
@@ -8878,41 +8850,30 @@ test('the phone refuses the conversion and the special order in the SERVER\'s ow
   assert.deepStrictEqual(Object.keys(app.validateBenta()), [], 'the loaded day is clean');
 });
 
-test('"Sold with cash" is display only, and the receipt says the new lines only when non-zero', () => {
+test('the cash recap card is gone — cash is typed on each size card — and the receipt says the new lines only when non-zero (v2.29.0)', () => {
   const { boot } = v27Fixture();
   const app = syncedClient(boot);
   app.loadBentaForm(V27_DAY);
-  const c = app.computeDay(app.bentaPayload());
-  const recap = app.cashRecapHTML(c);
-  assert.ok(recap.indexOf('4 regular × ₱50 + 2 cheese × ₱60') !== -1,
-    'the remainder spells out its own arithmetic');
-  assert.ok(recap.indexOf('Custom order paid in cash') !== -1, '500 − 100 GCash = 400 in cash');
-  assert.ok(recap.indexOf('Converted to GCash') !== -1 && recap.indexOf('−₱120') !== -1,
-    'the conversion is shown leaving the cash');
-  assert.ok(recap.indexOf('₱600') !== -1, 'and the figure she counts the tin against');
-  assert.strictEqual(/<input|<button|data-act=/.test(recap), false,
-    'display only: nothing in this card can be typed or tapped');
-
-  // The screen order and the receipt guards are render code, so: source pins.
+  assert.strictEqual(typeof app.cashRecapHTML, 'undefined', 'no recap builder any more');
   const render = slab('function renderBenta(){', 'const CHEV =');
-  const iBox = render.indexOf('>Box counts<');
-  const iGcash = render.indexOf('gcashCardHTML(');
-  const iCash = render.indexOf('id="cashRecap"');
-  assert.ok(iBox !== -1 && iGcash !== -1 && iCash !== -1, 'all three sections must render');
-  assert.ok(iBox < iGcash && iGcash < iCash, '① Box counts, ② Sold with GCash, ③ Sold with cash — in that order');
-  assert.ok(/How many were cheese\?/.test(render), '① carries the cheese FACT stepper');
+  assert.ok(render.indexOf('id="cashRecap"') < 0 && render.indexOf('Sold with cash') < 0, 'no third section');
+  const iBox = render.indexOf('>Boxes sold<');
+  const iFree = render.indexOf('h += freeCardHTML(skus, payRow);');
+  const iGcash = render.indexOf('h += gcashCardHTML();');
+  assert.ok(iBox !== -1 && iFree !== -1 && iGcash !== -1, 'the three cards must render');
+  assert.ok(iBox < iFree && iFree < iGcash, 'Boxes sold, Given away or ruined, the conversion card — in that order');
+  assert.ok(render.indexOf('How many were cheese?') < 0, 'cheese is a column of the paid grid, not a separate fact');
+  assert.ok(/payGridHTML\(pr, row, showCheese\)/.test(render), 'each in-cutoff card is the paid grid');
   const receipt = slab('function updateReceipt(){', 'function rLine(label, amt){');
   assert.ok(/c\.gcashConverted > 0/.test(receipt),
     'the converted-cash sentence prints only when non-zero');
   assert.ok(/c\.lidBoxes > 0/.test(receipt), 'the lid count prints only when non-zero');
-  // v2.10.1: the "less …" clause now covers both reasons a sold unit was not
-  // priced, joined in one sentence rather than two competing ones.
   assert.ok(/for the special order/.test(receipt) && /given away or ruined/.test(receipt),
     'an affected sku says where its boxes went — to the order, or given away');
   assert.ok(/aside\.length \? ', less ' \+ aside\.join\(' and '\)/.test(receipt),
     'and both reasons read as one clause when both apply');
-  assert.ok(/cashRecapHTML\(/.test(receipt),
-    'the recap is rebuilt by updateReceipt — one sum, one voice');
+  assert.ok(!/cashRecapHTML\(/.test(receipt), 'nothing rebuilds a recap');
+  assert.ok(/Nothing yet — enter how many were sold\./.test(receipt), 'the empty receipt asks the new question');
 });
 
 test('the expense buckets cross the seam, and each tap files exactly one way (v2.7.1)', () => {
@@ -9710,7 +9671,8 @@ test('the READING is snake_case throughout, and every figure is where the phone 
   assert.strictEqual(d.total_on_paper, PAPER_TOTAL, 'the figure the whole cross-check rests on');
   assert.strictEqual(d.counts.length, 4);
   assert.deepStrictEqual(d.counts[0],
-    { sku: 'box4', sod: 31, eod: 28, cheese: 1, gcash: 0, gcash_cheese: 0, confidence: 0.95 });
+    { sku: 'box4', sod: 31, eod: 28, sold: '', cheese: 1, gcash: 0, gcash_cheese: 0, confidence: 0.95 },
+    'v2.29.0: a lone sold figure travels beside the pair — blank when the paper wrote the pair');
   // The photo was kept BEFORE the model was asked, so the reading can be taken
   // back to the paper it came from.
   assert.strictEqual(d.photo_saved, true);
@@ -9846,18 +9808,18 @@ test('THE MAPPING: a cheese box paid by GCash counts in cheese AND in GCash chee
   assert.strictEqual(row.gcashCheese, 1, 'gcashCheese = gcash_cheese');
   assert.strictEqual(row.cheese, 3, 'cheese = cheese - gcash_cheese (the cheese paid in CASH)');
   assert.strictEqual(row.gcash, 3, 'gcash = gcash (plain boxes paid by GCash)');
-  // The form's own two questions come straight back out of those buckets.
+  // The card's own four figures come straight back out of those buckets (v2.29.0).
   const f = app.paperFormFigures(rd.counts[0]);
-  assert.strictEqual(f.cheeseAll, 4, '"How many were cheese?" — all of them, however paid');
-  // v2.24.0: the GCash card counts regular and cheese boxes APART, so the
-  // review's "GCash regular" is the 3 plain ones and the cheese one sits beside
-  // it — not 4 with "of those, 1", which read a cheese box as a ₱15 add-on.
-  assert.strictEqual(f.gcashAll, 3, '"GCash regular" — the 3 plain boxes only');
-  assert.strictEqual(f.gcashOfCheese, 1, '"GCash cheese" — the cheese one, worth its whole price');
   assert.strictEqual(f.sold, 10);
-  assert.strictEqual(app.uiVal(row, 'C'), 4, 'and the screen shows the same four');
-  assert.strictEqual(app.uiVal(row, 'G'), 3, 'and the same three regular GCash boxes');
-  assert.strictEqual(app.uiVal(row, 'GC'), 1);
+  assert.strictEqual(f.cashReg, 3, 'Cash regular: 10 sold − 4 cheese − 3 regular by GCash');
+  assert.strictEqual(f.cashCheese, 3, 'Cash cheese: the cheese less the GCash cheese');
+  assert.strictEqual(f.gcashReg, 3, 'GCash regular — the 3 plain boxes only');
+  assert.strictEqual(f.gcashCheese, 1, 'GCash cheese — the cheese one, worth its whole price');
+  assert.strictEqual(app.uiVal(row, 'payCashReg'), 3, 'and the screen shows the same four');
+  assert.strictEqual(app.uiVal(row, 'payCashCheese'), 3);
+  assert.strictEqual(app.uiVal(row, 'payGcashReg'), 3);
+  assert.strictEqual(app.uiVal(row, 'payGcashCheese'), 1);
+  assert.strictEqual(app.soldVal(row), 10);
 
   // What this mapping CANNOT get wrong is the figure the cross-check tests: a
   // misread of WHICH cheese box was paid how moves money between Cash and
@@ -9907,165 +9869,167 @@ function nightOn(date){
 const bucketsOf = (app, r) => ({ cheese: app.num(r.cheese), gcash: app.num(r.gcash), gcashCheese: app.num(r.gcashCheese) });
 const press = (app, r, field, times) => { for (let i = 0; i < (times || 1); i++) app.uiStep(r, field, 1); };
 
-test('A CHEESE BOX PAID BY GCASH IS WORTH ITS WHOLE PRICE — 2026-09-05 replayed (v2.24.0)', () => {
+test('A CHEESE BOX PAID BY GCASH IS WORTH ITS WHOLE PRICE — 2026-09-05 replayed on the paid grid (v2.24.0, v2.29.0)', () => {
   const { app, srv } = nightOn(ymdDaysAgo(1));
   const r = app.benta.rows.find(x => x.sku === 'box6');
-  r.sod = 20; r.eod = 12;                    // sold 8 — the sheet's own row
-  press(app, r, 'cheeseAll', 1);             // How many were cheese: 1
-  press(app, r, 'gcashAll', 2);              // Regular boxes by GCash: 2
-  press(app, r, 'gcashOfCheese', 1);         // Cheese boxes by GCash: 1
-  assert.deepStrictEqual(app.hooks.toasts, [], 'nothing here is out of bounds');
+  press(app, r, 'payCashReg', 5);            // five regular boxes, cash
+  press(app, r, 'payGcashReg', 2);           // two regular boxes by GCash
+  press(app, r, 'payGcashCheese', 1);        // one cheese box by GCash
+  assert.deepStrictEqual(app.hooks.toasts, [], 'nothing on this card refuses: each figure is its own count');
   assert.deepStrictEqual(bucketsOf(app, r), { cheese: 0, gcash: 2, gcashCheese: 1 },
     'the four exclusive buckets, exactly as the sheet keeps them');
-  assert.strictEqual(app.uiVal(r, 'C'), 1, 'and the screen reads the figures back as typed');
-  assert.strictEqual(app.uiVal(r, 'G'), 2);
-  assert.strictEqual(app.uiVal(r, 'GC'), 1);
+  assert.deepStrictEqual({ sod: r.sod, eod: r.eod }, { sod: 8, eod: 0 }, 'sold 8, encoded as nori is: sod = sold, eod = 0');
+  assert.strictEqual(app.uiVal(r, 'payCashReg'), 5, 'and the screen reads the figures back as entered');
+  assert.strictEqual(app.uiVal(r, 'payCashCheese'), 0);
+  assert.strictEqual(app.uiVal(r, 'payGcashReg'), 2);
+  assert.strictEqual(app.uiVal(r, 'payGcashCheese'), 1);
 
   const c = app.computeDay(app.bentaPayload());
   const l = c.lines.find(x => x.sku === 'box6');
-  assert.strictEqual(l.regular_qty, 5, '8 sold − 1 cheese − 2 GCash regular − 1 GCash cheese... wait: 8 − 0 − 2 − 1 = 5 cash regular');
+  assert.strictEqual(l.regular_qty, 5, '8 sold − 0 cheese − 2 GCash regular − 1 GCash cheese = 5 cash regular');
   assert.strictEqual(l.amount, 535, '5 × 65 + 2 × 65 + 1 × 80 — the Total the sheet already holds for this row');
   assert.strictEqual(l.gcash_amount, 210,
-    'two regular boxes at ₱65 and ONE CHEESE BOX AT ITS WHOLE ₱80 — the old card stored 145 for these presses');
-  // The same presses on the v2.7.0 card left {cheese 0, gcash 1, gcashCheese 1}:
-  // "of those" took one of the two GCash boxes and made it the cheese one, so
-  // the sheet holds gcash_amount 145 for this night. 210 − 145 = 65 = one box6.
-  assert.strictEqual(210 - 145, l.price, 'the shortfall is exactly one regular price');
+    'two regular boxes at ₱65 and ONE CHEESE BOX AT ITS WHOLE ₱80 — the v2.7.0 card stored 145 for this night');
+  assert.strictEqual(210 - 145, l.price, 'the shortfall was exactly one regular price');
 
-  // The payload carries the same three buckets, and the REAL server prices them
-  // to the same peso — the phone's receipt and the sheet tell one story.
+  // The payload carries the same three buckets and the derived sold, and the
+  // REAL server prices them to the same peso — the receipt and the sheet tell
+  // one story.
   const p = app.bentaPayload();
   const sent = p.counts.find(x => x.sku === 'box6');
-  assert.deepStrictEqual({ cheeseQty: sent.cheeseQty, gcashQty: sent.gcashQty, gcashCheeseQty: sent.gcashCheeseQty },
-    { cheeseQty: 0, gcashQty: 2, gcashCheeseQty: 1 });
+  assert.deepStrictEqual({ sod: sent.sod, eod: sent.eod, cheeseQty: sent.cheeseQty, gcashQty: sent.gcashQty, gcashCheeseQty: sent.gcashCheeseQty },
+    { sod: 8, eod: 0, cheeseQty: 0, gcashQty: 2, gcashCheeseQty: 1 });
   p.entryId = 'v224-sept5';
   const saved = post(srv.ctx, { token: srv.token, action: 'saveDay', payload: p });
   assert.strictEqual(saved.ok, true, saved.error);
   const sl = saved.data.lines.find(x => x.sku === 'box6');
   assert.strictEqual(sl.gcash_amount, 210);
   assert.strictEqual(sl.amount, 535);
+  assert.strictEqual(sl.sold, 8);
   assert.strictEqual(saved.data.gcash, c.gcash, 'phone and sheet agree on the night\'s GCash');
 });
 
-test('2026-09-06 replayed: three cheese boxes cash, four regular and two cheese by GCash (v2.24.0)', () => {
+test('2026-09-06 replayed on the grid: fifteen regular and three cheese for cash, four regular and two cheese by GCash (v2.24.0, v2.29.0)', () => {
   const { app } = nightOn(ymdDaysAgo(1));
   const r = app.benta.rows.find(x => x.sku === 'box10');
-  r.sod = 63; r.eod = 39;                    // sold 24
-  press(app, r, 'cheeseAll', 5);             // 5 cheese boxes made, however paid
-  press(app, r, 'gcashAll', 4);              // 4 regular boxes by GCash
-  press(app, r, 'gcashOfCheese', 2);         // 2 of the cheese boxes were GCash
+  press(app, r, 'payCashReg', 15);
+  press(app, r, 'payCashCheese', 3);
+  press(app, r, 'payGcashReg', 4);
+  press(app, r, 'payGcashCheese', 2);
   assert.deepStrictEqual(app.hooks.toasts, []);
   assert.deepStrictEqual(bucketsOf(app, r), { cheese: 3, gcash: 4, gcashCheese: 2 });
+  assert.deepStrictEqual({ sod: r.sod, eod: r.eod }, { sod: 24, eod: 0 });
   const l = app.computeDay(app.bentaPayload()).lines.find(x => x.sku === 'box10');
   assert.strictEqual(l.regular_qty, 15);
   assert.strictEqual(l.amount, 2620, '15 × 105 + 3 × 125 + 4 × 105 + 2 × 125 — the sheet\'s Total for the row');
-  assert.strictEqual(l.gcash_amount, 670, '4 × 105 + 2 × 125; the old card stored 460 — short by 2 × 105');
+  assert.strictEqual(l.gcash_amount, 670, '4 × 105 + 2 × 125; the v2.7.0 card stored 460 — short by 2 × 105');
 });
 
-test('"Cheese boxes" moves a WHOLE box from cash to GCash, and refuses past the cheese counted (v2.24.0)', () => {
+test('each paid figure is its own count: moving a cheese box from cash to GCash is one minus and one plus, and the Total stands (v2.29.0)', () => {
   const { app } = nightOn(ymdDaysAgo(1));
   const r = app.benta.rows.find(x => x.sku === 'box6');
-  r.sod = 5; r.eod = 0;                      // sold 5
-  press(app, r, 'cheeseAll', 2);             // 2 cheese, both cash so far
+  press(app, r, 'payCashCheese', 2);         // two cheese boxes, both cash
   const before = app.computeDay(app.bentaPayload());
-  press(app, r, 'gcashOfCheese', 1);
+  assert.strictEqual(before.total, 160);
+  assert.strictEqual(before.gcash, 0);
+  app.uiStep(r, 'payCashCheese', -1);        // one of them was GCash after all
+  press(app, r, 'payGcashCheese', 1);
   const after = app.computeDay(app.bentaPayload());
   assert.deepStrictEqual(bucketsOf(app, r), { cheese: 1, gcash: 0, gcashCheese: 1 });
   assert.strictEqual(after.total, before.total, 'HOW a cheese box was paid never moves the Total');
   assert.strictEqual(after.gcash - before.gcash, 80, 'GCash rises by the WHOLE cheese price — not by the ₱15 add-on');
   assert.strictEqual(before.cash - after.cash, 80, 'and the same ₱80 leaves the cash');
-
-  press(app, r, 'gcashOfCheese', 1);         // the second cheese box was GCash too
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 0, gcash: 0, gcashCheese: 2 });
-  // A third would be a cheese box nobody counted above: refused, pointing there.
-  press(app, r, 'gcashOfCheese', 1);
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 0, gcash: 0, gcashCheese: 2 }, 'nothing moved');
-  assert.strictEqual(app.hooks.toasts.length, 1, 'one refusal');
-  assert.match(app.hooks.toasts[0], /“Cheese boxes” paid by GCash can only go up to 2 — that is how many were cheese/);
-  assert.match(app.hooks.toasts[0], /How many were cheese/, 'and it says which figure to raise first');
-
-  // Lowering it: the box stays cheese, now paid in cash.
-  app.uiStep(r, 'gcashOfCheese', -1);
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 1, gcash: 0, gcashCheese: 1 });
-  // "Regular boxes" at 0 going down does NOTHING to the cheese figures any more
-  // (the v2.7.0 card reclassified a GCash cheese box here).
-  app.uiStep(r, 'gcashAll', -1);
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 1, gcash: 0, gcashCheese: 1 }, 'an empty count has nothing to lower');
-  // "How many were cheese" going down takes the CASH cheese first, then the
-  // GCash one — which stays GCash, now a regular box.
-  app.uiStep(r, 'cheeseAll', -1);
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 0, gcash: 0, gcashCheese: 1 });
-  app.uiStep(r, 'cheeseAll', -1);
-  // The review found the first cut moved this box to REGULAR GCash — raising a
-  // "Regular boxes" figure he never touched by one regular price, and landing
-  // on different money than typing the same figure. It is simply not cheese.
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 0, gcash: 0, gcashCheese: 0 },
-    'the last cheese counted was GCash: it is no longer cheese, and "Regular boxes" is HIS count — untouched');
-  assert.strictEqual(app.uiVal(r, 'G'), 0);
+  assert.strictEqual(r.sod, 2, 'still two sold');
+  // A plus on GCash cheese ADDS a box: nothing is reclassified behind her back.
+  press(app, r, 'payGcashCheese', 1);
+  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 1, gcash: 0, gcashCheese: 2 });
+  assert.strictEqual(r.sod, 3);
+  assert.strictEqual(app.computeDay(app.bentaPayload()).total, 240);
+  // Minus at 0 does nothing, and says nothing: there is no bound to refuse over.
+  app.hooks.toasts.length = 0;
+  app.uiStep(r, 'payGcashReg', -1);
+  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 1, gcash: 0, gcashCheese: 2 }, 'an empty count has nothing to lower');
+  assert.deepStrictEqual(app.hooks.toasts, []);
   // Every press redrew this row and told the receipt.
-  assert.ok(app.hooks.synced.every(s => s === 'box6') && app.hooks.synced.length >= 8, app.hooks.synced.join(','));
+  assert.ok(app.hooks.synced.every(s => s === 'box6') && app.hooks.synced.length >= 5, app.hooks.synced.join(','));
   assert.strictEqual(app.hooks.changed.length, app.hooks.synced.length, 'redraw and recompute travel together');
 });
 
-test('"Regular boxes" by GCash is its own count: it never touches the cheese figures, and its room is what is not cheese (v2.24.0)', () => {
+test('no figure is bounded by another any more: the special order and the give-away ADD to Sold while the paid figures stand (v2.29.0)', () => {
   const { app } = nightOn(ymdDaysAgo(1));
   const r = app.benta.rows.find(x => x.sku === 'box4');
-  r.sod = 4; r.eod = 0;                      // sold 4
-  press(app, r, 'cheeseAll', 2);
-  press(app, r, 'gcashOfCheese', 1);         // {1, 0, 1}: one cheese cash, one cheese GCash
-  press(app, r, 'gcashAll', 2);              // two regular by GCash: paid = 2 + 2 = 4 = sold
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 1, gcash: 2, gcashCheese: 1 });
-  assert.deepStrictEqual(app.hooks.toasts, []);
-  press(app, r, 'gcashAll', 1);              // a fifth paid box on a night of four
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 1, gcash: 2, gcashCheese: 1 }, 'refused: nothing moved');
-  assert.match(app.hooks.toasts.pop(), /“Regular boxes” paid by GCash can only go up to 2 — the other 2 of the 4 sold are already cheese/);
-  app.uiStep(r, 'gcashAll', -1);
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 1, gcash: 1, gcashCheese: 1 }, 'down one, cheese figures untouched');
-  const l = app.computeDay(app.bentaPayload()).lines.find(x => x.sku === 'box4');
-  assert.strictEqual(l.gcash_amount, 50 + 60, 'one regular at ₱50 and one cheese at its whole ₱60');
-  assert.strictEqual(l.amount, 50 + 60 + 50 + 60, 'sold 4: cash regular 1, cash cheese 1, GCash regular 1, GCash cheese 1');
-
-  // Given away or ruined shrinks the room too (the server's bound, v2.10.1).
-  r.free = 1;
-  press(app, r, 'gcashAll', 1);              // avail 3, cheese 2 → room 1, already 1
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 1, gcash: 1, gcashCheese: 1 });
-  assert.match(app.hooks.toasts.pop(), /can only go up to 1 — the other 3 of the 4 sold are already cheese, the special order’s, or given away/);
-  press(app, r, 'cheeseAll', 1);             // avail 3, regular GCash 1 → room 2, already 2
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 1, gcash: 1, gcashCheese: 1 }, 'the cheese count bounds against the same avail');
-  assert.match(app.hooks.toasts.pop(), /“How many were cheese” can only go up to 2 — the other 2 of the 4 sold are already regular GCash, the special order’s, or given away/);
-  // And "How many were cheese" bounds against the regular GCash boxes the same way.
-  r.free = 0;
-  press(app, r, 'cheeseAll', 1);             // C 2 → 3 with G 1: paid would be 4 = sold: allowed
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 2, gcash: 1, gcashCheese: 1 });
-  press(app, r, 'cheeseAll', 1);             // 5 on 4 sold
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 2, gcash: 1, gcashCheese: 1 });
-  assert.match(app.hooks.toasts.pop(), /“How many were cheese” can only go up to 3 — the other 1 of the 4 sold are already regular GCash/);
+  press(app, r, 'payCashReg', 1); press(app, r, 'payCashCheese', 1);
+  press(app, r, 'payGcashReg', 1); press(app, r, 'payGcashCheese', 1);
+  assert.deepStrictEqual(app.hooks.toasts, [], 'four figures, no room to refuse over');
+  assert.strictEqual(r.sod, 4);
+  const line = () => app.computeDay(app.bentaPayload()).lines.find(x => x.sku === 'box4');
+  assert.strictEqual(line().gcash_amount, 50 + 60, 'one regular at ₱50 and one cheese at its whole ₱60');
+  assert.strictEqual(line().amount, 50 + 60 + 50 + 60, 'sold 4: cash regular 1, cash cheese 1, GCash regular 1, GCash cheese 1');
+  // A give-away adds to what left the tray; the four paid figures do not move.
+  // (This is the step bentaStep takes for the give-away and special-order
+  // steppers: read the parts, change the figure, write the row back.)
+  let parts = app.payParts(r); r.free = 1; app.setBoxParts(r, parts);
+  assert.strictEqual(r.sod, 5, 'five left the tray');
+  assert.strictEqual(app.uiVal(r, 'payCashReg'), 1, 'cash regular held still');
+  assert.strictEqual(line().sold, 5);
+  assert.strictEqual(line().regular_qty, 1);
+  assert.strictEqual(line().amount, 220, 'no money for the give-away');
+  // So does a special order's box.
+  parts = app.payParts(r); r.custom = 1; app.setBoxParts(r, parts);
+  assert.strictEqual(r.sod, 6);
+  assert.strictEqual(app.uiVal(r, 'payCashReg'), 1);
+  assert.strictEqual(line().custom_qty, 1);
+  assert.strictEqual(line().sold, 6);
+  assert.strictEqual(line().amount, 220, 'and none for the order\'s box — its money is the typed amount');
+  // The validator is quiet: a row built this way cannot contradict itself.
+  const errs = app.validateBenta();
+  assert.strictEqual(errs['sku:box4'], undefined);
+  assert.strictEqual(errs['cbox:box4'], undefined);
+  assert.strictEqual(errs['free:box4'], undefined);
+  // The stepper code takes exactly that path, with no clamp left in it.
+  const step = slab('function bentaStep(sku, field, dir){', 'function afterCountChange(sku){');
+  assert.match(step, /if \(\(key === 'custom' \|\| key === 'free'\) && !directSoldSku\(sku\)\)\{[\s\S]*?const parts = payParts\(r\);\s*r\[key\] = v;[\s\S]*?setBoxParts\(r, parts\);/,
+    'the grid rows re-encode; a plain-card sku is left to its own encoder');
+  assert.ok(step.indexOf('Enter Start of day') < 0 && step.indexOf('can only use up to') < 0, 'no start-count toast, no special-order clamp');
 });
 
-test('a TYPED figure follows the same map: regular GCash moves nothing else, cheese by GCash is capped at the cheese counted (v2.24.0)', () => {
+test('a TYPED figure lands where a press does: each box writes its own count, and a cleared box stays blank (v2.29.0)', () => {
   const { app } = nightOn(ymdDaysAgo(1));
   const r = app.benta.rows.find(x => x.sku === 'box6');
-  r.sod = 12; r.eod = 0;
-  r.cheese = 1; r.gcash = 2; r.gcashCheese = 1;          // C 2, G 2, GC 1
-  app.uiTyped(r, 'gcashAll', '5');
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 1, gcash: 5, gcashCheese: 1 }, 'regular GCash typed: nothing else moves');
-  app.uiTyped(r, 'cheeseAll', '1');                      // fewer cheese than the GCash ones... C 1: the GCash cheese box is kept
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 0, gcash: 5, gcashCheese: 1 },
-    'the GCash cheese box survives while the figure covers it, and the regular GCash figure is NOT touched (the old map rewrote it)');
-  app.uiTyped(r, 'gcashOfCheese', '3');                  // more GCash cheese than cheese
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 0, gcash: 5, gcashCheese: 1 }, 'capped at the cheese counted: GC ≤ C');
-  app.uiTyped(r, 'gcashOfCheese', '0');
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 1, gcash: 5, gcashCheese: 0 }, 'back to cash cheese');
-  app.uiTyped(r, 'cheeseAll', '0');
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 0, gcash: 5, gcashCheese: 0 });
-  app.uiTyped(r, 'cheeseAll', '');
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 0, gcash: 5, gcashCheese: 0 }, 'a cleared box is 0 to the buckets');
-  assert.strictEqual(app.hooks.synced.filter(s => s === 'box6').length, 6, 'each typed figure redrew its row');
-  // rowUI is the map both machines write through.
-  assert.deepStrictEqual(app.rowUI({ cheese: 3, gcash: 4, gcashCheese: 2 }), { C: 5, G: 4, GC: 2 },
-    'C = all cheese, G = REGULAR by GCash only, GC = cheese by GCash');
-  assert.strictEqual(app.uiVal({ cheese: 1, gcash: '', gcashCheese: 2 }, 'G'), '', 'G reads blank only from its own bucket');
-  assert.strictEqual(app.uiVal({ cheese: '', gcash: '', gcashCheese: 2 }, 'C'), 2);
+  app.uiTyped(r, 'payCashReg', '12');
+  assert.deepStrictEqual({ sod: r.sod, eod: r.eod }, { sod: 12, eod: 0 });
+  app.uiTyped(r, 'payGcashReg', '5');
+  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 0, gcash: 5, gcashCheese: 0 }, 'typed regular GCash: nothing else moves');
+  assert.strictEqual(r.sod, 17, 'and Sold grows by it');
+  app.uiTyped(r, 'payCashCheese', '1');
+  app.uiTyped(r, 'payGcashCheese', '1');
+  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 1, gcash: 5, gcashCheese: 1 });
+  assert.strictEqual(r.sod, 19);
+  assert.strictEqual(app.uiVal(r, 'payCashReg'), 12, 'cash regular is exactly what was typed');
+  // A cleared bucket is a question unanswered: blank on screen, 0 to the sums,
+  // the other figures standing where they were.
+  app.uiTyped(r, 'payCashCheese', '');
+  assert.strictEqual(r.cheese, '');
+  assert.strictEqual(app.uiVal(r, 'payCashCheese'), '');
+  assert.strictEqual(app.uiVal(r, 'payCashReg'), 12);
+  assert.strictEqual(r.sod, 18);
+  // A cleared Cash regular is the whole Sold unknown again — refused by name until answered.
+  app.uiTyped(r, 'payCashReg', '');
+  assert.strictEqual(r.sod, '');
+  assert.strictEqual(app.soldVal(r), '');
+  assert.strictEqual(app.uiVal(r, 'payCashReg'), '');
+  assert.match(String(app.validateBenta()['sku:box6']), /Box 6: enter how many were sold — 0 if none\./);
+  app.uiTyped(r, 'payCashReg', '2');
+  assert.strictEqual(r.sod, 8, '2 + 0 cheese + 5 + 1');
+  assert.strictEqual(app.validateBenta()['sku:box6'], undefined);
+  assert.strictEqual(app.hooks.synced.filter(s => s === 'box6').length, 7, 'each typed figure redrew its row');
+  // rowUI is the one map both machines read through.
+  assert.deepStrictEqual(app.rowUI({ sod: 12, eod: 0, cheese: 3, gcash: 4, gcashCheese: 2, custom: 0, free: 1 }),
+    { cashReg: 2, cashCheese: 3, gcashReg: 4, gcashCheese: 2, sold: 12 },
+    'cash regular = sold − cheese − GCash regular − GCash cheese − the order\'s boxes − given away');
+  assert.strictEqual(app.rowUI({ sod: '', eod: 0, cheese: 1 }).cashReg, null, 'unknown while a count is blank');
+  assert.strictEqual(app.uiVal({ sod: 5, eod: 0, cheese: 1, gcash: '', gcashCheese: 2 }, 'payGcashReg'), '', 'a bucket reads blank only from its own cell');
+  assert.strictEqual(app.uiVal({ sod: 5, eod: 0, cheese: 1, gcash: '', gcashCheese: 2 }, 'payCashReg'), 2, '5 − 1 − 0 − 2');
 });
 
 test('a night saved by the OLD card loads back exactly as the sheet holds it, and the correction is one press (v2.24.0)', () => {
@@ -10083,44 +10047,50 @@ test('a night saved by the OLD card loads back exactly as the sheet holds it, an
   app.applyBootstrap(boot);
   app.loadBentaForm(D);
   const r = app.benta.rows.find(x => x.sku === 'box6');
-  // The stored buckets, shown as they are: 1 cheese made, 1 regular by GCash, 1
-  // cheese by GCash. No figure changes meaning on load.
-  assert.strictEqual(app.uiVal(r, 'C'), 1);
-  assert.strictEqual(app.uiVal(r, 'G'), 1, 'REGULAR by GCash: the sheet\'s gcash_qty, not gcash + cheese');
-  assert.strictEqual(app.uiVal(r, 'GC'), 1);
+  // The stored buckets, shown as they are (v2.29.0: as the four paid figures):
+  // 6 regular for cash, no cash cheese, 1 regular by GCash, 1 cheese by GCash.
+  // No figure changes meaning on load.
+  assert.strictEqual(app.uiVal(r, 'payCashReg'), 6, '8 sold less the two by GCash');
+  assert.strictEqual(app.uiVal(r, 'payCashCheese'), 0);
+  assert.strictEqual(app.uiVal(r, 'payGcashReg'), 1, 'REGULAR by GCash: the sheet\'s gcash_qty, not gcash + cheese');
+  assert.strictEqual(app.uiVal(r, 'payGcashCheese'), 1);
   const p0 = app.bentaPayload().counts.find(x => x.sku === 'box6');
   assert.deepStrictEqual({ c: p0.cheeseQty, g: p0.gcashQty, gc: p0.gcashCheeseQty }, { c: 0, g: 1, gc: 1 },
     'a re-save with nothing touched sends the row back unchanged');
   assert.strictEqual(app.computeDay(app.bentaPayload()).gcash, 145, 'and prices it as the sheet did — until he changes it');
-  // His paper said two regular boxes by GCash. One press.
-  app.uiStep(r, 'gcashAll', 1);
+  // His paper said two regular boxes by GCash, not one for cash: one minus, one plus.
+  app.uiStep(r, 'payCashReg', -1);
+  app.uiStep(r, 'payGcashReg', 1);
   assert.deepStrictEqual(bucketsOf(app, r), { cheese: 0, gcash: 2, gcashCheese: 1 });
+  assert.deepStrictEqual({ sod: r.sod, eod: r.eod }, { sod: 8, eod: 0 }, 'the first edit re-encodes the night: eight sold, no shelf');
   const c = app.computeDay(app.bentaPayload());
   assert.strictEqual(c.gcash, 210);
   assert.strictEqual(c.total, 535, 'the Total does not move: the night sold what it sold');
 });
 
-test('SOURCE PIN: the GCash card asks for regular and cheese boxes apart, and the paper review reads them the same way (v2.24.0)', () => {
-  const card = slab('function gcashCardHTML(skus, daySnap, payRow){', 'function lidStepperHTML(){');
-  assert.match(card, /payRow\(pr\.group === 'box' \? 'Regular boxes' : 'Sold with GCash',/,
-    'a box sku asks for REGULAR boxes; a simple sku has no cheese version, so its one count keeps the card\'s name');
-  assert.match(card, /payRow\('Cheese boxes',/, 'and for CHEESE boxes');
-  assert.ok(card.indexOf('Of those') < 0, '"of those" is gone — it made a cheese box a ₱15 add-on');
-  assert.match(card, /\(pr\.group === 'box' \? 'Regular boxes paid by GCash, ' : 'Sold with GCash, '\) \+ pr\.label/,
-    'the screen-reader label names both dimensions for a box, and says what the card says for a simple sku');
-  assert.match(card, /'Cheese boxes paid by GCash, ' \+ pr\.label/);
-  assert.match(card, /each at its own full price/, 'the hint says what a cheese box is worth here');
-  assert.match(card, /a cheese box here is one of the cheese boxes counted above/, 'and that it is part of ① too');
-  // The map itself: G is the gcash bucket alone.
+test('SOURCE PIN: each size card asks the four paid figures in one grid, and the paper review reads them the same way (v2.29.0)', () => {
+  const render = slab('function renderBenta(){', 'const CHEV =');
+  assert.match(render, /'<span class="pg-row">Cash<\/span>' \+ cell\('payCashReg'/, 'row one is Cash');
+  assert.match(render, /'<span class="pg-row gc">GCash<\/span>' \+ cell\('payGcashReg'/, 'row two is GCash');
+  assert.match(render, /\(withCheese \? 'Regular' : 'Sold'\)/, 'the first column is Regular beside Cheese, or simply Sold for a size with no cheese version');
+  assert.match(render, /cell\('payCashCheese', 'Cheese paid in cash'\)/, 'the screen-reader label names both dimensions');
+  assert.match(render, /cell\('payGcashCheese', 'Cheese paid by GCash'\)/);
+  assert.match(render, /withCheese \? 'Regular paid by GCash' : 'Sold by GCash'/);
+  assert.ok(render.indexOf('Of those') < 0 && render.indexOf('gcashOfCheese') < 0, '"of those" stays gone — it made a cheese box a ₱15 add-on');
+  assert.ok(render.indexOf('Start of day') < 0 && render.indexOf('End of day') < 0, 'no start or end count anywhere on the screen');
+  assert.ok(render.indexOf('>Boxes sold<') !== -1 && render.indexOf('>How many were sold?<') !== -1, 'the question the owner asked for, in his words');
+  // The map itself: GCash regular is the gcash bucket alone; cash regular is the remainder.
   const map = slab('function rowUI(r){', 'function syncRowInputs(sku, r){');
-  assert.match(map, /G: Math\.max\(0, num\(row\.gcash\)\),/, 'G = gcash, not gcash + gcashCheese');
-  // The paper review prints the same two counts, in the same words.
+  assert.match(map, /const gcashReg = Math\.max\(0, num\(row\.gcash\)\);/, 'GCash regular = gcash, not gcash + gcashCheese');
+  assert.match(map, /sold - cashCheese - gcashReg - gcashCheese - Math\.max\(0, num\(row\.custom\)\) - Math\.max\(0, num\(row\.free\)\)/,
+    'cash regular is what the sheet keeps as regular_qty');
+  // The paper review prints the same four figures, in the same order.
   const review = slab('function paperReviewHTML(rd){', 'function paperShoot(){');
-  assert.match(review, /GCash regular ' \+ fig\(f\.gcashAll\)/);
-  assert.match(review, /GCash cheese ' \+ fig\(f\.gcashOfCheese\)/);
-  assert.ok(review.indexOf('Of those, cheese') < 0);
+  assert.match(review, /'Sold ' \+ fig\(f\.sold\) \+ ' · Cash: ' \+ fig\(f\.cashReg\) \+ ' regular, ' \+ fig\(f\.cashCheese\) \+ ' cheese'/);
+  assert.match(review, /' · GCash: ' \+ fig\(f\.gcashReg\) \+ ' regular, ' \+ fig\(f\.gcashCheese\) \+ ' cheese'/);
+  assert.ok(review.indexOf('Start of day') < 0);
   const figs = slab('function paperFormFigures(c){', 'function paperReviewHTML(');
-  assert.match(figs, /gcashAll: c\.gcash,/, 'the reading\'s gcash is already the plain boxes — nothing is added');
+  assert.match(figs, /gcashReg: c\.gcash,/, 'the reading\'s gcash is already the plain boxes — nothing is added');
 });
 
 // ---------------------------------------------------------------------------
@@ -10204,9 +10174,9 @@ test('SOURCE PIN: the give-away question left the sku cards for its own card, wi
   assert.ok(render.indexOf('freeAsk') < 0, 'no per-sku "Given away or ruined?" block is built any more');
   assert.ok(render.indexOf('Given away or ruined?') < 0, 'and the question is not asked on the sku cards');
   const iFree = render.indexOf('h += freeCardHTML(skus, payRow);');
-  const iGcash = render.indexOf('h += gcashCardHTML(skus, daySnap, payRow);');
-  const iCash = render.indexOf('id="cashRecap"');
-  assert.ok(iFree !== -1 && iFree < iGcash && iGcash < iCash, 'Box counts, Given away, Sold with GCash, Sold with cash — in that order');
+  const iGcash = render.indexOf('h += gcashCardHTML();');
+  assert.ok(iFree !== -1 && iGcash !== -1 && iFree < iGcash, 'Boxes sold, Given away, the conversion card — in that order (v2.29.0: no cash recap)');
+  assert.ok(render.indexOf('id="cashRecap"') < 0);
   const src = fs.readFileSync(INDEX_HTML, 'utf8');
   assert.match(src, /const COLLAPSE_FLAG = \{ stock:'stockOpen', wage:'wageOpen', gcash:'gcashOpen', free:'freeOpen' \};/,
     'the whitelist of collapsible cards knows it');
@@ -10226,84 +10196,89 @@ test('SOURCE PIN: the give-away question left the sku cards for its own card, wi
 // independent verifiers before it was fixed.
 // ---------------------------------------------------------------------------
 
-test('REVIEW: a press and a typed figure on "How many were cheese" land on the SAME money (v2.24.0)', () => {
-  // Found: lowering the cheese count below the GCash-cheese count by PRESS moved
-  // the box to regular GCash (raising "Regular boxes" — his own count — by one
-  // regular price on GCash), while TYPING the same lower figure left it cash
-  // regular. One visible answer, two payloads, ₱65 apart. Now both paths agree:
-  // the box is simply no longer cheese; "Regular boxes" is never bumped for him.
-  const startOn = (app) => {
-    const r = app.benta.rows.find(x => x.sku === 'box6');
-    r.sod = 5; r.eod = 0;
-    press(app, r, 'cheeseAll', 2);
-    press(app, r, 'gcashOfCheese', 2);                    // {0, 0, 2}: both cheese boxes GCash
-    assert.deepStrictEqual(bucketsOf(app, r), { cheese: 0, gcash: 0, gcashCheese: 2 });
-    return r;
-  };
-  const A = nightOn(ymdDaysAgo(1)).app, rA = startOn(A);
-  const B = nightOn(ymdDaysAgo(1)).app, rB = startOn(B);
-  A.uiStep(rA, 'cheeseAll', -1);                          // pressed
-  B.uiTyped(rB, 'cheeseAll', '1');                        // typed
-  assert.deepStrictEqual(bucketsOf(A, rA), { cheese: 0, gcash: 0, gcashCheese: 1 });
+test('REVIEW: a press and a typed figure on the same box land on the SAME money (v2.24.0, kept on the grid in v2.29.0)', () => {
+  const A = nightOn(ymdDaysAgo(1)).app, rA = A.benta.rows.find(x => x.sku === 'box6');
+  const B = nightOn(ymdDaysAgo(1)).app, rB = B.benta.rows.find(x => x.sku === 'box6');
+  press(A, rA, 'payCashReg', 3); press(A, rA, 'payCashCheese', 2); press(A, rA, 'payGcashCheese', 1);
+  B.uiTyped(rB, 'payCashReg', '3'); B.uiTyped(rB, 'payCashCheese', '2'); B.uiTyped(rB, 'payGcashCheese', '1');
   assert.deepStrictEqual(bucketsOf(B, rB), bucketsOf(A, rA), 'same buckets either way');
+  assert.deepStrictEqual({ sod: rB.sod, eod: rB.eod }, { sod: rA.sod, eod: rA.eod });
+  assert.strictEqual(rA.sod, 6);
   const cA = A.computeDay(A.bentaPayload()), cB = B.computeDay(B.bentaPayload());
-  assert.strictEqual(cA.gcash, 80, 'one cheese box still by GCash, at its whole price');
+  assert.strictEqual(cA.gcash, 80, 'one cheese box by GCash, at its whole price');
   assert.strictEqual(cB.gcash, cA.gcash, 'same GCash either way');
   assert.strictEqual(cB.total, cA.total, 'same Total either way');
-  assert.strictEqual(A.uiVal(rA, 'G'), 0, '"Regular boxes" was never touched and does not move');
-  // The Sept-5 shape too: {0, 2, 1} lowered to no cheese.
-  const C = nightOn(ymdDaysAgo(1)).app, rC = C.benta.rows.find(x => x.sku === 'box6');
-  rC.sod = 20; rC.eod = 12; rC.cheese = 0; rC.gcash = 2; rC.gcashCheese = 1;
-  const D = nightOn(ymdDaysAgo(1)).app, rD = D.benta.rows.find(x => x.sku === 'box6');
-  rD.sod = 20; rD.eod = 12; rD.cheese = 0; rD.gcash = 2; rD.gcashCheese = 1;
-  C.uiStep(rC, 'cheeseAll', -1);
-  D.uiTyped(rD, 'cheeseAll', '0');
-  assert.deepStrictEqual(bucketsOf(C, rC), { cheese: 0, gcash: 2, gcashCheese: 0 });
-  assert.deepStrictEqual(bucketsOf(D, rD), bucketsOf(C, rC));
-  assert.strictEqual(C.computeDay(C.bentaPayload()).gcash, 130, 'two regular boxes by GCash, as he entered them');
+  assert.strictEqual(cA.total, 3 * 65 + 2 * 80 + 80);
+  // Lowering by press and by typing agree too.
+  A.uiStep(rA, 'payCashCheese', -1);
+  B.uiTyped(rB, 'payCashCheese', '1');
+  assert.deepStrictEqual(bucketsOf(B, rB), bucketsOf(A, rA));
+  assert.strictEqual(rA.sod, 5);
+  assert.strictEqual(A.computeDay(A.bentaPayload()).total, B.computeDay(B.bentaPayload()).total);
+  assert.strictEqual(A.uiVal(rA, 'payGcashReg'), 0, '"GCash regular" was never touched and does not move');
 });
 
-test('REVIEW: a press that moves nothing does not make the night unsent work (v2.24.0)', () => {
-  // Found: a refused press (room toast) and a minus at 0 fell through to
-  // benta.dirty = true — stashing a draft, holding back the midnight roll and a
-  // waiting update, for a night nobody changed.
+test('REVIEW: a press that moves nothing does not make the night unsent work (v2.24.0, kept in v2.29.0)', () => {
   const { app } = nightOn(ymdDaysAgo(1));
   const r = app.benta.rows.find(x => x.sku === 'box6');
-  r.sod = 5; r.eod = 0;
-  press(app, r, 'cheeseAll', 1);
-  press(app, r, 'gcashOfCheese', 1);                      // {0, 0, 1}
-  app.benta.dirty = false;
-  app.uiStep(r, 'gcashOfCheese', 1);                      // refused: no cash cheese left
-  app.uiStep(r, 'gcashAll', -1);                          // minus at 0
-  app.uiStep(r, 'cheeseAll', 1); app.uiStep(r, 'cheeseAll', 1); app.uiStep(r, 'cheeseAll', 1);
-  app.uiStep(r, 'cheeseAll', 1); app.uiStep(r, 'cheeseAll', 1);   // C 1 → 5 = sold: allowed
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 4, gcash: 0, gcashCheese: 1 });
-  assert.strictEqual(app.benta.dirty, true, 'presses that moved a bucket dirty the night');
+  press(app, r, 'payCashCheese', 1);
+  press(app, r, 'payGcashCheese', 1);
+  assert.strictEqual(app.benta.dirty, true, 'presses that moved a figure dirty the night');
   app.benta.dirty = false;
   app.hooks.toasts.length = 0;
-  app.uiStep(r, 'cheeseAll', 1);                          // a sixth on five sold: refused
-  app.uiStep(r, 'gcashAll', 1);                           // room 0: refused
-  app.uiStep(r, 'gcashAll', -1);                          // minus at 0
-  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 4, gcash: 0, gcashCheese: 1 }, 'nothing moved');
-  assert.strictEqual(app.hooks.toasts.length, 2, 'two refusals said why');
+  app.hooks.synced.length = 0;
+  app.uiStep(r, 'payGcashReg', -1);                       // minus at 0
+  app.uiStep(r, 'payCashReg', -1);                        // minus at 0
+  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 1, gcash: 0, gcashCheese: 1 });
+  assert.strictEqual(r.sod, 2, 'nothing moved');
   assert.strictEqual(app.benta.dirty, false, 'and the night is not marked as changed');
-  assert.ok(app.hooks.synced.length >= 3, 'the row was still redrawn each time');
+  assert.deepStrictEqual(app.hooks.toasts, [], 'and nothing was refused — there is no bound to refuse over');
+  assert.ok(app.hooks.synced.length >= 2, 'the row was still redrawn each time');
+  // A minus on a BLANK cash regular (a half-read paper row) is not an answer of 0 either.
+  r.sod = '';
+  app.benta.dirty = false;
+  app.uiStep(r, 'payCashReg', -1);
+  assert.strictEqual(r.sod, '');
+  assert.strictEqual(app.benta.dirty, false);
+  app.uiStep(r, 'payCashReg', 1);
+  assert.strictEqual(r.sod, 3, 'a plus answers it: 1 + the two cheese boxes');
+  assert.strictEqual(app.benta.dirty, true);
+  // And a press on a BUCKET while cash regular is blank moves that bucket only:
+  // nothing is totalled, Sold stays unknown, the refusal stands.
+  r.sod = '';
+  app.uiStep(r, 'payCashCheese', 1);
+  assert.strictEqual(r.cheese, 2, 'the cheese count moved');
+  assert.strictEqual(r.sod, '', 'but nothing was totalled on an unanswered cash count');
+  assert.strictEqual(app.uiVal(r, 'payCashReg'), '');
+  assert.match(String(app.validateBenta()['sku:box6']), /enter how many were sold/);
 });
 
-test('REVIEW: a simple sku\'s refusal names the count the way its card does (v2.24.0)', () => {
-  // Found: nori's one GCash count is labelled "Sold with GCash", but a refused
-  // press toasted about "Regular boxes" and "cheese" — a category it has not got.
-  const { app } = nightOn(ymdDaysAgo(1));
+test('REVIEW: a simple sku in the cutoff gets a one-column grid whose labels say "sold", not "regular" (v2.24.0 lesson, v2.29.0 card)', () => {
+  // Found in v2.24.0: nori's one GCash count was labelled one way and refused
+  // another. On the grid a simple sku has no cheese column, nothing to refuse,
+  // and labels that say what its card says.
+  const { app } = nightOn(ymdDaysAgo(9));
+  const pr = app.state.prices.find(p => p.sku === 'nori');
+  pr.in_cutoff = true;                                    // for this test, nori counts in
+  app.loadBentaForm(ymdDaysAgo(9));
   const r = app.benta.rows.find(x => x.sku === 'nori');
-  r.sod = 2; r.eod = 0;
-  press(app, r, 'gcashAll', 3);
-  assert.strictEqual(app.num(r.gcash), 2);
-  assert.strictEqual(app.hooks.toasts.length, 1);
-  assert.strictEqual(app.hooks.toasts[0], '“Sold with GCash” can only go up to 2 — that is how many were sold.');
-  r.gcash = 1; r.free = 1;                                // one given away: room 1
-  app.uiStep(r, 'gcashAll', 1);
-  assert.strictEqual(app.hooks.toasts[1], '“Sold with GCash” can only go up to 1 — the other 1 of the 2 sold are already given away.');
-  assert.strictEqual(app.num(r.gcash), 1);
+  assert.strictEqual(app.directSoldSku('nori'), false, 'in the cutoff it is a simple sku with a payment split: the one-column grid');
+  press(app, r, 'payCashReg', 2);
+  press(app, r, 'payGcashReg', 3);
+  assert.deepStrictEqual(app.hooks.toasts, [], 'no bound, no refusal');
+  assert.deepStrictEqual(bucketsOf(app, r), { cheese: 0, gcash: 3, gcashCheese: 0 });
+  assert.strictEqual(r.sod, 5);
+  const l = app.computeDay(app.bentaPayload()).lines.find(x => x.sku === 'nori');
+  assert.strictEqual(l.in_cutoff, true);
+  assert.strictEqual(l.gcash_amount, 75);
+  assert.strictEqual(l.amount, 125);
+  const render = slab('function renderBenta(){', 'const CHEV =');
+  assert.match(render, /withCheese \? 'Regular paid in cash' : 'Sold for cash'/, 'its labels say sold, not regular');
+  assert.match(render, /withCheese \? 'Regular paid by GCash' : 'Sold by GCash'/);
+  // Kept OUT of the cutoff — the shipped nori — it is the plain quantity card.
+  pr.in_cutoff = false;
+  app.loadBentaForm(ymdDaysAgo(9));
+  assert.strictEqual(app.directSoldSku('nori'), true);
 });
 
 test('REVIEW: the give-away count survives a draft — it was the one row field the draft never kept (v2.24.0)', () => {
@@ -10552,8 +10527,9 @@ test('REVIEW FIXES: nori with its quantity blank is refused once, the paper copy
   const errs = app.validateBenta();
   assert.match(String(errs['sku:nori']), /enter the quantity sold — 0 if none/);
   assert.strictEqual(errs['free:nori'], undefined, 'the give-away is not blamed for the blank quantity');
-  // (b) The paper reader's two sentences follow the card: no "end count" for nori.
-  assert.match(slab('function paperCrossHTML(', 'function paperReviewHTML(rd){'), /!noriUsesSoldField\(r\.sku\) && isBlankVal\(r\.eod\)/);
+  // (b) The paper reader's sentences follow the card: no "end count" anywhere
+  // (v2.29.0 took the last one with it), and the plain card's figure by name.
+  assert.ok(slab('function paperCrossHTML(', 'function paperReviewHTML(rd){').indexOf('end count') < 0);
   assert.match(slab('function paperReviewHTML(rd){', 'function paperShoot(){'), /'Quantity sold ' \+ fig\(f\.sold\)/);
   // (c) The checklist fingerprint is a digest, not the expense list: the server
   // caps the field at 20,000 characters and the list grew with every purchase.
@@ -10571,17 +10547,23 @@ test('REVIEW FIXES: nori with its quantity blank is refused once, the paper copy
   assert.match(input, /if \(id === 'tinCountIn'\)\{\s*if \(cutoffPer\) tinEdits\[periodKey\(cutoffPer\)\] = ev\.target\.value;[\s\S]{0,260}updateCutoffCheckPreview\(\);/);
 });
 
-test('REVIEW: the paper review\'s Cheese figure is what the card will show (v2.24.0)', () => {
-  // Found: with cheese unread and GCash cheese read as 2, the review printed
-  // "Cheese not read" while the card's "How many were cheese" showed 2.
+test('REVIEW: the paper review prints what each box of the card will show (v2.24.0 lesson, v2.29.0 figures)', () => {
   const { app } = nightOn(ymdDaysAgo(1));
-  const f = (cheese, gc) => app.paperFormFigures({ sku: 'box10', sod: 63, eod: 39, cheese, gcash: '', gcash_cheese: gc }).cheeseAll;
-  assert.strictEqual(f('', 2), 2, 'cheese unread, two GCash cheese boxes read: the card shows 2, so does the review');
-  assert.strictEqual(f('', ''), '', 'nothing read: blank, not 0');
-  assert.strictEqual(f(4, 1), 4, 'both read: all the cheese, however paid');
-  assert.strictEqual(f(1, 2), 2, 'an inconsistent reading shows what the card shows (max), not a negative');
-  assert.strictEqual(app.uiVal({ cheese: '', gcash: '', gcashCheese: 2 }, 'C'), 2, 'the card\'s own reading of the same row');
-  assert.strictEqual(app.uiVal({ cheese: Math.max(0, 1 - 2), gcash: '', gcashCheese: 2 }, 'C'), 2);
+  const f = (cheese, gc) => app.paperFormFigures({ sku: 'box10', sod: 63, eod: 39, sold: '', cheese, gcash: '', gcash_cheese: gc });
+  assert.strictEqual(f('', 2).cashCheese, '', 'cheese unread: the cash-cheese box is blank on the card, so the review says not read');
+  assert.strictEqual(f('', 2).gcashCheese, 2, 'the two GCash cheese boxes it DID read show');
+  assert.strictEqual(f('', '').cashCheese, '', 'nothing read: blank, not 0');
+  assert.strictEqual(f(4, 1).cashCheese, 3, 'both read: the cheese paid in cash is the difference');
+  assert.strictEqual(f(1, 2).cashCheese, 0, 'an inconsistent reading never prints a negative');
+  assert.strictEqual(f(4, 1).sold, 24);
+  assert.strictEqual(f(4, 1).cashReg, '', 'cash regular needs the GCash figure too — unread here, so blank');
+  assert.strictEqual(app.paperFormFigures({ sku: 'box10', sod: 63, eod: 39, sold: '', cheese: 4, gcash: 3, gcash_cheese: 1 }).cashReg, 17, '24 − 4 − 3');
+  // A lone sold figure (v2.29.0) stands in for the pair.
+  assert.strictEqual(app.paperFormFigures({ sku: 'box10', sod: '', eod: '', sold: 24, cheese: 4, gcash: 3, gcash_cheese: 1 }).cashReg, 17);
+  assert.strictEqual(app.paperFormFigures({ sku: 'box10', sod: '', eod: '', sold: '', cheese: 4, gcash: 3, gcash_cheese: 1 }).sold, '', 'neither the pair nor the figure: blank');
+  // The card's own reading of the same rows.
+  assert.strictEqual(app.uiVal({ sod: 63, eod: 39, cheese: '', gcash: '', gcashCheese: 2 }, 'payCashCheese'), '');
+  assert.strictEqual(app.uiVal({ sod: 63, eod: 39, cheese: '', gcash: '', gcashCheese: 2 }, 'payGcashCheese'), 2);
 });
 
 // --- THE CROSS-CHECK -------------------------------------------------------
@@ -10676,13 +10658,13 @@ test('a page dated another night is CALLED OUT, not quietly believed (v2.9.1)', 
     'no false alarm when the page IS this night');
 });
 
-test('an empty end count is REFUSED at Save day — the guard that outlives the card (v2.9.0)', () => {
-  // The gate's RI-2, and the worst outcome this release could cause. An unread
-  // end count leaves the box empty; every sum reads empty as 0, so a start
-  // count of 55 prices all 55 as sold. The paper card said so loudly — but the
-  // card is dismissible and is NOT persisted, so after "Hide this" or a reload
-  // the inflated night saved silently. The refusal therefore lives in
-  // validateBenta, where Save day cannot get past it.
+test('a half-read row is REFUSED at Save day — "enter how many were sold" — the guard that outlives the card (v2.9.0, in v2.29.0 words)', () => {
+  // The gate's RI-2, and the worst outcome a reading could cause: an unread
+  // figure leaves a blank, every sum reads a blank as 0, and a start count of 55
+  // with no end count priced all 55 as sold. The paper card said so loudly — but
+  // the card is dismissible and NOT persisted, so the refusal lives in
+  // validateBenta, where Save day cannot get past it. On the paid grid that row
+  // shows a BLANK Cash regular, and the refusal asks for it by name.
   const app = loadClient();
   app.applyBootstrap(F.boot);
   const D = ymdDaysAgo(1);
@@ -10691,8 +10673,8 @@ test('an empty end count is REFUSED at Save day — the guard that outlives the 
   row.sod = 55; row.eod = '';                 // exactly what an unread figure leaves
   const errs = app.validateBenta();
   assert.ok(errs['sku:box10'], 'it must refuse — nothing else stops this night');
-  assert.match(errs['sku:box10'],
-    /Box 10: the end count is empty, so all 55 would count as sold\. Type what was left — 0 if the tray emptied\./);
+  assert.match(errs['sku:box10'], /Box 10: enter how many were sold — 0 if none\./);
+  assert.strictEqual(app.uiVal(row, 'payCashReg'), '', 'the card shows the gap: a blank Cash regular, not 55');
   // And the inflation it prevents is real: with the blank read as 0, that line
   // prices the whole shelf.
   const line = () => app.computeDay(app.bentaPayload()).lines.find(l => l.sku === 'box10');
@@ -10701,11 +10683,18 @@ test('an empty end count is REFUSED at Save day — the guard that outlives the 
   // ZERO is a real answer and always accepted — that is the whole distinction.
   row.eod = 0;
   assert.ok(!app.validateBenta()['sku:box10'], 'a typed 0 is an answer, not a gap');
+  assert.strictEqual(app.uiVal(row, 'payCashReg'), 55, 'and the card now says so');
   assert.strictEqual(line().amount, 55 * 105, 'and it books the same money, now on purpose');
-  // A blank on a row nobody touched stays silent: an untouched row is not a gap.
+  // PIN TURNED (v2.29.0): a row with BOTH counts blank used to pass as "just an
+  // empty row". On this card that is a blank Cash regular — the one unanswered
+  // question — so it is asked, in the same words. A fresh row starts at 0, not
+  // blank, so an ordinary night never meets this; only a reading that could not
+  // see the row, or a box cleared by hand, does.
   const other = app.benta.rows.find(r => r.sku === 'box4');
   other.sod = ''; other.eod = '';
-  assert.ok(!app.validateBenta()['sku:box4'], 'an empty row is just an empty row');
+  assert.match(String(app.validateBenta()['sku:box4']), /Box 4: enter how many were sold — 0 if none\./);
+  other.sod = 0; other.eod = 0;
+  assert.ok(!app.validateBenta()['sku:box4'], 'answered with 0, it is an ordinary row');
 });
 
 test('a gap in the reading is NAMED, never blamed on Mama\'s arithmetic (v2.9.0)', () => {
@@ -10821,9 +10810,9 @@ test('BLANK STAYS BLANK: a figure the paper did not give is EMPTY on the form, n
   assert.strictEqual(app.stepVal(row.eod), '', 'a blank box shows blank');
   assert.strictEqual(app.stepVal(row.sod), 31, 'a read figure shows itself');
   assert.strictEqual(app.soldVal(row), '', '"31 in, end of day unread" is NOT 31 sold');
-  assert.strictEqual(app.uiVal(row, 'GC'), '', 'and neither is the unread overlap a 0');
-  assert.strictEqual(app.uiVal(row, 'C'), 1,
-    'a SUM may only read blank when every bucket behind it does');
+  assert.strictEqual(app.uiVal(row, 'payCashReg'), '', 'so the cash count on the card is blank, never 31');
+  assert.strictEqual(app.uiVal(row, 'payGcashCheese'), '', 'and neither is the unread overlap a 0');
+  assert.strictEqual(app.uiVal(row, 'payCashCheese'), 1, 'while the one cheese box it DID read shows');
   // A ZERO it really read is a zero, and is not reported as unread.
   assert.strictEqual(rd.counts[0].gcash, 0);
   assert.ok(rd.unread.indexOf('Box 4 paid by GCash') < 0,
@@ -10836,20 +10825,47 @@ test('BLANK STAYS BLANK: a figure the paper did not give is EMPTY on the form, n
   assert.ok(card.indexOf('Every one of these is EMPTY on the form, not 0') > -1);
 });
 
-test('a start count with no end count is called out — the total prices the whole shelf as sold', () => {
-  // The one blank that INVENTS money: every figure the app sums reads a blank
-  // as 0, so a row with 31 in and nothing at the end reads as 31 sold while the
-  // total above it looks perfectly ordinary.
+test('a row the paper wrote as ONE sold figure lands on the form as sold, encoded as nori is (v2.29.0)', () => {
+  const t = readVia({ counts: [
+    { sku: 'box4', sold: 7, cheese: 2, gcash: 1, gcash_cheese: 1, confidence: 0.9 }
+  ], custom_amount: 0, custom_gcash: 0, total_on_paper: 370, notes: '', unread: [] });
+  const app = t.app, rd = t.reading;
+  const c = rd.counts.find(x => x.sku === 'box4');
+  assert.strictEqual(c.sold, 7, 'the figure survives the REAL Vision.gs and the phone\'s normalizer');
+  assert.strictEqual(c.sod, ''); assert.strictEqual(c.eod, '');
+  assert.ok(!rd.unread.some(u => /^Box 4 (at the start|left at the end)/.test(u)), JSON.stringify(rd.unread));
+  app.applyReadingToForm(rd);
+  const row = app.benta.rows.find(r => r.sku === 'box4');
+  assert.deepStrictEqual({ sod: row.sod, eod: row.eod }, { sod: 7, eod: 0 }, 'sod = sold, eod = 0 — the encoding every v2.29.0 row uses');
+  assert.deepStrictEqual({ cheese: row.cheese, gcash: row.gcash, gcashCheese: row.gcashCheese }, { cheese: 1, gcash: 1, gcashCheese: 1 });
+  assert.strictEqual(app.uiVal(row, 'payCashReg'), 4, '7 sold − 1 cash cheese − 1 GCash regular − 1 GCash cheese');
+  assert.strictEqual(app.validateBenta()['sku:box4'], undefined, 'a whole row needs no second answer');
+  const l = app.computeDay(app.bentaPayload()).lines.find(x => x.sku === 'box4');
+  assert.strictEqual(l.sold, 7);
+  assert.strictEqual(l.amount, 4 * 50 + 60 + 50 + 60, 'four regular and one cheese for cash, one regular and one cheese by GCash');
+  assert.strictEqual(l.gcash_amount, 50 + 60);
+});
+
+test('a start count with no end count is called out by the card and the save, never priced as sold quietly (v2.29.0)', () => {
+  // The one blank that would INVENT money: every figure the app sums reads a
+  // blank as 0, so a row with 31 in and nothing at the end summed as 31 sold
+  // while the total above it looked perfectly ordinary. On the paid grid the
+  // row shows a BLANK cash count and Save day refuses it by name; the
+  // cross-check counts that refusal below the paper's own total.
   const app = showing(readVia({ counts: [
     { sku: 'box4', sod: 31, cheese: 0, gcash: 0, gcash_cheese: 0, confidence: 0.5 }
   ], custom_amount: 0, custom_gcash: 0, total_on_paper: 150, notes: '', unread: [] })).app;
-  const h = app.paperCrossHTML({});
-  assert.ok(h.indexOf('The end count is still empty on <b>Box 4</b>') > -1, h);
-  assert.ok(h.indexOf('count every one of those boxes as sold') > -1, h);
-  // Filled in, it settles — the sentence is read off the FORM, not the reading.
-  app.benta.rows.find(r => r.sku === 'box4').eod = 28;
-  assert.ok(app.paperCrossHTML({}).indexOf('The end count is still empty') < 0,
-    'a gap he has just closed must stop saying it is open');
+  const row = app.benta.rows.find(r => r.sku === 'box4');
+  assert.strictEqual(app.uiVal(row, 'payCashReg'), '', 'the card shows a blank cash count, not 31');
+  const errs = app.validateBenta();
+  assert.match(String(errs['sku:box4']), /Box 4: enter how many were sold — 0 if none\./);
+  const h = app.paperCrossHTML(errs);
+  assert.ok(h.indexOf('1 line below holds a figure the sheet will not take') > -1, h);
+  // Filled in, it settles — the refusal is read off the FORM, not the reading.
+  row.eod = 28;
+  assert.strictEqual(app.validateBenta()['sku:box4'], undefined, 'a gap he has just closed must stop being one');
+  assert.strictEqual(app.uiVal(row, 'payCashReg'), 3);
+  assert.ok(app.paperCrossHTML(app.validateBenta()).indexOf('will not take') < 0);
 });
 
 // --- NOTHING AUTO-SAVES ----------------------------------------------------

@@ -29,7 +29,7 @@ function loadApp() {
     slab('function rowUI(r){', 'function syncRowInputs(sku, r){'),
     slab('function isWhole(v){', "/** 'sku:box4' -> 'err-sku-box4'"),
     slab('function prettySku(sku){', 'function listPhrase(names){'),
-    slab('const ROW_FIELDS =', '/* ---- The presentation of the SAME three entered buckets'),
+    slab('const ROW_FIELDS =', '/* ---- The FOUR PAID FIGURES of a box card (v2.29.0).'),
     slab('// The three ENTERED buckets, with the label each one shows.', '/* ---- The needs-attention card.'),
     slab('function skuSplitText(pr, row){', '// The row fields a stepper may write.'),
     slab('function bentaStep(sku, field, dir){', 'function afterCountChange(sku){')
@@ -38,7 +38,6 @@ function loadApp() {
     const store={read(){return null;},set(){}};
     ${source}
     let state=freshState(), queue=[], config=freshConfig(), attention=[], drafts={}, benta=null;
-    const UI_FIELDS={};
     const inputs={};
     function $(id){return inputs[id] || null;}
     function persistDrafts(){}
@@ -66,12 +65,15 @@ function historical(app, free = 1) {
 let passed = 0;
 function test(name, fn) { fn(); passed++; console.log('  PASS  ' + name); }
 
-test('new nori starts at zero sales, never yesterday’s stock; box carryover remains', () => {
+test('new nori starts at zero sales, never yesterday’s stock; nothing carries for a box either (v2.29.0)', () => {
   const app = loadApp();
   app.state.counts[PRIOR] = [{sku:'nori',sod:20,eod:11},{sku:'box4',sod:30,eod:12}];
   app.loadBentaForm(DATE);
   assert.strictEqual(app.noriSoldVal(nori(app)), 0);
-  assert.strictEqual(app.benta.rows.find(r=>r.sku==='box4').sod, 12);
+  // PIN TURNED (v2.29.0, owner-directed: "lets not count box anymore, lets just
+  // input the number of boxes sold, just like the nori"): a box is tonight's
+  // sales too now, so last night's close prefills nothing.
+  assert.strictEqual(app.benta.rows.find(r=>r.sku==='box4').sod, 0);
   assert.strictEqual(app.computeDay(app.bentaPayload()).excluded, 0);
 });
 test('historical paid amount is displayed without rewriting SOD/EOD', () => {

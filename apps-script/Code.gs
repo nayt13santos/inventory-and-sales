@@ -282,7 +282,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.28.0';
+var VERSION = '2.29.0';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -698,6 +698,13 @@ function apiBootstrap(ss, settings) {
  *  amount       = (regular_qty + gcash_qty) * price
  *               + (cheese_qty + gcash_cheese_qty) * cheese_price
  *  gcash_amount = gcash_qty * price + gcash_cheese_qty * cheese_price
+ *
+ *  SINCE v2.29.0 the phone ENTERS those buckets directly (Cash regular, Cash
+ *  cheese, GCash regular, GCash cheese) and derives sold = the four + the
+ *  special order's boxes + give-aways, sending it as sod = sold, eod = 0 —
+ *  nori's encoding since v2.26.0. Nothing here changes: the start/end checks
+ *  below still guard payloads an older phone queued, and every bound holds by
+ *  construction for a v2.29.0 payload.
  */
 function apiSaveDay(ss, settings, payload) {
   var date = reqEntryDate(payload.date, 'date');
