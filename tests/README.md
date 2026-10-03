@@ -853,6 +853,10 @@ Six new cutoff checks cover the September bridge (₱28,505 receipts − ₱10,4
 
 The phone smoke test now checks 24 screens, including a compact 14-type picker, adding an expense on a historical cutoff through the real controls, duplicate-tap prevention, readiness for the next entry, adding from the bottom of history, and the bulk picker. The fixed expense actions are checked for visibility and obstruction above the tabs.
 
+### v2.30.2 allocation guide
+
+The guide tests cover the September allocation identity and zero left after recorded backlog payments, no payment/status writes during rendering, independence from old checklist states/cash counts/wallet sources, personal versus business backlog funding, missing record/cost warnings, and negative plans. Older reconciliation tests preserve compatibility with stored data and API actions; those controls are no longer rendered. Phone checks exercise split editing and saving without the payment checklist, plus the existing expense and backlog forms.
+
 ### v2.30.1 backlog payments
 
 Adds checks for shared cash/GCash payments exhausting the ₱4,103 residual without touching current stock reserves, exact account sources, unknown and personal sources, API validation/idempotent upsert and note parity, and zero-balance filtering without deleting history. Phone smoke now covers 28 screens, including saving a shared payment through the real controls, clearing its fully paid debt from both lists, and displaying honest combined-balance explanations.

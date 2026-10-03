@@ -5630,12 +5630,12 @@ test('THE OPENED VALUE IS AN ALLOCATION, and the block adds to Total (v2.22.0)',
   assert.strictEqual(app.noteUsedFig(bumped), 720, 'the opened value survived the split');
 });
 
-test('SOURCE PIN: backlog payments remain outside allocations but visible in the cash check', () => {
+test('SOURCE PIN: backlog payments remain outside allocations and are named in the guide', () => {
   const card = slab('function renderCutoff(){', 'function stockCutoffHTML(per){');
   assert.match(card, /num\(f\.backlogPaid\) > 0/);
-  assert.match(card, /esc\(peso\(f\.backlogPaid\)\)/);
-  assert.match(card, /backlog payments is separate from the allocations/);
-  assert.match(HTML, /gcashCutoffHTML\(f,per\)/);
+  assert.match(card, /Backlog payments are shown separately in the guide above/);
+  assert.match(card, /cutoffGuideHTML\(per,live\)/);
+  assert.match(HTML, /row\('Backlog payments recorded',deduct\(g.backlogUsed\)\)/);
 });
 
 test('OPENED-EQUALS-SHELF: a card filled in as a stock count is challenged (v2.23.0)', () => {
@@ -5902,7 +5902,7 @@ test('SOURCE PIN: the pre-fill yields to typing, resets after a payment, and tel
   assert.match(card, /Change it if you are paying less/, 'and says it is a suggestion');
   assert.ok(card.indexOf('shows on the note under “Other payments”') < 0,
     'the v2.20.0-era sentence is gone: a payment has been outside the note since v2.23.0');
-  assert.match(card, /Backlog payments reduce the money left above once/, 'the running money balance includes debt payments');
+  assert.match(card, /const money = cutoffGuide\(per,live\)/, 'the suggested amount follows the allocation guide after debt payments');
   // Typing marks it touched and never re-renders (the v2.13.2 guard covers the
   // second half; this pins the first).
   const input = src.slice(src.indexOf("document.addEventListener('input'"), src.indexOf("document.addEventListener('change'"));
@@ -8150,7 +8150,7 @@ test('GCASH EXPENSES: generated and regenerated archives keep the reconciliation
   assert.strictEqual(archived.gcash, 5000, 'the archive column remains gross receipts');
 });
 
-test('GCASH EXPENSES: the cutoff screen shows the same breakdown, with scope and unknown-source caveats', () => {
+test('GCASH EXPENSES: legacy breakdown stays readable while the new guide shows gross receipts', () => {
   const t = gcashExpenseFixture();
   t.spend(500, 'gcash', 'gc-screen');
   t.spend(90, '', 'unknown-screen');
@@ -8175,7 +8175,8 @@ test('GCASH EXPENSES: the cutoff screen shows the same breakdown, with scope and
     'but a figure that moved for any reason is still shown');
   const src = fs.readFileSync(INDEX_HTML, 'utf8');
   const render = src.slice(src.indexOf('function renderCutoff(){'), src.indexOf('function stockCutoffHTML(per){'));
-  assert.match(render, /gcashCutoffHTML\(f,per\)/, 'the tested breakdown is actually rendered');
+  assert.doesNotMatch(render, /gcashCutoffHTML\(f,per\)/, 'manual wallet distribution is no longer part of the guide');
+  assert.match(render, /GCash received<\/span><span class="v">' \+ peso\(f.gcash\)/);
 });
 
 test('GCASH EXPENSES: unsynced expense edits and deletion update the preview and invalidate old notes', () => {
@@ -8196,7 +8197,7 @@ test('GCASH EXPENSES: unsynced expense edits and deletion update the preview and
   assert.strictEqual(app.computeCutoff(t.per).gcashOut, 0);
 });
 
-test('SOURCE PIN: the Cutoff screen is three boxes, and the live regions never swallow an input (v2.27.0)', () => {
+test('SOURCE PIN: the Cutoff guide replaces payment tracking and keeps the note and backlog controls', () => {
   // Owner, 2026-10-03: "too many boxes" — nine stacked cards became the cash
   // box, the note box and the backlog box, with the detail folded inside them.
   const render = slab('function renderCutoff(){', 'function stockCutoffHTML(per){');
@@ -8204,17 +8205,15 @@ test('SOURCE PIN: the Cutoff screen is three boxes, and the live regions never s
     '<div class="pay-intro">Already deducted / still to pay</div>', 'These fixed expenses are not logged yet', 'Total sales (without nori)']){
     assert.ok(render.indexOf(gone) < 0, 'no longer a box of its own: ' + gone);
   }
-  assert.match(render, /<summary>Change what was paid<\/summary>/, 'the checklist is folded inside the cash box');
+  // Owner, 2026-10-04: only values are needed; cash/GCash distribution is manual.
+  assert.doesNotMatch(render, /Change what was paid|cutoffCheckFormHTML|id="tinCountIn"|cutoffCashHTML|gcashCutoffHTML/);
   assert.match(render, /<summary>How Supplies \(major\) was valued<\/summary>/, 'and the stock valuation inside the note box');
   // The two regions rewritten on every keystroke are INNER divs holding only
   // the computed HTML, so the count field and the checklist inputs beside them
   // keep their focus while the figures move.
-  assert.match(render, /<div id="coCashCheck">' \+ cutoffCashHTML\(per,live\) \+ '<\/div>'/);
-  assert.match(render, /<div id="coPaymentGroups">' \+ cutoffPaymentHTML\(per,live\) \+ '<\/div>'/);
-  assert.ok(render.indexOf('id="coCashCheck"') < render.indexOf('id="tinCountIn"'), 'the count field follows the live region');
-  assert.ok(render.indexOf('id="coPaymentGroups"') < render.indexOf('cutoffCheckFormHTML(per)'), 'the form follows its live region');
+  assert.match(render, /<div id="coMoneyFlow">' \+ cutoffGuideHTML\(per,live\)/);
   // The three boxes, in order, each still carrying what the older pins expect.
-  const iCash = render.indexOf('id="coCashCheck"'), iNote = render.indexOf('>Total sales<'), iSplit = render.indexOf('id="coSplitIn"'),
+  const iCash = render.indexOf('id="coMoneyFlow"'), iNote = render.indexOf('>Total sales<'), iSplit = render.indexOf('id="coSplitIn"'),
     iGen = render.indexOf('id="genBtn"'), iBl = render.indexOf('Pay a backlog</div><div class="card">');
   assert.ok(iCash > 0 && iCash < iNote && iNote < iSplit && iSplit < iGen && iGen < iBl, 'cash, then the note with its split and generate button, then the backlogs');
   // The form itself no longer wraps itself in a card.
@@ -8234,8 +8233,9 @@ test('SOURCE PIN: cash check names unknown money and keeps counted cash separate
   // v2.26.1: the arithmetic is printed line by line, in the open.
   assert.match(card, /cashLinesHTML\(f, r\)/, 'the card prints every line of the cash arithmetic');
   assert.ok(card.indexOf('How the cash balance is worked out') < 0, 'and no longer folds it away');
-  assert.match(HTML, /id="tinCountIn"/);
-  assert.match(HTML, /data-act="tin-save"/);
+  // Legacy reconciliation readers remain compatible; their fields are no
+  // longer rendered or required by the distribution guide (v2.30.2).
+  assert.match(HTML, /function cutoffGuideHTML/);
   assert.match(HTML, /data-act="check-save"/);
   const sub = HTML.slice(HTML.indexOf('function submitGasto('), HTML.indexOf('function submitGasto(') + 2600);
   assert.match(sub, /paidFrom: gx\.paidFrom/);

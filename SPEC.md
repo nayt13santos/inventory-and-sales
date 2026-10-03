@@ -10,6 +10,15 @@ Locale: Philippines. Timezone **Asia/Manila** everywhere. Currency PHP. Dates ar
 
 ## Business rules (verified against owner's real cutoff notes)
 
+### v2.30.2 — a guide for dividing the money
+
+Owner, 2026-10-04: "I only need this values, i dont need to record it as deducted ... i just want to know where to put what."
+
+- The Cutoff view is now **Where the money goes**: total cash + GCash received, daily expenses and wages, kept-out sales, amount to divide, then the amounts for Mama, electricity, split (with each partner's amount), and major supplies. **Total to set aside** describes these allocations; their amounts do not disappear or change when a historical payment status changes.
+- **Left after setting aside** follows the existing partner-note allocation identity. Recorded business-funded backlog payments reduce **Left to assign** once; personal-funded backlog payments are shown separately. A payment source or cash/GCash split is not needed to calculate an allocation guide. These are distribution values, not claims about live wallet balances. Nori remains separate.
+- The payment checklist, cash-count input, and wallet reconciliation are removed from the Cutoff UI. Saved records, old API actions, and readers remain compatible, but no status, old cash count, paper comparison, or checklist fingerprint gates this guide. Missing days, missing stock costs, incomplete history, unsynced financial records, and unsaved split values still identify an incomplete plan.
+- Split editing, the partner note, daily expense entry, and backlog balance/history behavior remain available. No business records are changed by viewing this guide. App/cache2.30.2; API2.30.1 and photo reader2.29.0 unchanged.
+
 ### v2.30.1 — backlog payments from the remaining balance
 
 Owner, 2026-10-04: four backlog payments used the entire ₱4,103 left after planned deductions, from mixed cash and GCash. Fix the red warning and remove fully paid backlogs.

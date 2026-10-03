@@ -33,7 +33,9 @@ that state and would have passed.
 Exit code is non-zero if anything fails; otherwise one `PASS` line per screen
 per viewport.
 
-The 28 screen checks also exercise the cutoff checklist and daily expense flow.
+The 28 screen checks also exercise the allocation guide, split editing/saving,
+backlog payments, and daily expense flow. The guide has no payment checklist or
+cash-count requirement.
 With 14 expense types, the picker remains one field. The real controls save one
 historically dated GCash expense, retain date/source for the next entry, and
 reject a second blank tap. Add expense is reachable from the bottom of history;

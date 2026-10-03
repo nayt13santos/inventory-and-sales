@@ -500,6 +500,8 @@ async function runViewport(browser, baseUrl, vp){
     await page.select('#payBlRef','Paid test backlog');
     await page.select('#payBlSource','cutoff');
     await page.focus('#payBlAmount');
+    await page.$eval('#payBlAmount',e=>e.select());
+    await page.keyboard.press('Backspace');
     await page.keyboard.type('135');
     await page.$eval('[data-act="pay-backlog"]',e=>e.scrollIntoView({block:'center'}));
     await page.click('[data-act="pay-backlog"]');
@@ -515,32 +517,37 @@ async function runViewport(browser, baseUrl, vp){
       throw new Error('Fully paid backlog remains visible in More.');
     await page.click('#tab-cutoff');
   });
-  await step('Cutoff (shared payment explanations)', 'cutoff', async () => {
+  await step('Cutoff (allocation guide needs no payment checklist)', 'cutoff', async () => {
     await page.evaluate(()=>{
       document.querySelector('.cutoff-note').open=true;
-      document.getElementById('coCashCheck').closest('details').open=true;
     });
     const text=await page.$eval('#coMoneyFlow',e=>e.innerText);
-    if(!text.includes('Individual wallet balances are not split')||text.includes('Cash matches'))
-      throw new Error('Shared funds were presented as verified individual wallet balances.');
+    if(!text.includes('Set aside for') || !text.includes('Backlog payments recorded') || text.includes('Cash matches') || text.includes('Still to deduct'))
+      throw new Error('The cutoff did not show an allocation guide.');
+    if(await page.$('#tinCountIn') || await page.$('[data-act="check-save"]') || await page.$('[data-check-status]'))
+      throw new Error('The guide still requires a cash count or payment checklist.');
   });
-  // Exercise the new checklist with the REAL input/change/click listeners.
-  // Updating the preview must not replace the field being typed into.
-  await step('Cutoff (checklist open)', 'cutoff', async () => {
+  // The owner edits allocation amounts, not payment statuses. The real split
+  // field must keep focus while its guide updates and save through its button.
+  await step('Cutoff (split updates the allocation guide)', 'cutoff', async () => {
     await page.evaluate(() => {
       showTab('cutoff');
-      document.getElementById('check-status-salary').closest('details').open = true;
+      document.querySelector('.cutoff-note').open=true;
     });
-    await page.select('#check-status-salary','paid');
-    await page.focus('#check-tin-salary');
-    await page.keyboard.type('1200');
-    const typed = await page.evaluate(() => ({ value:document.getElementById('check-tin-salary').value, focus:document.activeElement.id }));
-    if (typed.value !== '1200' || typed.focus !== 'check-tin-salary') throw new Error('Typing lost its field or focus: ' + JSON.stringify(typed));
+    await page.focus('#coSplitIn');
+    await page.$eval('#coSplitIn',e=>e.select());
+    await page.keyboard.press('Backspace');
+    await page.keyboard.type('6000');
+    const typed = await page.evaluate(() => ({value:document.getElementById('coSplitIn').value,focus:document.activeElement.id,
+      guide:document.getElementById('coMoneyFlow').innerText,amount:cutoffGuide(cutoffPer,liveCutoff(cutoffPer)).allocations.find(l=>l.key==='split').amount}));
+    if (typed.value!=='6000'||typed.focus!=='coSplitIn'||typed.amount!==6000||!typed.guide.includes('₱3,000 each'))
+      throw new Error('Split did not update the guide while retaining focus: '+JSON.stringify(typed));
   });
-  await step('Cutoff (checklist saved)', 'cutoff', async () => {
-    await page.click('[data-act="check-save"]');
-    const saved = await page.evaluate(() => cutoffCheckSaved(cutoffPer));
-    if (saved.statuses.salary !== 'paid' || saved.tin.salary !== 1200) throw new Error('Checklist did not save through the actual button.');
+  await step('Cutoff (split saved without payment tracking)', 'cutoff', async () => {
+    await page.click('[data-act="split-save"]');
+    const saved = await page.evaluate(() => ({split:computeCutoff(cutoffPer).split,pending:pendingSplit(cutoffPer),
+      guide:cutoffGuide(cutoffPer,computeCutoff(cutoffPer)).allocations.find(l=>l.key==='split').amount}));
+    if(saved.split!==6000||saved.pending||saved.guide!==6000)throw new Error('The saved split and guide disagree: '+JSON.stringify(saved));
     if (process.env.OCTOGO_SCREENSHOT_DIR) {
       fs.mkdirSync(process.env.OCTOGO_SCREENSHOT_DIR,{recursive:true});
       await page.evaluate(() => window.scrollTo(0,0));

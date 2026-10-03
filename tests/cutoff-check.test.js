@@ -33,7 +33,8 @@ function app() {
       cutoffCheckSaved,cutoffCashHTML,cutoffPaymentHTML,cutoffCheckFormHTML,
       applyLocalCutoffCheck,applyLocalTinCount,applyLocalCutoffSplit,normCutoffInput,splitFor,cashLinesHTML,mirrorRecordedSplit,
       sanitizeState,sanitizeQueue,reapplyQueue,computeCutoff,buildNote,
-      cutoffMoneyFlow,cutoffMoneyFlowHTML,cutoffUnknownSource,gcashCutoffHTML,splitEdits,applyLocalExpense,backlogPayable};
+      cutoffMoneyFlow,cutoffMoneyFlowHTML,cutoffUnknownSource,gcashCutoffHTML,splitEdits,applyLocalExpense,backlogPayable,
+      cutoffGuide,cutoffGuideHTML};
   `)();
 }
 const per={start:'2026-09-16',end:'2026-09-30'}, key=per.start+'_'+per.end;
@@ -67,6 +68,60 @@ function reconciledFixture(){
   x.save=()=>{x.c.basis=x.a.cutoffCheckBasis(per,x.f);x.a.applyLocalCutoffCheck({...per,entryId:'period',check:x.c});};
   x.save();return x;
 }
+test('allocation guide shows where to put September money without marking anything paid',()=>{
+  const {a,f}=fixture();
+  delete a.state.cutoffInputs[key].reconciliation_json;
+  a.state.cutoffInputs[key].tin_counted=1;
+  [168,2514,135,1286].forEach((amount,i)=>a.applyLocalExpense({entryId:'guide-debt-'+i,date:per.end,
+    category:'Backlog',backlogRef:'Debt '+i,amount,paidFrom:'cutoff'}));
+  const before=JSON.stringify(a.state),g=a.cutoffGuide(per,f),h=a.cutoffGuideHTML(per,f);
+  assert.deepEqual(g.issues,[]);
+  for(const [field,value] of Object.entries({receipts:28505,daily:10472,afterDaily:18033,available:17933,
+    reserved:100,setAside:13830,beforeBacklogs:4103,backlogUsed:4103,remaining:0})) assert.equal(g[field],value,field);
+  assert.deepEqual(g.allocations.map(l=>[l.key,l.amount]),[['mama',500],['electric',500],['split',6000],['major',6830]]);
+  assert.match(h,/Left to assign<\/span><span class="money-value">₱0/);
+  assert.doesNotMatch(h,/Needs checking|Still to deduct|<input|<select|Cash matches|Cash left in the tin/);
+  assert.equal(JSON.stringify(a.state),before,'viewing the guide never writes a payment or status');
+});
+test('payment statuses, cash counts and payment sources cannot change allocation amounts',()=>{
+  const {a,f,c,save}=reconciledFixture();
+  const baseline=a.cutoffGuide(per,f);
+  for(const status of ['paid','pending','partial','unknown']){
+    for(const k in c.statuses){c.statuses[k]=status;c.tin[k]=123;}
+    c.opening=999;c.paper=1;save();
+    a.state.expenses.other.paid_from='';
+    a.state.cutoffInputs[key].tin_counted=1;
+    a.checkEdits[key]=c;a.tinEdits[key]='2';
+    a.queue.push({action:'saveCutoffCheck',payload:{...per,check:c}});
+    assert.deepEqual(a.cutoffGuide(per,f),baseline,status);
+  }
+});
+test('the guide counts business backlog payments once and keeps personal funding separate',()=>{
+  for(const source of ['cutoff','tin','gcash','','own']){
+    const {a,f}=fixture();
+    a.applyLocalExpense({entryId:'guide-debt',date:per.end,category:'Backlog',backlogRef:'Debt',amount:4103,paidFrom:source});
+    const g=a.cutoffGuide(per,f);
+    assert.equal(g.remaining,source==='own'?4103:0,source);
+    assert.equal(g.setAside,13830);
+    assert.equal(a.backlogPayable(f,5000,g.remaining),source==='own'?4103:'');
+  }
+});
+test('the guide still flags incomplete financial records and preserves a shortfall',()=>{
+  for(const mode of ['stock','expense','rejected','split']){
+    const {a,f}=fixture();
+    if(mode==='stock')f.suppliesUsedUnpriced=['Flour'];
+    if(mode==='expense')a.queue.push({action:'saveExpense',payload:{date:per.end}});
+    if(mode==='rejected')a.attention.push({action:'saveDay',payload:{date:per.end}});
+    if(mode==='split')a.splitEdits[key]='1000';
+    assert.equal(a.cutoffGuide(per,f).remaining,null,mode);
+    assert.match(a.cutoffGuideHTML(per,f),/Incomplete/,mode);
+  }
+  const {a,f}=fixture();f.split=20000;
+  assert.equal(a.cutoffGuide(per,f).remaining,-9897);
+  assert.match(a.cutoffGuideHTML(per,f),/Shortfall in this plan/);
+  a.queue.push({action:'saveExpense',payload:{date:'2026-10-01'}});
+  assert.equal(a.cutoffGuide(per,f).remaining,-9897,'another cutoff does not block this guide');
+});
 test('running balance combines cash and GCash once, then reserves nori and unpaid allocations',()=>{
   const {a,f}=reconciledFixture(),flow=a.cutoffMoneyFlow(per,f);
   assert.deepEqual(flow.issues,[]);

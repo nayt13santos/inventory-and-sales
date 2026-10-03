@@ -664,7 +664,7 @@ body:has(#panel-gastos:not([hidden]) .expense-actions) #toast{ bottom:calc(166px
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.30.1';
+const APP_VERSION = '2.30.2';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -7335,6 +7335,73 @@ function cutoffSourceIssues(per, f, c, r){
   if (pendingSplit(per)) sourceIssues.push('The new split is not saved yet.');
   return sourceIssues;
 }
+/** A distribution plan, not a live-wallet or payment-status reconciliation.
+ *  Daily costs and each allocation count once, using the partner note's values.
+ *  Old checklists, wallet sources and cash counts cannot change the plan. */
+function cutoffGuide(per, f){
+  const daily = r2(noteMinorVal(f) + num(f.salary));
+  const allocations = [
+    {key:'mama',label:'Mama',amount:num(f.mama)},
+    {key:'electric',label:'Electricity',amount:num(f.electric)},
+    {key:'split',label:'Split',amount:num(f.split)},
+    {key:'major',label:'Major supplies',amount:noteUsedFig(f)}
+  ];
+  const setAside = r2(allocations.reduce((sum,l)=>sum+l.amount,0));
+  const beforeBacklogs = r2(num(f.total)-daily-setAside);
+  const backlog = cutoffBacklogPayments(per);
+  const backlogUsed = r2(backlog.total-backlog.own);
+  const issues = [];
+  if (previewIncomplete(per)) issues.push('Sync to load all the records for this cutoff.');
+  if (missingDaysInPeriod(per).filter(d=>d<todayStr()).length) issues.push('Some days have no entry yet.');
+  if (asArr(f.suppliesUsedUnpriced).length || asArr(f.suppliesUsedRows).some(r=>r.cost===null))
+    issues.push('Add the missing stock costs to complete the major supplies amount.');
+  if (cutoffMissingDays(per).length || cutoffMissingMoney(per).length)
+    issues.push('Some records need attention before these totals can be final.');
+  const affectsPlan = q => {
+    const p=asObj(q.payload);
+    if (q.action==='saveCutoffSplit') return p.start===per.start && p.end===per.end;
+    if (q.action==='deleteExpense') return inPeriod(asObj(asObj(state.expenses)[p.entryId]).date,per) || !asObj(state.expenses)[p.entryId];
+    return ['saveDay','saveExpense'].includes(q.action) && inPeriod(p.date,per);
+  };
+  if (asArr(queue).some(affectsPlan)) issues.push('Some amounts are still waiting to sync.');
+  if (asArr(attention).some(affectsPlan)) issues.push('An entry needs attention under More.');
+  if (pendingSplit(per)) issues.push('Save the split to confirm this plan.');
+  return {receipts:r2(num(f.total)+num(f.excluded)),daily,
+    afterDaily:r2(num(f.total)+num(f.excluded)-daily),available:r2(num(f.total)-daily),
+    reserved:num(f.excluded),allocations,setAside,beforeBacklogs,backlogUsed,backlogOwn:backlog.own,
+    remaining:issues.length ? null : r2(beforeBacklogs-backlogUsed),issues};
+}
+function cutoffGuideHTML(per, f){
+  const g=cutoffGuide(per,f);
+  const row=(label,value,kind,hint)=>'<div class="money-row'+(kind?' '+kind:'')+'"><span>'+esc(label)+
+    (hint?'<small>'+esc(hint)+'</small>':'')+'</span><span class="money-value'+(value===null?' unknown':'')+'">'+
+    (value===null?'Incomplete':value)+'</span></div>';
+  const deduct=v=>(v<0?'+':'−')+peso(Math.abs(v));
+  const kept=asArr(f.excludedLines).map(l=>txt(l.label)).filter(Boolean).join(', ') || 'Excluded sales';
+  let h='<div class="money-flow"><h2>Where the money goes</h2>'+
+    '<p class="hint">Your guide for dividing the cash + GCash. No need to mark these amounts as paid.</p>'+
+    row('Total received',peso(g.receipts),'total')+
+    row('Cash received',peso(num(f.cash)+g.reserved))+row('GCash received',peso(f.gcash))+
+    '<h3>Daily expenses recorded</h3>'+
+    row('Supplies (minor)',deduct(noteMinorVal(f)))+row('Salary',deduct(num(f.salary)))+
+    row('Total daily expenses',deduct(g.daily),'subtotal')+
+    row('After daily expenses',peso(g.afterDaily),'subtotal');
+  if(g.reserved) h+=row(kept+' kept separate',deduct(g.reserved));
+  h+=row('Amount to divide',peso(g.available),'subtotal total')+'<h3>Set aside for</h3>';
+  for(const l of g.allocations) h+=row(l.label,
+    l.key==='major' && (asArr(f.suppliesUsedUnpriced).length || asArr(f.suppliesUsedRows).some(r=>r.cost===null)) ? null : peso(l.amount),'',
+    l.key==='split' ? peso(num(f.perPartner))+' each' : l.key==='major' ? 'Based on stock opened this cutoff' : '');
+  h+=row('Total to set aside',g.issues.some(s=>s.includes('stock costs'))?null:peso(g.setAside),'subtotal')+
+    row('Left after setting aside',g.remaining===null?null:peso(g.beforeBacklogs),'subtotal');
+  if(g.backlogUsed) h+=row('Backlog payments recorded',deduct(g.backlogUsed));
+  if(g.backlogOwn) h+='<p class="hint">'+esc(peso(g.backlogOwn))+' in backlog payments came from personal money.</p>';
+  h+=row(g.remaining!==null && g.remaining<0?'Shortfall in this plan':'Left to assign',
+    g.remaining===null?null:peso(Math.abs(g.remaining)),'final'+(g.remaining!==null&&g.remaining<0?' negative':''));
+  if(g.issues.length) h+='<ul class="check-issues">'+g.issues.map(s=>'<li>'+esc(s)+'</li>').join('')+'</ul>';
+  return h+'</div>';
+}
+
+// Kept for compatibility with the saved reconciliation records and their tests.
 function cutoffMoneyFlowHTML(per, f){
   const c = cutoffCheckDraft(per), flow = cutoffMoneyFlow(per,f,c);
   const issues = Array.from(new Set(flow.issues.concat(cutoffSourceIssues(per,f,c,flow.cash))));
@@ -7433,7 +7500,7 @@ function updateCutoffCheckPreview(){
   if (!cutoffPer) return;
   const f = liveCutoff(cutoffPer);
   const cash = $('coCashCheck'), groups = $('coPaymentGroups'), money = $('coMoneyFlow');
-  if (money) money.innerHTML = cutoffMoneyFlowHTML(cutoffPer,f);
+  if (money) money.innerHTML = cutoffGuideHTML(cutoffPer,f);
   if (cash) cash.innerHTML = cutoffCashHTML(cutoffPer,f);
   if (groups) groups.innerHTML = cutoffPaymentHTML(cutoffPer,f);
 }
@@ -7569,39 +7636,17 @@ function renderCutoff(){
   const typed = Object.prototype.hasOwnProperty.call(splitEdits, key) ? splitEdits[key] : null;
   const splitVal = typed == null ? f.split : typed;
   const live = liveCutoff(per);
-  /* THREE BOXES (v2.27.0). Owner, 2026-10-03: "too many boxes" — the screen
-     had grown to nine stacked cards. It is now the cash box, the note box and
-     the backlog box, with the detail that used to be cards folded inside them.
-     Every id the live updaters write to (coCashCheck, coPaymentGroups, coSplit,
-     coResidual*, coEach, coSplitHint, noteBlock, tinCountIn) is unchanged, and
-     the two regions replaced on every keystroke — the cash arithmetic and the
-     status groups — are INNER divs, so the inputs beside them keep focus. */
-
-  // The running balance owns the first view. Verification and payment edits
-  // stay in folds below it; every live region contains figures, never inputs.
-  const t = tinCountFor(per,f);
-  const countedDraft = Object.prototype.hasOwnProperty.call(tinEdits,key) ? tinEdits[key] : (t.counted === null ? '' : String(t.counted));
-  h += '<div class="card">' +
-    '<div id="coMoneyFlow">' + cutoffMoneyFlowHTML(per,live) + '</div>' +
-    '<details class="check-detail"><summary>Check cash and paper</summary>' +
-    '<div id="coCashCheck">' + cutoffCashHTML(per,live) + '</div>' +
-    '<div class="field" style="margin-top:12px;"><label for="tinCountIn">Cash counted in the tin (₱)</label>' +
-      '<input class="input money" id="tinCountIn" inputmode="decimal" autocomplete="off" placeholder="Not counted" value="' + esc(countedDraft) + '">' +
-      '<p class="err" id="err-tin" hidden></p></div>' +
-    '<button type="button" class="btn block" data-act="tin-save">Save the cash count</button>' +
-    '</details>' +
-    '<details class="check-detail"><summary>Change what was paid</summary>' +
-      '<div id="coPaymentGroups">' + cutoffPaymentHTML(per,live) + '</div>' +
-      cutoffCheckFormHTML(per) +
-    '</details>' +
-  '</div>';
+  // The owner handles cash/GCash distribution outside the app. Show the plan
+  // without a payment checklist or cash-count gate; old saved records remain.
+  h += '<div class="card"><div id="coMoneyFlow">' + cutoffGuideHTML(per,live) + '</div></div>';
 
   // BOX 2 — THE NOTE. What the partner gets: the sales, the split, what is
   // left after the allocations, and the note itself.
   h += '<details class="card cutoff-note"' + (lastNote && lastNote.key === key ? ' open' : '') + '><summary>Split and cutoff note</summary>' +
     '<div class="co-row big"><span>Total sales</span><span class="v">' + peso(f.total) + '</span></div>' +
     '<div class="co-sub">' + f.daysWithSales + ' days with sales · ' + f.openDays + ' days open</div>' +
-    '<div class="co-row"><span>Cash</span><span class="v">' + peso(f.cash) + '</span></div>' + gcashCutoffHTML(f,per) +
+    '<div class="co-row"><span>Cash received</span><span class="v">' + peso(f.cash) + '</span></div>' +
+    '<div class="co-row gcash"><span>GCash received</span><span class="v">' + peso(f.gcash) + '</span></div>' +
     '<div class="r-sep" role="presentation"></div>' +
     '<div class="field" style="margin-bottom:0;">' +
       '<label for="coSplitIn">Split for this cutoff (₱)</label>' +
@@ -7620,7 +7665,7 @@ function renderCutoff(){
       '<span id="coResidualLabel">' + (live.remaining < 0 ? 'Short after allocations' : 'Remaining after allocations') + '</span>' +
       '<span class="v" id="coResidual">' + peso(Math.abs(live.remaining)) + '</span></div>' +
     '<div class="co-sub" id="coResidualNote">' + esc(residualNote(live.remaining)) + '</div>' +
-    (num(f.backlogPaid) > 0 ? '<p class="hint">' + esc(peso(f.backlogPaid)) + ' in backlog payments is separate from the allocations; do not deduct it twice in the cash checklist.</p>' : '');
+    (num(f.backlogPaid) > 0 ? '<p class="hint">Backlog payments are shown separately in the guide above.</p>' : '');
 
   // Stock quantities explain the Supplies (major) line; folded, inside the box.
   h += '<details class="check-detail"><summary>How Supplies (major) was valued</summary>';
@@ -7713,14 +7758,14 @@ function renderCutoff(){
     // balance. Written into payBl.amount so Save reads the same figure the field
     // shows, and only while she has not typed: her figure always wins.
     const chosen = payBl.ref ? activeBl.find(b => b.name === payBl.ref) : null;
-    const money = cutoffMoneyFlow(per,live);
+    const money = cutoffGuide(per,live);
     const payable = backlogPayable(live, chosen ? backlogBalance(chosen) : '', money.remaining);
     if (!payBl.touched) payBl.amount = payable === '' ? '' : String(payable);
     h += '<p class="hint" style="margin-bottom:12px;">' +
-      (money.remaining === null ? 'Check the money balance above before choosing an amount.' :
-        money.remaining < 0 ? 'The cutoff is short ' + esc(peso(-money.remaining)) + ' after planned deductions.' :
-        esc(peso(money.remaining)) + ' remains after the planned deductions and recorded payments.') +
-      ' Backlog payments reduce the money left above once. They do not reduce the current supplies allocation or appear in the partner note.</p>' +
+      (money.remaining === null ? 'Complete the records above before choosing an amount.' :
+        money.remaining < 0 ? 'The plan is short ' + esc(peso(-money.remaining)) + '.' :
+        esc(peso(money.remaining)) + ' is left to assign after setting aside the listed amounts.') +
+      ' Record a backlog payment here to update its remaining debt.</p>' +
       '<div class="field"><label for="payBlRef">Which backlog?</label><select class="input" id="payBlRef">' +
         '<option value=""' + (payBl.ref === '' ? ' selected' : '') + '>Choose…</option>' +
         activeBl.map(b => '<option value="' + esc(b.name) + '"' + (payBl.ref === b.name ? ' selected' : '') + '>' +
