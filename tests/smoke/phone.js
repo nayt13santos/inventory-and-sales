@@ -354,6 +354,15 @@ function auditInPage(args){
     if (!(r.width > 0 && r.height > 0) || cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity) === 0) why.push('not visible');
     if (why.length) problems.push('tab "' + name + '": ' + why.join('; '));
   }
+  if (key === 'gastos'){
+    for (const b of document.querySelectorAll('.expense-actions button')){
+      const r=b.getBoundingClientRect(), nav=document.querySelector('.tabbar').getBoundingClientRect();
+      if (r.top < 0 || r.bottom > nav.top || r.left < 0 || r.right > W)
+        problems.push('Expense action is not fully visible above the tabs: '+b.textContent);
+      const hit=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+      if (hit !== b && !b.contains(hit)) problems.push('Expense action is covered: '+b.textContent);
+    }
+  }
 
   // d. The panel for this tab is showing and has something in it.
   const panel = document.getElementById('panel-' + key);
@@ -432,6 +441,57 @@ async function runViewport(browser, baseUrl, vp){
       await step(tab.label + ' (previous cutoff)', tab.key, () => page.click('[data-act="' + tab.prev + '"]'));
     }
   }
+  await step('Expenses (compact picker, 14 types)', 'gastos', async () => {
+    await page.evaluate(() => {
+      state.settings.supply_picklist='Veggies,Eggs,Flour,Box,Oil,Sauce,Mayo,Bonito,Aonori,Togarashi,Gas,Cleaning';
+      gx.open=true;showTab('gastos');
+    });
+    const picker=await page.evaluate(() => ({count:document.getElementById('gxPick').options.length,
+      height:document.getElementById('gxPick').getBoundingClientRect().height,
+      chipCount:document.querySelectorAll('[data-act="gastos-pick"]').length}));
+    if(picker.count!==15 || picker.height>60 || picker.chipCount) throw new Error('Picker filled the screen: '+JSON.stringify(picker));
+    if (process.env.OCTOGO_SCREENSHOT_DIR){
+      fs.mkdirSync(process.env.OCTOGO_SCREENSHOT_DIR,{recursive:true});
+      await page.screenshot({path:path.join(process.env.OCTOGO_SCREENSHOT_DIR,'expenses-'+size+'.png')});
+    }
+  });
+  await step('Expenses (save and add next)', 'gastos', async () => {
+    await page.select('#gxPick','Eggs');
+    const focus=await page.evaluate(() => document.activeElement.id);
+    if(focus!=='gxAmount')throw new Error('Category choice did not move to amount.');
+    await page.keyboard.type('123.45');
+    await page.click('[data-act="gastos-paid"][data-paid="gcash"]');
+    const before=await page.evaluate(() => Object.keys(state.expenses).length);
+    await page.click('[data-act="gastos-submit"]');
+    const saved=await page.evaluate(() => ({rows:Object.values(state.expenses),pick:gx.pick,amount:gx.amount,
+      date:gx.date,source:gx.paidFrom,focus:document.activeElement.id,period:gastosPer}));
+    const added=saved.rows.find(e=>e.item==='Eggs'&&e.amount===123.45&&e.paid_from==='gcash');
+    if(saved.rows.length!==before+1 || !added || added.category!=='Supplies' || added.date!==saved.period.end)
+      throw new Error('Expense did not retain category, amount, source and historical cutoff date.');
+    if(saved.pick!=='' || saved.amount!=='' || saved.focus!=='gxPick' || saved.source!=='gcash')
+      throw new Error('Next expense was not ready with date/source retained.');
+    await page.click('[data-act="gastos-submit"]');
+    if(await page.evaluate(() => Object.keys(state.expenses).length)!==before+1) throw new Error('Second tap duplicated the expense.');
+  });
+  await step('Expenses (add from bottom of history)', 'gastos', async () => {
+    await page.click('[data-act="gastos-cancel"]');
+    await page.evaluate(() => window.scrollTo(0,document.body.scrollHeight));
+    // Measure before clicking: Puppeteer must not rescue an off-screen button.
+    const audit=await page.evaluate(auditInPage,{key:'gastos',width:vp.w,height:vp.h});
+    if(audit.problems.length)throw new Error(audit.problems.join('; '));
+    await page.click('[data-act="gastos-open"]');
+    const top=await page.evaluate(() => document.getElementById('gxForm').getBoundingClientRect().top);
+    if(top<0||top>200)throw new Error('Opening an expense did not bring the form into view.');
+  });
+  await step('Expenses (bulk uses same compact picker)', 'gastos', async () => {
+    await page.$eval('[data-act="bulk-open"]',e=>e.scrollIntoView({block:'center'}));
+    await page.click('[data-act="bulk-open"]');
+    await page.select('#bulkPick','Oil');
+    const result=await page.evaluate(() => ({picked:gxBulk.pick,options:document.getElementById('bulkPick').options.length,
+      singleActions:document.querySelectorAll('.expense-actions').length}));
+    if(result.picked!=='Oil'||result.options!==15||result.singleActions)throw new Error('Bulk selection did not use the compact picker cleanly.');
+    await page.click('[data-act="bulk-cancel"]');
+  });
   // Exercise the new checklist with the REAL input/change/click listeners.
   // Updating the preview must not replace the field being typed into.
   await step('Cutoff (checklist open)', 'cutoff', async () => {
@@ -503,7 +563,7 @@ async function main(){
     server.close();
   }
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
-  const checks = VIEWPORTS.length * (TABS.reduce((n, t) => n + 1 + (t.prev ? 1 : 0), 0) + 2);
+  const checks = VIEWPORTS.length * (TABS.reduce((n, t) => n + 1 + (t.prev ? 1 : 0), 0) + 6);
   if (ok) console.log('\nPASS — ' + checks + ' screens fit the phone, no errors (' + secs + 's)');
   else console.log('\nFAIL — see the FAIL lines above (' + secs + 's)');
   process.exitCode = ok ? 0 : 1;

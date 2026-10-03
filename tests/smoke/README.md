@@ -33,6 +33,12 @@ that state and would have passed.
 Exit code is non-zero if anything fails; otherwise one `PASS` line per screen
 per viewport.
 
+The 24 screen checks also exercise the cutoff checklist and daily expense flow.
+With 14 expense types, the picker remains one field. The real controls save one
+historically dated GCash expense, retain date/source for the next entry, and
+reject a second blank tap. Add expense is reachable from the bottom of history;
+its fixed actions are measured for visibility and checked for obstruction.
+
 ## Run it locally
 
 ```sh

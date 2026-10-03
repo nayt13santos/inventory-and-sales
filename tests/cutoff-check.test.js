@@ -32,7 +32,8 @@ function app() {
     return {state,queue,attention,config,tinEdits,checkEdits,checkMoney,cutoffCashCheck,cutoffCheckBasis,
       cutoffCheckSaved,cutoffCashHTML,cutoffPaymentHTML,cutoffCheckFormHTML,
       applyLocalCutoffCheck,applyLocalTinCount,applyLocalCutoffSplit,normCutoffInput,splitFor,cashLinesHTML,mirrorRecordedSplit,
-      sanitizeState,sanitizeQueue,reapplyQueue,computeCutoff,buildNote};
+      sanitizeState,sanitizeQueue,reapplyQueue,computeCutoff,buildNote,
+      cutoffMoneyFlow,cutoffMoneyFlowHTML,cutoffUnknownSource,gcashCutoffHTML,splitEdits};
   `)();
 }
 const per={start:'2026-09-16',end:'2026-09-30'}, key=per.start+'_'+per.end;
@@ -59,6 +60,93 @@ function fixture() {
 }
 let passed=0;
 function test(name,fn){fn();passed++;console.log('  PASS  '+name);}
+function reconciledFixture(){
+  const x=fixture();
+  x.a.state.expenses.mama.paid_from='';x.a.state.expenses.electric.paid_from='';
+  x.f.tinOut=7276;x.f.tinUnknown=1000;
+  x.save=()=>{x.c.basis=x.a.cutoffCheckBasis(per,x.f);x.a.applyLocalCutoffCheck({...per,entryId:'period',check:x.c});};
+  x.save();return x;
+}
+test('running balance combines cash and GCash once, then reserves nori and unpaid allocations',()=>{
+  const {a,f}=reconciledFixture(),flow=a.cutoffMoneyFlow(per,f);
+  assert.deepEqual(flow.issues,[]);
+  for(const [field,value] of Object.entries({receipts:28505,totalPaid:10472,cashLeft:14626,gcashLeft:3407,
+    left:18033,reserved:100,available:17933,due:13830,remaining:4103})) assert.equal(flow[field],value,field);
+  assert.deepEqual(flow.paidLines.map(l=>[l.key,l.amount]),[['minor',7672],['salary',2800]]);
+  assert.deepEqual(flow.dueLines.map(l=>[l.key,l.amount]),[['mama',500],['electric',500],['split',6000],['major',6830]]);
+  const h=a.cutoffMoneyFlowHTML(per,f);
+  let at=-1;
+  for(const label of ['Total received','Already left the money','Money left now','Still to deduct','Remaining after deductions']){
+    const next=h.indexOf(label);assert(next>at,label);at=next;
+  }
+  assert.match(h,/₱4,103/);assert.match(h,/Cash matches your saved count/);assert.doesNotMatch(h,/<input|<select|Needs checking/);
+  assert.equal(a.cutoffUnknownSource(per),0,'confirmed unpaid rows are not missing payments');
+  assert.doesNotMatch(a.cutoffCashHTML(per,f),/no payment source/);
+  assert.doesNotMatch(a.gcashCutoffHTML(f,per),/no source recorded/);
+});
+test('partly or fully paying the split moves money between the two sections without double deduction',()=>{
+  for(const paid of [1000,6000]){
+    const {a,f,c,save}=reconciledFixture();c.statuses.split=paid===6000?'paid':'partial';c.tin.split=paid;
+    a.state.cutoffInputs[key].tin_counted=14626-paid;save();
+    const flow=a.cutoffMoneyFlow(per,f);
+    assert.deepEqual(flow.issues,[]);assert.equal(flow.remaining,4103);
+    assert.equal(flow.dueLines.find(l=>l.key==='split')?.amount||0,6000-paid);
+  }
+});
+test('a GCash payment is deducted once; personal payments do not leave the business money',()=>{
+  for(const source of ['gcash','own']){
+    const {a,f,c,save}=reconciledFixture();a.state.expenses.mama.paid_from=source;c.statuses.mama='paid';c.tin.mama=0;save();
+    const flow=a.cutoffMoneyFlow(per,f);
+    assert.deepEqual(flow.issues,[]);assert.equal(flow.due,13330);
+    assert.equal(flow.gcashLeft,source==='gcash'?2907:3407);
+    assert.equal(flow.remaining,source==='gcash'?4103:4603);
+    if(source==='own')assert.match(a.cutoffMoneyFlowHTML(per,f),/no reimbursement is assumed/);
+  }
+});
+test('unconfirmed or conflicting money never claims a usable final balance',()=>{
+  for(const mode of ['unknown-source','pending-tin','pending-gcash','unknown-status','partial-blank','partial-over',
+    'unpriced','count-gap','opening-blank','stale','partial-supplier']){
+    const {a,f,c,save}=reconciledFixture();
+    if(mode==='unknown-source')a.state.expenses.other.paid_from='';
+    if(mode==='pending-tin')a.state.expenses.mama.paid_from='tin';
+    if(mode==='pending-gcash')a.state.expenses.mama.paid_from='gcash';
+    if(mode==='unknown-status')c.statuses.salary='unknown';
+    if(mode==='partial-blank'){c.statuses.split='partial';c.tin.split='';}
+    if(mode==='partial-over'){c.statuses.split='partial';c.tin.split=6001;}
+    if(mode==='unpriced')f.suppliesUsedUnpriced=['flour'];
+    if(mode==='count-gap')a.state.cutoffInputs[key].tin_counted=10006;
+    if(mode==='opening-blank')c.opening='';
+    if(mode==='partial-supplier'){
+      c.statuses.major='partial';c.tin.major=100;
+      a.state.expenses.backlog={entry_id:'backlog',date:per.end,category:'Backlog',amount:100,paid_from:'tin'};
+      a.state.cutoffInputs[key].tin_counted=14526;
+    }
+    save();if(mode==='stale')f.salary+=200;
+    assert.equal(a.cutoffMoneyFlow(per,f).remaining,null,mode);
+    assert.match(a.cutoffMoneyFlowHTML(per,f),/Needs checking/,mode);
+  }
+});
+test('unsaved, rejected, or unsynced changes keep the final amount provisional',()=>{
+  for(const mode of ['check','count','split','queue','rejected','paper']){
+    const {a,f,c,save}=reconciledFixture();
+    if(mode==='check')a.checkEdits[key]=c;
+    if(mode==='count')a.tinEdits[key]='14626';
+    if(mode==='split')a.splitEdits[key]='5000';
+    if(mode==='queue')a.queue.push({action:'saveExpense',payload:{date:per.end}});
+    if(mode==='rejected')a.attention.push({action:'saveTinCount',payload:{...per}});
+    if(mode==='paper'){c.paper=20000;save();}
+    assert.match(a.cutoffMoneyFlowHTML(per,f),/Remaining after deductions<\/span><span class="money-value unknown">Needs checking/,mode);
+  }
+});
+test('opening cash stays available, a missing count is estimated, and a negative balance is a shortfall',()=>{
+  const {a,f,c,save}=reconciledFixture();c.opening=200;a.state.cutoffInputs[key].tin_counted=14826;save();
+  assert.equal(a.cutoffMoneyFlow(per,f).remaining,4303);
+  assert.match(a.cutoffMoneyFlowHTML(per,f),/Starting total/);
+  a.state.cutoffInputs[key].tin_counted='';
+  assert.match(a.cutoffMoneyFlowHTML(per,f),/Count the cash below/);
+  f.split=20000;save();assert.equal(a.cutoffMoneyFlow(per,f).remaining,-9697);
+  assert.match(a.cutoffMoneyFlowHTML(per,f),/Shortfall after deductions/);
+});
 test('Sept paper and cash reconcile without re-deducting paid wages/minor or pending items',()=>{
   const {a,f,c}=fixture(),r=a.cutoffCashCheck(per,f,c);
   assert.equal(r.expected,14626); assert.equal(r.paid,10076);

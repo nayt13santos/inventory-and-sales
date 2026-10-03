@@ -5457,7 +5457,7 @@ test('SOURCE PIN: the Expenses screen steps, and every rule follows the shown cu
     'a cutoff that has not begun is not offered a form it would be refused from');
 
   // THE HANDLERS move the period AND the date the form will use, together.
-  const acts = src.slice(src.indexOf("act === 'gastos-open'"), src.indexOf("act === 'gastos-pick'"));
+  const acts = src.slice(src.indexOf("act === 'gastos-open'"), src.indexOf("act === 'gastos-paid'"));
   for (const a of ['gastos-open', 'gastos-prev', 'gastos-next']){
     assert.ok(acts.indexOf(a) >= 0, a + ' is wired');
   }
@@ -5635,7 +5635,7 @@ test('SOURCE PIN: backlog payments remain outside allocations but visible in the
   assert.match(card, /num\(f\.backlogPaid\) > 0/);
   assert.match(card, /esc\(peso\(f\.backlogPaid\)\)/);
   assert.match(card, /backlog payments is separate from the allocations/);
-  assert.match(HTML, /gcashCutoffHTML\(f\)/);
+  assert.match(HTML, /gcashCutoffHTML\(f,per\)/);
 });
 
 test('OPENED-EQUALS-SHELF: a card filled in as a stock count is challenged (v2.23.0)', () => {
@@ -8157,7 +8157,7 @@ test('GCASH EXPENSES: the cutoff screen shows the same breakdown, with scope and
     'but a figure that moved for any reason is still shown');
   const src = fs.readFileSync(INDEX_HTML, 'utf8');
   const render = src.slice(src.indexOf('function renderCutoff(){'), src.indexOf('function stockCutoffHTML(per){'));
-  assert.match(render, /gcashCutoffHTML\(f\)/, 'the tested breakdown is actually rendered');
+  assert.match(render, /gcashCutoffHTML\(f,per\)/, 'the tested breakdown is actually rendered');
 });
 
 test('GCASH EXPENSES: unsynced expense edits and deletion update the preview and invalidate old notes', () => {
@@ -8207,8 +8207,10 @@ test('SOURCE PIN: the Cutoff screen is three boxes, and the live regions never s
 
 test('SOURCE PIN: cash check names unknown money and keeps counted cash separate', () => {
   const card = slab('function cutoffCashHTML(per, f){', 'function cutoffCheckFormHTML(per){');
-  assert.match(card, /num\(f\.tinUnknown\) > 0/);
-  assert.match(card, /of logged expenses has no payment source/);
+  const source = slab('function cutoffSourceIssues(per, f, c, r){', 'function cutoffMoneyFlowHTML(per, f){');
+  assert.match(source, /cutoffUnknownSource\(per,c\)/);
+  assert.match(source, /of logged expenses has no payment source/);
+  assert.match(card, /cutoffSourceIssues\(per,f,c,r\)/);
   assert.match(card, /Provisional cash balance/);
   assert.match(card, /Still unaccounted/);
   // v2.26.1: the arithmetic is printed line by line, in the open.
@@ -8902,12 +8904,20 @@ test('the expense buckets cross the seam, and each tap files exactly one way (v2
     'Flour, Eggs');
   assert.ok(!has(app.maintSettingsPayload({ supply_picklist: '  ' }), 'supply_picklist'));
 
-  // The expense form is render code, so the mapping is pinned at source.
+  // The compact picker keeps the same vocabulary and escaping as the old chips.
+  const pickSource = slab('function expensePickHTML(id, picked){', 'function renderGastos(){');
+  const pick = new Function('supplyPicklist','esc',pickSource+';return expensePickHTML;')(
+    () => ['Octopus','Flour','Eggs','Oil & \"spices\"','Other'],
+    s => String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'));
+  const picker = pick('gxPick','Eggs');
+  assert.match(picker, /<select class="input" id="gxPick">/);
+  assert.equal((picker.match(/value="Octopus"/g)||[]).length,1);
+  assert.equal((picker.match(/value="Other"/g)||[]).length,1);
+  assert.match(picker, /value="Eggs" selected/);
+  assert.match(picker, /Oil &amp; &quot;spices&quot;/);
   const gastos = slab('function renderGastos(){', 'function submitGasto(){');
-  assert.ok(/\['Octopus', \.\.\.plist, 'Other'\]/.test(gastos),
-    'the row is Octopus, the picklist, Other — in that order, always');
-  assert.ok(/supplyPicklist\(\)\.filter\(n => n !== 'Octopus' && n !== 'Other'\)/.test(gastos),
-    'a picklist name colliding with a bucket is not offered — one tap, one meaning');
+  assert.match(gastos, /expensePickHTML\('gxPick',gx.pick\)/);
+  assert.match(gastos, /expensePickHTML\('bulkPick',gxBulk.pick\)/);
   assert.ok(!/Something else/.test(gastos), 'the free-text path is gone from this form');
   assert.ok(!/gastos-cat/.test(gastos), 'and so are the category chips');
   const submit = slab('function submitGasto(){', 'function deleteGasto(id){');

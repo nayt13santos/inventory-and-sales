@@ -10,6 +10,16 @@ Locale: Philippines. Timezone **Asia/Manila** everywhere. Currency PHP. Dates ar
 
 ## Business rules (verified against owner's real cutoff notes)
 
+### v2.30.0 — running money balance and compact expense entry
+
+Owner, 2026-10-04: show the cutoff's total, expenses already paid, money left, unpaid deductions including the split, and the final remaining amount. Make daily expense entry easy without scrolling through ten or more types.
+
+- The first Cutoff card now follows that running balance. Total received includes cash and GCash, plus kept-out sales; confirmed opening cash is separate. Cash payments come from the existing reconciliation checklist, and GCash payments come from Expenses. Each payment leaves the total once. The cutoff's remaining GCash is part of the available money before unpaid deductions, not an additional receipt. Its balance includes recorded transfers and is not the whole wallet balance; availability in the wallet still needs checking.
+- Kept-out money (currently nori) is visibly reserved before the partner's unpaid allocations. Paid allocations have no second deduction; partly paid ones show only the unpaid portion. Personal-money payments do not reduce business funds or invent a reimbursement. Stock opened is a reserve to check against the supplier bill. A partly paid supplier balance cannot be inferred from backlog payments for other periods, so it needs checking.
+- Unknown payment statuses, conflicting records, unpriced stock, changed source figures, mismatched cash/paper, unsaved edits and pending sync prevent a definitive final balance. An explicitly pending allocation with a blank payment source is unpaid, not an unidentified payment; other blank sources still need checking. Verification and payment edits are folded under the balance; the split and partner note are in their own fold. The partner note and backend allocation mathematics are unchanged.
+- Expenses opens directly to the daily form. One native picker replaces the expanding type-button grid in both single and bulk entry, preserving the existing category/item mapping and Maintenance vocabulary. Choosing a type focuses the amount. Date and payment source carry over after saving; type and amount clear to prevent a second tap duplicating an entry. Add/Close remain above the bottom tabs, and reopening from history brings the form into view. The three payment sources fit one row; explanatory tips are folded. Bulk entry has its own view.
+- This is a PWA-only release: app and service-worker cache are 2.30.0; the API and photo reader remain 2.29.0, with no schema or payload changes.
+
 ### v2.29.0 — boxes sold, by payment
 
 Owner, 2026-10-03: *"also for the entry lets not count box anymore, lets just input the number of boxes sold, just like the nori, and merge the tile of cash and gcash sold, for example: box 4 howmany were sold / cash - / gcash -"*.
