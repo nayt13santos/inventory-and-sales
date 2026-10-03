@@ -664,7 +664,7 @@ body:has(#panel-gastos:not([hidden]) .expense-actions) #toast{ bottom:calc(166px
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.30.0';
+const APP_VERSION = '2.30.1';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -2149,13 +2149,14 @@ function computeCutoff(per){
   }
   usedList.sort((a, b) => (b.cost || 0) - (a.cost || 0) || b.qty - a.qty);
 
-  let tinOut = 0, gcashOut = 0, unknownOut = 0;
+  let tinOut = 0, gcashOut = 0, unknownOut = 0, backlogShared = 0;
   for (const id in exps){
     const e = asObj(exps[id]);
     if (!inPeriod(e.date, per)) continue;
     const from = txt(e.paid_from);
     if (from === 'tin') tinOut += num(e.amount);
     else if (from === 'gcash') gcashOut += num(e.amount);
+    else if (from === 'cutoff' && normCategory(e.category) === 'Backlog') backlogShared += num(e.amount);
     else if (from === '') unknownOut += num(e.amount);
   }
   // Account reconciliation only. Receipts already include signed transfers;
@@ -2213,7 +2214,7 @@ function computeCutoff(per){
        `remaining` does not move: it was already total minus all seven. */
     suppliesMinor: r2(supplies + octopus + other),
     // Backlog payments this period (v2.23.0) — settled debt, in NO allocation.
-    backlogPaid,
+    backlogPaid, backlogShared:r2(backlogShared),
     split, perPartner: r2(split / 2), splitEntered: sp.entered,
     remaining,
     // Supplies OPENED, in money (v2.14.0) — display only, never an allocation.
@@ -2260,10 +2261,20 @@ function checkExpenseKey(e){
   const cat = normCategory(e.category);
   return cat === 'Mama' ? 'mama' : cat === 'Electric' ? 'electric' : cat === 'Backlog' ? 'major' : 'minor';
 }
+function cutoffBacklogPayments(per){
+  const out = {cash:0,gcash:0,own:0,shared:0,unknown:0,total:0};
+  for (const e of Object.values(asObj(state.expenses))){
+    if (!isObj(e) || !inPeriod(e.date,per) || normCategory(e.category) !== 'Backlog') continue;
+    const source = e.paid_from === 'cutoff' ? 'shared' : e.paid_from === 'tin' ? 'cash' : ['gcash','own'].includes(e.paid_from) ? e.paid_from : 'unknown';
+    out[source] += num(e.amount); out.total += num(e.amount);
+  }
+  for (const k in out) out[k] = r2(out[k]);
+  return out;
+}
 function checkLoggedTin(per){
   const out = { minor:0, salary:0, mama:0, electric:0, split:0, major:0 };
   for (const e of Object.values(asObj(state.expenses))){
-    if (isObj(e) && inPeriod(e.date, per) && e.paid_from === 'tin') out[checkExpenseKey(e)] += num(e.amount);
+    if (isObj(e) && inPeriod(e.date, per) && e.paid_from === 'tin' && normCategory(e.category) !== 'Backlog') out[checkExpenseKey(e)] += num(e.amount);
   }
   for (const key in out) out[key] = r2(out[key]);
   return out;
@@ -2271,10 +2282,13 @@ function checkLoggedTin(per){
 function cutoffCheckBasis(per, f){
   // A changed source total invalidates the old confirmation. No transaction
   // text or private notes are copied into this comparison fingerprint.
+  // Paying old debt does not change whether this cutoff's allocations were
+  // paid. Keep the pre-payment fingerprint valid; backlog cash is automatic.
+  const backlog = cutoffBacklogPayments(per);
   const s = JSON.stringify([f.total, f.cash, f.gcash, f.excluded, f.salary, f.split, f.mama,
-    f.electric, noteMinorVal(f), noteUsedFig(f), f.backlogPaid, f.tinOut, f.tinUnknown,
+    f.electric, noteMinorVal(f), noteUsedFig(f), 0, r2(num(f.tinOut)-backlog.cash), r2(num(f.tinUnknown)-backlog.unknown),
     Object.entries(asObj(state.days)).filter(([d]) => inPeriod(d,per)).sort().map(([d,r]) => [d,r.total,r.gcash,r.salary,r.excluded_total]),
-    Object.values(asObj(state.expenses)).filter(e => isObj(e) && inPeriod(e.date,per))
+    Object.values(asObj(state.expenses)).filter(e => isObj(e) && inPeriod(e.date,per) && normCategory(e.category) !== 'Backlog')
       .map(e => [e.entry_id,e.date,e.category,e.amount,e.paid_from]).sort()]);
   return basisDigest(s);
 }
@@ -2315,12 +2329,17 @@ function cutoffCashCheck(per, f, check){
     } else if (entered !== null) {
       paid += entered;
       lines.push({ key, label, status, cash:entered, source:'confirmed' });
-      if (['minor','mama','electric','major'].includes(key) && entered !== logged[key]) conflicts.push(label + ': confirmed tin payment differs from Expenses by ' + peso(Math.abs(entered - logged[key])) + '.');
+      if (['minor','mama','electric'].includes(key) && entered !== logged[key]) conflicts.push(label + ': confirmed tin payment differs from Expenses by ' + peso(Math.abs(entered - logged[key])) + '.');
     } else {
       paid += logged[key];
       lines.push({ key, label, status, cash:logged[key], source: status === 'unknown' ? 'unknown' : 'expenses' });
       if (relevant) issues.push(label + ': confirm cash actually taken from the tin (0 if paid elsewhere)');
     }
+  }
+  const backlog = cutoffBacklogPayments(per);
+  if (backlog.cash){
+    paid += backlog.cash;
+    lines.push({key:'backlog',label:'Backlog payments',status:'paid',cash:backlog.cash,source:'expenses'});
   }
   const opening = checkMoney(c.opening);
   if (opening === null) issues.push('Opening cash not checked');
@@ -2333,7 +2352,8 @@ function cutoffCashCheck(per, f, check){
   const counted = tinCountFor(per,f).counted;
   const paper = checkMoney(c.paper), paperSalary = checkMoney(c.paperSalary);
   const comparable = paperSalary === null ? null : r2(num(f.cash) + num(f.excluded) - paperSalary);
-  return { expected, paid:r2(paid), counted, difference:counted === null ? null : r2(counted-expected),
+  return { expected, paid:r2(paid), counted, shared:backlog.shared,
+    difference:counted === null || backlog.shared > 0 ? null : r2(counted-expected),
     paper, comparable, paperDifference:paper === null || comparable === null ? null : r2(comparable-paper),
     lines, opening,
     issues, conflicts, complete:issues.length === 0 };
@@ -2359,8 +2379,9 @@ function cashLinesHTML(f, r){
     h += row(esc(l.label) + SOURCE[l.source], l.source === 'pending' ? '—' : (num(l.cash) ? '−' + peso(l.cash) : '—'));
   }
   h += '<div class="r-sep" role="presentation"></div>' +
-    row('Cash remaining (expected in tin)', peso(r.expected), 'big') +
-    '<p class="hint">Cash only: GCash and anything still to pay are not in this list. Other money put in or taken out of the tin is not known to the app.</p>';
+    row(r.shared > 0 ? 'Cash before shared payments' : 'Cash remaining (expected in tin)', peso(r.expected), 'big') +
+    '<p class="hint">' + (r.shared > 0 ? esc(peso(r.shared)) + ' was paid from combined cash and GCash. The cash portion was not recorded, so this is not a current tin balance.' :
+      'Cash only: GCash and anything still to pay are not in this list. Other money put in or taken out of the tin is not known to the app.') + '</p>';
   return h;
 }
 
@@ -2373,7 +2394,7 @@ function cutoffUnknownSource(per, check){
   let amount = 0;
   for (const e of Object.values(asObj(state.expenses))){
     if (!isObj(e) || !inPeriod(e.date,per) || txt(e.paid_from)) continue;
-    if (asObj(c.statuses)[checkExpenseKey(e)] !== 'pending') amount += num(e.amount);
+    if (normCategory(e.category) === 'Backlog' || asObj(c.statuses)[checkExpenseKey(e)] !== 'pending') amount += num(e.amount);
   }
   return r2(amount);
 }
@@ -2387,7 +2408,7 @@ function cutoffMoneyFlow(per, f, check){
   const accounts = {};
   for (const [key] of CHECK_ITEMS) accounts[key] = {gcash:0,own:0};
   for (const e of Object.values(asObj(state.expenses))){
-    if (!isObj(e) || !inPeriod(e.date,per)) continue;
+    if (!isObj(e) || !inPeriod(e.date,per) || normCategory(e.category) === 'Backlog') continue;
     const key = checkExpenseKey(e), from = txt(e.paid_from);
     if (from === 'gcash' || from === 'own') accounts[key][from] += num(e.amount);
   }
@@ -2401,7 +2422,7 @@ function cutoffMoneyFlow(per, f, check){
     const fromCash = num(line && line.cash), fromGcash = r2(account.gcash), own = r2(account.own);
     const paid = r2(fromCash + fromGcash), settled = r2(paid + own);
     gcashPaid += fromGcash; paidElsewhere += own;
-    if (paid !== 0) paidLines.push({key,label:key === 'major' ? 'Supplier / backlog payments' : label,cash:fromCash,gcash:fromGcash,amount:paid});
+    if (paid !== 0) paidLines.push({key,label,cash:fromCash,gcash:fromGcash,amount:paid});
     if (status === 'pending' && (fromGcash !== 0 || own !== 0))
       issues.push(label + ': a recorded payment conflicts with Still to pay.');
     let left = null;
@@ -2411,7 +2432,6 @@ function cutoffMoneyFlow(per, f, check){
       // Cash confirmed for this line + recorded GCash/personal payments. A
       // blank cash confirmation is NOT a declaration that nothing was paid.
       if (checkMoney(asObj(c.tin)[key]) === null) issues.push(label + ': confirm the cash already paid.');
-      else if (key === 'major') issues.push('Supplier payments may cover other cutoffs. Confirm the unpaid supplier balance before settling.');
       else if (settled <= 0 || settled > allocation) issues.push(label + ': the partial payment does not fit its allocation.');
       else left = r2(allocation - settled);
     } else if (allocation === 0 && settled === 0) left = 0;
@@ -2422,14 +2442,17 @@ function cutoffMoneyFlow(per, f, check){
     if (left !== 0) dueLines.push({key,label,amount:left,status});
     if (left !== null) due += left;
   }
-  const totalPaid = r2(cash.paid + gcashPaid), cashReceived = r2(num(f.cash) + num(f.excluded));
-  const gcashLeft = r2(num(f.gcash) - gcashPaid), left = r2(cash.expected + gcashLeft);
+  const backlog = cutoffBacklogPayments(per);
+  gcashPaid += backlog.gcash; paidElsewhere += backlog.own;
+  if (backlog.cash || backlog.gcash || backlog.shared) paidLines.push({key:'backlog',label:'Backlog payments',cash:backlog.cash,gcash:backlog.gcash,shared:backlog.shared,amount:r2(backlog.cash+backlog.gcash+backlog.shared)});
+  const totalPaid = r2(cash.paid + gcashPaid + backlog.shared), cashReceived = r2(num(f.cash) + num(f.excluded));
+  const gcashLeft = r2(num(f.gcash) - gcashPaid), left = r2(cash.expected + gcashLeft - backlog.shared);
   const reserved = num(f.excluded), available = r2(left - reserved);
-  if (cash.counted !== null && cash.difference !== 0) issues.push('Resolve the cash-count difference before using the remaining amount.');
+  if (cash.difference !== null && cash.difference !== 0) issues.push('Resolve the cash-count difference before using the remaining amount.');
   if (gcashLeft < 0) issues.push('GCash payments exceed this cutoff’s receipts; check the extra funding.');
   const uniqueIssues = Array.from(new Set(issues));
   return {cash, cashReceived, gcashReceived:num(f.gcash), receipts:r2(num(f.total)+reserved),
-    opening:cash.opening, paidLines, totalPaid, cashLeft:cash.expected, gcashLeft, left,
+    opening:cash.opening, paidLines, totalPaid, cashLeft:cash.expected, gcashLeft, shared:backlog.shared, left,
     reserved, available, dueLines, due:r2(due), paidElsewhere:r2(paidElsewhere),
     remaining:uniqueIssues.length ? null : r2(available-due), issues:uniqueIssues};
 }
@@ -2523,7 +2546,7 @@ function buildNote(f, per){
     'Cash - ' + fmt(f.cash),
     'GCash received - ' + fmt(f.gcash),
     'GCash expenses paid - ' + fmt(num(f.gcashOut)),
-    (gcashLeft < 0 ? 'GCash short (this cutoff) - ' : 'GCash left (this cutoff) - ') + fmt(Math.abs(gcashLeft)),
+    (num(f.backlogShared) > 0 ? 'GCash before shared payments - ' : gcashLeft < 0 ? 'GCash short (this cutoff) - ' : 'GCash left (this cutoff) - ') + fmt(Math.abs(gcashLeft)),
     '',
     'Mama - ' + noteVal(f.mama),
     'Split - ' + (num(f.split) !== 0 ? fmt(f.split) + '(' + fmt(f.perPartner) + ' each)' : ''),
@@ -2551,14 +2574,16 @@ function gcashCutoffHTML(f, per){
   const unknown = per ? cutoffUnknownSource(per) : num(f.tinUnknown);
   // One line on an ordinary cutoff; the paid-out and left lines only when
   // something was paid from GCash (v2.27.0 — "too many boxes").
-  const moved = out !== 0 || left !== num(f.gcash);
+  const shared = num(f.backlogShared) > 0;
+  const moved = shared || out !== 0 || left !== num(f.gcash);
   return '<div class="co-row gcash"><span>GCash received</span><span class="v">' + peso(f.gcash) + '</span></div>' +
     (moved
       ? '<div class="co-row gcash"><span>GCash expenses paid</span><span class="v">−' + peso(out) + '</span></div>' +
-        '<div class="co-row gcash"><span>GCash ' + (left < 0 ? 'short' : 'left') +
-          ' (this cutoff)</span><span class="v">' + peso(Math.abs(left)) + '</span></div>'
+        '<div class="co-row gcash"><span>' + (shared ? 'GCash before shared payments' : 'GCash ' + (left < 0 ? 'short' : 'left') + ' (this cutoff)') +
+          '</span><span class="v">' + peso(Math.abs(left)) + '</span></div>'
       : '') +
-    '<p class="hint" style="margin-top:6px;">After cash/GCash transfers — this cutoff only, not your full wallet balance. GCash payments are not deducted from Remaining again.</p>' +
+    '<p class="hint" style="margin-top:6px;">After cash/GCash transfers — this cutoff only, not your full wallet balance. ' +
+      (shared ? 'Shared backlog payments are deducted from the combined balance above; their cash/GCash split was not recorded.' : 'GCash payments are not deducted from Remaining again.') + '</p>' +
     (unknown > 0 ? '<p class="hint" style="margin-top:6px;">' + esc(peso(unknown)) +
       ' of payments have no source recorded. Any paid via GCash are not deducted here.</p>' : '');
 }
@@ -2579,9 +2604,10 @@ function noteUsedFig(f){
  *  moment he had paid it. Capped at the chosen debt's balance when one is
  *  chosen: nobody pays more than is owed by default. '' when nothing is left —
  *  a short cutoff has nothing to pay from, and blank is never zero. */
-function backlogPayable(f, balance){
+function backlogPayable(f, balance, available){
   const o = asObj(f);
-  let avail = r2(num(o.remaining) - num(pick(o, 'backlogPaid', 'backlog_paid')));
+  if (available === null) return '';
+  let avail = available === undefined ? r2(num(o.remaining) - num(pick(o, 'backlogPaid', 'backlog_paid'))) : r2(num(available));
   if (!(avail > 0)) return '';
   if (balance !== undefined && balance !== null && balance !== '' && num(balance) > 0){
     avail = Math.min(avail, r2(num(balance)));
@@ -3544,7 +3570,7 @@ function applyLocalExpense(p){
     // the tin figure reads the same before and after the row syncs. A payload
     // that says nothing (an older queued row, or one of the Cutoff screen's
     // one-tap doors) stays blank rather than being filed as the tin.
-    paid_from: (p.paidFrom === 'tin' || p.paidFrom === 'gcash' || p.paidFrom === 'own') ? p.paidFrom : '',
+    paid_from: (p.paidFrom === 'tin' || p.paidFrom === 'gcash' || p.paidFrom === 'own' || (p.paidFrom === 'cutoff' && p.category === 'Backlog')) ? p.paidFrom : '',
     // The optional delivery riding on this row. Money stays in `amount`, counted
     // once; the quantity feeds only the stock ledger.
     stock_product: txt(p.stockProduct),
@@ -4424,6 +4450,9 @@ function backlogBalance(bl){
     }
   }
   return base;
+}
+function visibleBacklogs(){
+  return asArr(state.backlogs).filter(b => isObj(b) && truthy(b.active) && r2(backlogBalance(b)) !== 0);
 }
 
 /* ============================================================
@@ -7014,7 +7043,7 @@ let lastNote = null; // { key, text, demo }
 // A backlog payment being entered on this screen: { ref, amount }.
 // `touched` (v2.23.1): once she has typed in the amount, the pre-fill stops —
 // a re-render must never put a figure back into a field she just changed.
-let payBl = { ref:'', amount:'', touched:false };
+let payBl = { ref:'', amount:'', touched:false, paidFrom:'cutoff' };
 // periodKey(), splitEdits, splitFieldAmount(), liveCutoff() and pendingSplit()
 // all live with the period maths above — the cutoff FIGURES need them to find
 // the split entered for a period, not just this screen.
@@ -7325,13 +7354,15 @@ function cutoffMoneyFlowHTML(per, f){
     const parts = [];
     if (l.cash) parts.push(peso(l.cash) + ' cash');
     if (l.gcash) parts.push(peso(l.gcash) + ' GCash');
+    if (l.shared) parts.push(peso(l.shared) + ' from remaining cash + GCash');
     h += row(l.label,deduct(l.amount),'',parts.join(' + '));
   }
   if (!flow.paidLines.length) h += '<p class="hint">No cash or GCash payments recorded yet.</p>';
-  h += row('Total already paid',deduct(flow.totalPaid),'subtotal') +
-    '<h3>Money left now</h3>' + row('Cash left in the tin',peso(flow.cashLeft)) +
-    row('GCash left this cutoff',peso(flow.gcashLeft)) + row('Total left',peso(flow.left),'subtotal total') +
-    '<p class="hint">GCash is this cutoff’s receipts less its payments. Check that this money is still available in your wallet.</p>';
+  h += row('Total already paid',deduct(flow.totalPaid),'subtotal') + '<h3>Money left now</h3>' +
+    (flow.shared > 0 ? '' : row('Cash left in the tin',peso(flow.cashLeft)) + row('GCash left this cutoff',peso(flow.gcashLeft))) +
+    row('Total left',peso(flow.left),'subtotal total') +
+    '<p class="hint">' + (flow.shared > 0 ? 'Combined cash + GCash, after the shared backlog payments. Individual wallet balances are not split.' :
+      'GCash is this cutoff’s receipts less its payments. Check that this money is still available in your wallet.') + '</p>';
   if (flow.reserved){
     const labels = asArr(f.excludedLines).map(l=>txt(l.label)).filter(Boolean).join(', ') || 'Excluded sales';
     h += row(labels + ' kept separate',deduct(flow.reserved)) + row('Available for this cutoff',peso(flow.available),'subtotal');
@@ -7344,7 +7375,8 @@ function cutoffMoneyFlowHTML(per, f){
     row(reliable && flow.remaining < 0 ? 'Shortfall after deductions' : 'Remaining after deductions',
       reliable ? peso(Math.abs(flow.remaining)) : null,'final' + (reliable && flow.remaining < 0 ? ' negative' : ''));
   if (flow.paidElsewhere) h += '<p class="hint">' + esc(peso(flow.paidElsewhere)) + ' was paid with personal money; no reimbursement is assumed here.</p>';
-  if (reliable && flow.cash.counted === null) h += '<p class="hint">Calculated from saved entries. Count the cash below to verify the tin.</p>';
+  if (reliable && flow.shared > 0) h += '<p class="hint">Calculated from saved payments. The earlier cash count is not used to verify the combined balance.</p>';
+  else if (reliable && flow.cash.counted === null) h += '<p class="hint">Calculated from saved entries. Count the cash below to verify the tin.</p>';
   else if (reliable && flow.cash.difference === 0) h += '<p class="ok-note">Cash matches your saved count of ' + esc(peso(flow.cash.counted)) + '.</p>';
   if (issues.length) h += '<p class="hint">Resolve these checks before using the final balance.</p><ul class="check-issues">' + issues.map(s=>'<li>'+esc(s)+'</li>').join('') + '</ul>';
   return h + '</div>';
@@ -7356,10 +7388,11 @@ function cutoffCashHTML(per, f){
   const row = (label,value,big) => '<div class="co-row' + (big ? ' big' : '') + '"><span>' + label + '</span><span class="v">' + value + '</span></div>';
   let h = '<div class="pay-intro">Compare with your paper and cash</div>' +
     row('Still unaccounted',r.difference === null ? '—' : peso(Math.abs(r.difference)) + (r.difference < 0 ? ' short' : r.difference > 0 ? ' extra' : ''),true) +
-    row('Cash you counted',r.counted === null ? 'Not entered' : peso(r.counted)) +
-    row(clean ? 'Expected cash in tin' : 'Provisional cash balance',peso(r.expected)) +
+    row(r.shared > 0 ? 'Saved cash count (not compared)' : 'Cash you counted',r.counted === null ? 'Not entered' : peso(r.counted)) +
+    row(r.shared > 0 ? 'Cash before shared payments' : clean ? 'Expected cash in tin' : 'Provisional cash balance',peso(r.expected)) +
     '<p class="' + (clean && r.difference === 0 ? 'ok-note' : 'hint') + '">' +
-      (r.difference === null ? 'Enter your cash count below to see the difference.' : clean && r.difference === 0 ? 'Cash balances against these confirmed entries.' : 'Provisional until the checks below are resolved.') + '</p>';
+      (r.shared > 0 ? 'Payments from combined cash and GCash have no wallet split. Use the combined balance above; this count cannot verify it.' :
+        r.difference === null ? 'Enter your cash count below to see the difference.' : clean && r.difference === 0 ? 'Cash balances against these confirmed entries.' : 'Provisional until the checks below are resolved.') + '</p>';
   if (r.paper !== null){
     h += '<div class="r-sep" role="presentation"></div>' + row('Paper cash-sales total',peso(r.paper)) +
       row('App cash less wages already in paper',r.comparable === null ? 'Enter wages' : peso(r.comparable));
@@ -7386,7 +7419,8 @@ function cutoffCheckFormHTML(per){
       '<select class="input" id="check-status-' + key + '" data-check-status="' + key + '">' +
       Object.entries(CHECK_STATUS).map(([v,title]) => '<option value="' + v + '"' + (c.statuses[key] === v ? ' selected' : '') + '>' + title + '</option>').join('') + '</select>' +
       input('tin-' + key,'Cash actually taken from tin (₱)',c.tin[key],
-        'Expenses currently label ' + esc(peso(logged[key])) + ' as taken from the tin.' + (key === 'major' ? ' Include supplier/backlog cash payments once, not the value of stock opened.' : '')) + '</div>';
+        (key === 'major' ? 'Only payments toward this cutoff’s stock allocation. Old backlog payments are counted separately and automatically.' :
+          'Expenses currently label ' + esc(peso(logged[key])) + ' as taken from the tin.')) + '</div>';
   }
   h += input('opening','Cash already in tin at start (₱)',c.opening,'Enter 0 if the tin was empty at the last cutoff.') +
     input('paper','Paper cash-sales total (₱, optional)',c.paper,'Include nori; exclude GCash.') +
@@ -7669,24 +7703,24 @@ function renderCutoff(){
 
   // BOX 3 — Paying a backlog out of what is left. It is an ordinary Backlog
   // expense, but it belongs here, beside the figure it comes out of.
-  const activeBl = asArr(state.backlogs).filter(b => isObj(b) && truthy(b.active));
+  const activeBl = visibleBacklogs().filter(b => backlogBalance(b) > 0);
   h += '<div class="section-title">Pay a backlog</div><div class="card">';
   if (!activeBl.length){
-    h += '<p class="hint">No active backlogs. Add them in the Backlogs tab of the Google Sheet.</p>';
+    h += '<p class="hint">No unpaid backlogs. Fully paid items are cleared from this list; their payment history stays saved.</p>';
   } else {
     // THE PRE-FILL (v2.23.1): what this cutoff still has to pay with — Remaining
     // less what has already been paid down — capped at the chosen debt's
     // balance. Written into payBl.amount so Save reads the same figure the field
     // shows, and only while she has not typed: her figure always wins.
     const chosen = payBl.ref ? activeBl.find(b => b.name === payBl.ref) : null;
-    const payable = backlogPayable(live, chosen ? backlogBalance(chosen) : '');
+    const money = cutoffMoneyFlow(per,live);
+    const payable = backlogPayable(live, chosen ? backlogBalance(chosen) : '', money.remaining);
     if (!payBl.touched) payBl.amount = payable === '' ? '' : String(payable);
-    const alreadyPaid = num(live.backlogPaid);
-    h += '<p class="hint" style="margin-bottom:12px;">Paid out of what is left (' +
-      esc(live.remaining < 0 ? 'nothing this cutoff — it is short ' + peso(-live.remaining)
-                             : peso(live.remaining) + ' remaining' +
-                               (alreadyPaid > 0 ? ', ' + peso(alreadyPaid) + ' of it already paid down' : '')) +
-      '). Since v2.23.0 a payment settles the debt and moves no figure above — it is not in the note.</p>' +
+    h += '<p class="hint" style="margin-bottom:12px;">' +
+      (money.remaining === null ? 'Check the money balance above before choosing an amount.' :
+        money.remaining < 0 ? 'The cutoff is short ' + esc(peso(-money.remaining)) + ' after planned deductions.' :
+        esc(peso(money.remaining)) + ' remains after the planned deductions and recorded payments.') +
+      ' Backlog payments reduce the money left above once. They do not reduce the current supplies allocation or appear in the partner note.</p>' +
       '<div class="field"><label for="payBlRef">Which backlog?</label><select class="input" id="payBlRef">' +
         '<option value=""' + (payBl.ref === '' ? ' selected' : '') + '>Choose…</option>' +
         activeBl.map(b => '<option value="' + esc(b.name) + '"' + (payBl.ref === b.name ? ' selected' : '') + '>' +
@@ -7696,11 +7730,14 @@ function renderCutoff(){
         '<input class="input money" id="payBlAmount" inputmode="decimal" autocomplete="off" placeholder="0" value="' + esc(payBl.amount) + '">' +
         (payable !== '' && !payBl.touched
           ? '<p class="hint" style="margin-top:6px;">Filled in with what this cutoff still has to pay with' +
-            (chosen && num(backlogBalance(chosen)) > 0 && num(backlogBalance(chosen)) < r2(num(live.remaining) - alreadyPaid)
+            (chosen && num(backlogBalance(chosen)) > 0 && num(backlogBalance(chosen)) < money.remaining
               ? ', capped at what is owed on ' + esc(chosen.name) : '') +
             '. Change it if you are paying less.</p>'
           : '') +
         '<p class="err" id="err-paybl" hidden></p></div>' +
+      '<div class="field"><label for="payBlSource">Paying from</label><select class="input" id="payBlSource">' +
+        [{key:'cutoff',label:'Remaining cash + GCash'},...PAID_FROM_CHOICES].map(c => '<option value="' + c.key + '"' +
+          (payBl.paidFrom === c.key ? ' selected' : '') + '>' + esc(c.label) + '</option>').join('') + '</select></div>' +
       '<button type="button" class="btn block" data-act="pay-backlog">Log this payment</button>';
   }
   h += '</div>';
@@ -8182,8 +8219,16 @@ function payBacklog(){
     if (err){ err.textContent = 'Enter how much you paid.'; err.hidden = false; }
     return;
   }
+  if (!['cutoff','tin','gcash','own'].includes(payBl.paidFrom)){
+    if (err){ err.textContent = 'Choose where the payment came from.'; err.hidden = false; }
+    return;
+  }
   const bl = asArr(state.backlogs).find(b => isObj(b) && b.name === payBl.ref);
   const balance = bl ? backlogBalance(bl) : 0;
+  if (!bl || !truthy(bl.active) || r2(balance) <= 0){
+    if (err){ err.textContent = 'This backlog has no unpaid balance. Choose an unpaid one.'; err.hidden = false; }
+    return;
+  }
   if (bl && amount > balance &&
       !confirm('That is more than the ' + peso(balance) + ' still owed on ' + payBl.ref + '. Log it anyway?')) return;
   if (err) err.hidden = true;
@@ -8197,12 +8242,12 @@ function payBacklog(){
     return;
   }
   const payload = { date, category:'Backlog', item:'Backlog payment', amount:r2(amount),
-    backlogRef: payBl.ref, notes:'', entryId: uuid() };
+    backlogRef: payBl.ref, notes:'', paidFrom:payBl.paidFrom, entryId: uuid() };
   applyLocalExpense(payload);
   enqueue('saveExpense', payload);
   persistState();
   const name = payBl.ref;
-  payBl = { ref:'', amount:'', touched:false };   // untouched again: the next pre-fill is what is STILL left
+  payBl = { ref:'', amount:'', touched:false, paidFrom:payBl.paidFrom };   // untouched again: the next pre-fill is what is STILL left
   renderCutoff();
   toast('Paid ' + peso(amount) + ' on ' + name + '.');
   drainQueue();
@@ -8303,9 +8348,9 @@ function renderIbapa(){
 
   // Backlogs
   h += '<div class="section-title">Backlogs</div><div class="card">';
-  const bls = asArr(state.backlogs).filter(b => isObj(b) && truthy(b.active));
+  const bls = visibleBacklogs();
   if (!bls.length){
-    h += '<p class="hint">No active backlogs. Add them in the Backlogs tab of the Google Sheet.</p>';
+    h += '<p class="hint">No unpaid backlogs. Fully paid items are cleared from this list; their payment history stays saved.</p>';
   } else {
     const owed = bls.reduce((s, b) => s + backlogBalance(b), 0);
     h += '<div class="bl-total"><span>Total remaining</span><strong>' + peso(owed) + '</strong></div>';
@@ -10785,6 +10830,10 @@ document.addEventListener('input', (ev) => {
 document.addEventListener('change', (ev) => {
   const id = ev.target.id;
   const ds = ev.target.dataset || {};
+  if (id === 'payBlSource'){
+    if (['cutoff','tin','gcash','own'].includes(ev.target.value)) payBl.paidFrom = ev.target.value;
+    return;
+  }
   if (id === 'gxPick'){
     gx.pick = ev.target.value;
     setErr('err-gx-pick','');

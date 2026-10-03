@@ -10,6 +10,16 @@ Locale: Philippines. Timezone **Asia/Manila** everywhere. Currency PHP. Dates ar
 
 ## Business rules (verified against owner's real cutoff notes)
 
+### v2.30.1 — backlog payments from the remaining balance
+
+Owner, 2026-10-04: four backlog payments used the entire ₱4,103 left after planned deductions, from mixed cash and GCash. Fix the red warning and remove fully paid backlogs.
+
+- Backlog payments are separate from the current Supplies (major) allocation and its checklist. Known cash/GCash sources leave the corresponding account once. They do not change whether current allocations are paid, so adding an old-debt payment alone does not invalidate those confirmations. Other source changes still require review.
+- `paid_from=cutoff` is now accepted only for Backlog: an explicit payment from the combined remaining cash + GCash, with no invented wallet split. The form defaults to this source and also offers the three individual sources. Shared payments leave the combined balance once; individual wallet balances and cash-count comparisons are not asserted when the split is unknown. The GCash line in the partner note says **before shared payments** in that case. Backlog payments stay outside the partner's allocation math and note categories.
+- The payment suggestion uses the current funds remaining, including earlier payments and personal-money payments correctly. A source not yet recorded still needs checking. The note, allocations, existing payment amounts, and stored cash count are not rewritten by the UI.
+- Zero balances automatically disappear from the payment selector and More. Debt records and Expenses history remain saved, so a corrected payment can restore a balance. Overpayments remain visible as a negative balance; only positive debts can be selected for another payment.
+- App/cache/API are 2.30.1; the separate photo reader stays 2.29.0. No new columns or destructive migration.
+
 ### v2.30.0 — running money balance and compact expense entry
 
 Owner, 2026-10-04: show the cutoff's total, expenses already paid, money left, unpaid deductions including the split, and the final remaining amount. Make daily expense entry easy without scrolling through ten or more types.

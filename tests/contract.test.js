@@ -239,7 +239,7 @@ return {
   applyBootstrap, applyLocalDay, applyLocalExpense, applyLocalStockCount,
   applyLocalStockDelivery,
   applyLocalCutoffSplit, applyLocalPrices, applyLocalStockItems, applyServerDay, reapplyQueue,
-  backlogBalance,
+  backlogBalance, visibleBacklogs,
   loadBentaForm, bentaPayload, computeDay, computeCutoff, buildNote, gcashCutoffHTML,
   // The stock ledger the phone computes for itself (never stored) and the two
   // figures the cutoff needs from Settings.
@@ -5766,6 +5766,24 @@ test('OUT is a badge only when the product is KNOWN to be gone (v2.23.0)', () =>
     'Out is drawn first; Low only when there is still some');
 });
 
+test('zero backlogs disappear without deleting payment history; credits stay visible',()=>{
+  const app=loadClient();
+  app.state.backlogs=[{name:'Paid',total_amount:135,balance:0,active:true},
+    {name:'Open',total_amount:200,balance:200,active:true},{name:'Credit',total_amount:100,balance:-20,active:true},
+    {name:'Inactive',total_amount:100,balance:100,active:false}];
+  app.applyLocalExpense({entryId:'paid-history',date:ymdDaysAgo(1),category:'Backlog',backlogRef:'Paid',amount:135,paidFrom:'cutoff'});
+  assert.deepStrictEqual(app.visibleBacklogs().map(b=>b.name),['Open','Credit']);
+  assert.equal(app.state.expenses['paid-history'].amount,135,'history survives');
+  assert.equal(app.state.backlogs.length,4,'debt records survive');
+  app.applyLocalExpense({entryId:'new-payment',date:ymdDaysAgo(1),category:'Backlog',backlogRef:'Open',amount:200,paidFrom:'cutoff'});
+  app.queue.push({action:'saveExpense',payload:{entryId:'new-payment',category:'Backlog',backlogRef:'Open',amount:200,paidFrom:'cutoff'}});
+  assert.deepStrictEqual(app.visibleBacklogs().map(b=>b.name),['Credit'],'a queued full payment clears the active list too');
+  app.queue.length=0;app.state.backlogs[0].balance=135;
+  assert(app.visibleBacklogs().some(b=>b.name==='Paid'),'a balance restored by a later refresh reappears');
+  const render=slab('function renderCutoff(){','function stockCutoffHTML(per){');
+  assert.match(render,/visibleBacklogs\(\).filter\(b => backlogBalance\(b\) > 0\)/,'only debts can be selected for payment');
+});
+
 test('THE ONE-TAP CHIPS SAY THE MONEY CAME FROM THE TIN (v2.23.0)', () => {
   // Mama's share and the electric bill come out of the night's cash. Leaving
   // paid_from blank put ₱1,000 a fortnight into the tin card's "does not say
@@ -5784,9 +5802,9 @@ test('THE ONE-TAP CHIPS SAY THE MONEY CAME FROM THE TIN (v2.23.0)', () => {
     .filter(e => e.entry_id === 'chip-mama');
   assert.strictEqual(rows.length, 1);
   assert.strictEqual(rows[0].paid_from, 'tin');
-  // payBacklog is deliberately UNCHANGED — "dont touch the backlogs".
-  const pb = src.slice(src.indexOf('function payBacklog(){'), src.indexOf('function payBacklog(){') + 2200);
-  assert.ok(pb.indexOf('paidFrom') < 0, 'a backlog payment still says nothing about where the money came from');
+  // v2.30.1: the requested backlog fix now records its source too.
+  const pb = src.slice(src.indexOf('function payBacklog(){'), src.indexOf('function payBacklog(){') + 3600);
+  assert.match(pb, /paidFrom:payBl.paidFrom/, 'the backlog payment now records its confirmed source');
 });
 
 test('THE NAME SURVIVES A RELOAD, trimmed and capped (v2.23.0)', () => {
@@ -5877,14 +5895,14 @@ test('SOURCE PIN: the pre-fill yields to typing, resets after a payment, and tel
   const src = fs.readFileSync(INDEX_HTML, 'utf8');
   const card = src.slice(src.indexOf('Pay a backlog</div><div class="card">'),
                          src.indexOf('Pay a backlog</div><div class="card">') + 2600);
-  assert.match(card, /const payable = backlogPayable\(live, chosen \? backlogBalance\(chosen\) : ''\);/,
+  assert.match(card, /const payable = backlogPayable\(live, chosen \? backlogBalance\(chosen\) : '', money.remaining\);/,
     'the LIVE figures, capped at the chosen debt');
   assert.match(card, /if \(!payBl\.touched\) payBl\.amount = payable === '' \? '' : String\(payable\);/,
     'written into state so Save reads what the field shows — and ONLY while untouched');
   assert.match(card, /Change it if you are paying less/, 'and says it is a suggestion');
   assert.ok(card.indexOf('shows on the note under “Other payments”') < 0,
     'the v2.20.0-era sentence is gone: a payment has been outside the note since v2.23.0');
-  assert.match(card, /moves no figure above — it is not in the note/, 'replaced by the truth');
+  assert.match(card, /Backlog payments reduce the money left above once/, 'the running money balance includes debt payments');
   // Typing marks it touched and never re-renders (the v2.13.2 guard covers the
   // second half; this pins the first).
   const input = src.slice(src.indexOf("document.addEventListener('input'"), src.indexOf("document.addEventListener('change'"));
@@ -5895,9 +5913,9 @@ test('SOURCE PIN: the pre-fill yields to typing, resets after a payment, and tel
     'picking a backlog re-renders so the pre-fill can cap at its balance');
   // After a payment the field is untouched again, so the NEXT pre-fill is what
   // is still left — smaller by what was just paid.
-  assert.match(src, /payBl = \{ ref:'', amount:'', touched:false \};\s*\/\/ untouched again/,
+  assert.match(src, /payBl = \{ ref:'', amount:'', touched:false, paidFrom:payBl.paidFrom \};\s*\/\/ untouched again/,
     'the reset clears touched');
-  assert.match(src, /let payBl = \{ ref:'', amount:'', touched:false \};/, 'and the initial state is untouched');
+  assert.match(src, /let payBl = \{ ref:'', amount:'', touched:false, paidFrom:'cutoff' \};/, 'and the initial state is untouched');
 });
 
 test('A COST EDITED LATER DOES NOT RESTATE A SAVED CUTOFF (v2.22.0)', () => {

@@ -33,7 +33,7 @@ function app() {
       cutoffCheckSaved,cutoffCashHTML,cutoffPaymentHTML,cutoffCheckFormHTML,
       applyLocalCutoffCheck,applyLocalTinCount,applyLocalCutoffSplit,normCutoffInput,splitFor,cashLinesHTML,mirrorRecordedSplit,
       sanitizeState,sanitizeQueue,reapplyQueue,computeCutoff,buildNote,
-      cutoffMoneyFlow,cutoffMoneyFlowHTML,cutoffUnknownSource,gcashCutoffHTML,splitEdits};
+      cutoffMoneyFlow,cutoffMoneyFlowHTML,cutoffUnknownSource,gcashCutoffHTML,splitEdits,applyLocalExpense,backlogPayable};
   `)();
 }
 const per={start:'2026-09-16',end:'2026-09-30'}, key=per.start+'_'+per.end;
@@ -147,6 +147,55 @@ test('opening cash stays available, a missing count is estimated, and a negative
   f.split=20000;save();assert.equal(a.cutoffMoneyFlow(per,f).remaining,-9697);
   assert.match(a.cutoffMoneyFlowHTML(per,f),/Shortfall after deductions/);
 });
+test('shared backlog payments use the remaining money once and leave current supplies pending',()=>{
+  const {a,f,c}=reconciledFixture(),basis=c.basis;
+  [168,2514,135,1286].forEach((amount,i)=>a.applyLocalExpense({entryId:'debt-'+i,date:per.end,category:'Backlog',
+    backlogRef:'Debt '+i,amount,paidFrom:'cutoff'}));
+  f.backlogPaid=4103;f.backlogShared=4103;
+  assert.equal(a.cutoffCheckBasis(per,f),basis,'paying debt does not invalidate the allocation checklist');
+  const flow=a.cutoffMoneyFlow(per,f);
+  assert.deepEqual(flow.issues,[]);assert.equal(flow.totalPaid,14575);assert.equal(flow.left,13930);
+  assert.equal(flow.due,13830);assert.equal(flow.remaining,0);assert.equal(flow.cash.difference,null);
+  assert.equal(flow.dueLines.find(l=>l.key==='major').amount,6830);
+  assert.equal(flow.paidLines.find(l=>l.key==='backlog').amount,4103);
+  const h=a.cutoffMoneyFlowHTML(per,f);
+  assert.doesNotMatch(h,/Needs checking|Cash matches|Cash left in the tin|GCash left this cutoff/);
+  assert.match(h,/Remaining after deductions<\/span><span class="money-value">₱0/);
+  assert.match(h,/Individual wallet balances are not split/);
+  assert.match(a.cutoffCashHTML(per,f),/Saved cash count \(not compared\)/);
+  assert.match(a.buildNote(f,per),/GCash before shared payments/);
+  assert.doesNotMatch(a.buildNote(f,per),/GCash left \(this cutoff\)/);
+  assert.equal(a.backlogPayable(f,5000,flow.remaining),'');
+});
+test('known cash/GCash backlog sources reconcile separately from the major allocation',()=>{
+  const {a,f,c}=reconciledFixture(),basis=c.basis;
+  a.applyLocalExpense({entryId:'cash-debt',date:per.end,category:'Backlog',backlogRef:'Debt',amount:2000,paidFrom:'tin'});
+  a.applyLocalExpense({entryId:'gcash-debt',date:per.end,category:'Backlog',backlogRef:'Debt',amount:2103,paidFrom:'gcash'});
+  f.backlogPaid=4103;f.tinOut+=2000;
+  a.state.cutoffInputs[key].tin_counted=12626;
+  assert.equal(a.cutoffCheckBasis(per,f),basis);
+  const flow=a.cutoffMoneyFlow(per,f);
+  assert.deepEqual(flow.issues,[]);assert.equal(flow.remaining,0);assert.equal(flow.cashLeft,12626);
+  assert.equal(flow.gcashLeft,1304);assert.equal(flow.cash.difference,0);
+  assert.equal(flow.dueLines.find(l=>l.key==='major').amount,6830);
+});
+test('an unknown backlog source is never hidden by the current stock being unpaid',()=>{
+  const {a,f}=reconciledFixture();
+  a.applyLocalExpense({entryId:'unknown-debt',date:per.end,category:'Backlog',backlogRef:'Debt',amount:4103});
+  f.backlogPaid=4103;f.tinUnknown+=4103;
+  assert.equal(a.cutoffUnknownSource(per),4103);
+  assert.equal(a.cutoffMoneyFlow(per,f).remaining,null);
+  assert.match(a.cutoffMoneyFlowHTML(per,f),/₱4,103 of logged expenses has no payment source/);
+});
+test('personal backlog payments leave the business funds available',()=>{
+  const {a,f}=reconciledFixture();
+  a.applyLocalExpense({entryId:'own-debt',date:per.end,category:'Backlog',backlogRef:'Debt',amount:4103,paidFrom:'own'});
+  f.backlogPaid=4103;
+  const flow=a.cutoffMoneyFlow(per,f);
+  assert.deepEqual(flow.issues,[]);assert.equal(flow.remaining,4103);
+  assert.equal(a.backlogPayable(f,5000,flow.remaining),4103);
+  assert.equal(a.backlogPayable(f,5000,null),'','unknown balances never produce a suggested payment');
+});
 test('Sept paper and cash reconcile without re-deducting paid wages/minor or pending items',()=>{
   const {a,f,c}=fixture(),r=a.cutoffCashCheck(per,f,c);
   assert.equal(r.expected,14626); assert.equal(r.paid,10076);
@@ -253,13 +302,33 @@ test('changed source figures require review and do not inherit a settled status 
   assert(a.cutoffCashCheck(per,f).issues.some(s=>s.includes('Source figures changed')));
   assert.equal(a.cutoffCheckSaved({start:'2026-10-01',end:'2026-10-15'}).statuses.salary,'unknown');
 });
-function server(){
-  const ss=new FakeSpreadsheet(),ctx=makeContext(ss);vm.createContext(ctx);
+function server(now){
+  const ss=new FakeSpreadsheet(),ctx=makeContext(ss,now);vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(path.join(root,'apps-script/Code.gs'),'utf8'),ctx);
   const token=ctx.setupSheet();
   const post=(action,payload)=>JSON.parse(ctx.doPost({postData:{contents:JSON.stringify({token,action,payload})}}).getContent());
   return {ss,ctx,post};
 }
+test('shared backlog source survives the real API, local replay and note seam without another expense',()=>{
+  const {ss,ctx,post}=server(new Date('2026-10-04T01:30:00+08:00')),p={date:per.end,entryId:'shared-debt',category:'Backlog',backlogRef:'Ref',amount:135,paidFrom:'cutoff'};
+  assert(post('saveExpense',p).ok);assert(post('saveExpense',p).ok);
+  const boot=post('bootstrap',{}).data,expense=boot.expenses.find(e=>e.entry_id===p.entryId);
+  assert.equal(expense.paid_from,'cutoff');assert.equal(boot.expenses.filter(e=>e.entry_id===p.entryId).length,1);
+  assert.equal(boot.backlogs.find(b=>b.name==='Ref').balance,6565);
+  const a=app();Object.assign(a.state,a.sanitizeState(boot));
+  assert.equal(a.state.expenses[p.entryId].paid_from,'cutoff');
+  const f=a.computeCutoff(per),cut=post('cutoff',{...per,dryRun:true}).data;
+  assert.equal(f.backlogShared,135);assert.equal(cut.figures.backlog_shared,135);
+  assert.equal(f.gcashOut,0);assert.equal(f.tinOut,0);
+  assert.equal(a.buildNote(f,per),cut.note_text);
+  assert.match(cut.note_text,/GCash before shared payments/);
+  const before=ss.getSheetByName('Expenses').getDataRange().getValues();
+  assert.equal(post('saveExpense',{...p,entryId:'bad-shared',category:'Other'}).ok,false);
+  assert.deepEqual(ss.getSheetByName('Expenses').getDataRange().getValues(),before);
+  const local=app(),q=local.sanitizeQueue([{action:'saveExpense',payload:p}]);
+  local.queue.push(q[0]);local.reapplyQueue();
+  assert.equal(local.state.expenses[p.entryId].paid_from,'cutoff');
+});
 test('backend persists checklist idempotently and never creates expenses or rewrites allocations',()=>{
   const {ss,ctx,post}=server();
   assert(post('saveCutoffSplit',{...per,entryId:'period',amount:6000}).ok);

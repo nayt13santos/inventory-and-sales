@@ -852,3 +852,7 @@ Suites: **213** (`run-tests.js`) + **320** (`contract.test.js`) + 14 + **16** (`
 Six new cutoff checks cover the September bridge (₱28,505 receipts − ₱10,472 paid = ₱18,033 left; reserve ₱100 nori and ₱13,830 unpaid → ₱4,103), split payments without double deductions, GCash versus personal payments, unresolved/conflicting data, unsaved and unsynced state, and opening cash/shortfalls. The picker test exercises the actual renderer, escaping and category vocabulary.
 
 The phone smoke test now checks 24 screens, including a compact 14-type picker, adding an expense on a historical cutoff through the real controls, duplicate-tap prevention, readiness for the next entry, adding from the bottom of history, and the bulk picker. The fixed expense actions are checked for visibility and obstruction above the tabs.
+
+### v2.30.1 backlog payments
+
+Adds checks for shared cash/GCash payments exhausting the ₱4,103 residual without touching current stock reserves, exact account sources, unknown and personal sources, API validation/idempotent upsert and note parity, and zero-balance filtering without deleting history. Phone smoke now covers 28 screens, including saving a shared payment through the real controls, clearing its fully paid debt from both lists, and displaying honest combined-balance explanations.

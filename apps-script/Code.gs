@@ -282,7 +282,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.29.0';
+var VERSION = '2.30.1';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -1358,7 +1358,8 @@ function apiSaveExpense(ss, payload) {
   // did. A value that is not one of the three is refused rather than coerced:
   // silently filing an unknown source as "the tin" would invent a shortage.
   var paidFrom = asStr(payload.paidFrom);
-  if (paidFrom !== '' && PAID_FROM.indexOf(paidFrom) === -1) {
+  if (paidFrom === 'cutoff' && category !== 'Backlog') throw new Error('The combined cutoff balance is only a payment source for Backlog.');
+  if (paidFrom !== '' && paidFrom !== 'cutoff' && PAID_FROM.indexOf(paidFrom) === -1) {
     throw new Error('Invalid paidFrom "' + paidFrom + '". Allowed: ' + PAID_FROM.join(', ') + ', or blank.');
   }
 
@@ -2095,6 +2096,9 @@ function apiCutoff(ss, settings, payload, dryRun) {
     return sum + (x.paid_from === 'gcash' ? x.amount : 0);
   }, 0));
   var gcashExpected = round2(gcash - gcashOut);
+  var backlogShared = round2(expenses.reduce(function (sum, x) {
+    return sum + (x.category === 'Backlog' && x.paid_from === 'cutoff' ? x.amount : 0);
+  }, 0));
 
   var mama = 0, supplies = 0, octopus = 0, electric = 0, other = 0, backlogPaid = 0;
   expenses.forEach(function (x) {
@@ -2280,7 +2284,7 @@ function apiCutoff(ss, settings, payload, dryRun) {
   var figures = {
     start: start, end: end,
     total: total, cash: cash, gcash: gcash,
-    gcash_out: gcashOut, gcash_expected: gcashExpected,
+    gcash_out: gcashOut, gcash_expected: gcashExpected, backlog_shared:backlogShared,
     mama: mama, split: split, per_partner: perPartner,
     supplies: supplies, octopus: octopus, salary: salary,
     other: other, electric: electric, remaining: remaining,
@@ -2973,7 +2977,7 @@ function buildNoteText(branch, start, end, f) {
     'Cash - ' + fmtAmt(f.cash),
     'GCash received - ' + fmtAmt(f.gcash),
     'GCash expenses paid - ' + fmtAmt(asNum(f.gcash_out)),
-    (gcashLeft < 0 ? 'GCash short (this cutoff) - ' : 'GCash left (this cutoff) - ') + fmtAmt(Math.abs(gcashLeft)),
+    (asNum(f.backlog_shared) > 0 ? 'GCash before shared payments - ' : gcashLeft < 0 ? 'GCash short (this cutoff) - ' : 'GCash left (this cutoff) - ') + fmtAmt(Math.abs(gcashLeft)),
     '',
     'Mama - ' + orBlank(f.mama),
     'Split - ' + splitVal,

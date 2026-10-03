@@ -33,7 +33,7 @@ that state and would have passed.
 Exit code is non-zero if anything fails; otherwise one `PASS` line per screen
 per viewport.
 
-The 24 screen checks also exercise the cutoff checklist and daily expense flow.
+The 28 screen checks also exercise the cutoff checklist and daily expense flow.
 With 14 expense types, the picker remains one field. The real controls save one
 historically dated GCash expense, retain date/source for the next entry, and
 reject a second blank tap. Add expense is reachable from the bottom of history;
@@ -105,3 +105,5 @@ night of each earlier cutoff (the "at the start" figure); deliveries; expenses
 in all six categories across `paid_from` values; an entered split and counted
 tin for the previous cutoff. It is passed through the app's own
 `sanitizeState()`, so it can only be a state the app would accept anyway.
+
+Backlog coverage also saves a shared cash/GCash payment with the real controls, verifies the paid debt disappears from both Cutoff and More, and checks the shared-balance explanations with the detail folds open.

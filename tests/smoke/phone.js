@@ -492,6 +492,38 @@ async function runViewport(browser, baseUrl, vp){
     if(result.picked!=='Oil'||result.options!==15||result.singleActions)throw new Error('Bulk selection did not use the compact picker cleanly.');
     await page.click('[data-act="bulk-cancel"]');
   });
+  await step('Cutoff (shared payment clears a fully paid backlog)', 'cutoff', async () => {
+    await page.evaluate(()=>{
+      state.backlogs.push({name:'Paid test backlog',total_amount:135,balance:135,active:true});
+      showTab('cutoff');
+    });
+    await page.select('#payBlRef','Paid test backlog');
+    await page.select('#payBlSource','cutoff');
+    await page.focus('#payBlAmount');
+    await page.keyboard.type('135');
+    await page.$eval('[data-act="pay-backlog"]',e=>e.scrollIntoView({block:'center'}));
+    await page.click('[data-act="pay-backlog"]');
+    const result=await page.evaluate(()=>({
+      expense:Object.values(state.expenses).find(e=>e.backlog_ref==='Paid test backlog'),
+      offered:Array.from(document.getElementById('payBlRef').options).some(o=>o.value==='Paid test backlog'),
+      shared:computeCutoff(cutoffPer).backlogShared
+    }));
+    if(result.expense?.amount!==135||result.expense?.paid_from!=='cutoff'||result.offered||result.shared!==135)
+      throw new Error('Shared payment did not save/clear correctly: '+JSON.stringify(result));
+    await page.click('#tab-ibapa');
+    if(await page.evaluate(()=>document.getElementById('panel-ibapa').innerText.includes('Paid test backlog')))
+      throw new Error('Fully paid backlog remains visible in More.');
+    await page.click('#tab-cutoff');
+  });
+  await step('Cutoff (shared payment explanations)', 'cutoff', async () => {
+    await page.evaluate(()=>{
+      document.querySelector('.cutoff-note').open=true;
+      document.getElementById('coCashCheck').closest('details').open=true;
+    });
+    const text=await page.$eval('#coMoneyFlow',e=>e.innerText);
+    if(!text.includes('Individual wallet balances are not split')||text.includes('Cash matches'))
+      throw new Error('Shared funds were presented as verified individual wallet balances.');
+  });
   // Exercise the new checklist with the REAL input/change/click listeners.
   // Updating the preview must not replace the field being typed into.
   await step('Cutoff (checklist open)', 'cutoff', async () => {
@@ -563,7 +595,7 @@ async function main(){
     server.close();
   }
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
-  const checks = VIEWPORTS.length * (TABS.reduce((n, t) => n + 1 + (t.prev ? 1 : 0), 0) + 6);
+  const checks = VIEWPORTS.length * (TABS.reduce((n, t) => n + 1 + (t.prev ? 1 : 0), 0) + 8);
   if (ok) console.log('\nPASS — ' + checks + ' screens fit the phone, no errors (' + secs + 's)');
   else console.log('\nFAIL — see the FAIL lines above (' + secs + 's)');
   process.exitCode = ok ? 0 : 1;
