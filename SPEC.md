@@ -10,6 +10,10 @@ Locale: Philippines. Timezone **Asia/Manila** everywhere. Currency PHP. Dates ar
 
 ## Business rules (verified against owner's real cutoff notes)
 
+### v2.30.4 — paper reader at the bottom
+
+Owner requested **Read it from the paper** all the way at the bottom. Its camera, progress, and reading card now follow the receipt and **Save day** button on Sales. Reading and saving behavior are unchanged. App/cache2.30.4; API2.30.1 and photo reader2.29.0 unchanged.
+
 ### v2.30.3 — one cutoff summary
 
 Owner requested removal of **Split and cutoff note**, since its values already appear in **Where the money goes**. The duplicate totals, residual, generated-note display, and generate/copy/share controls are removed from the Cutoff screen. A compact **Change split amount** fold now lives within the guide card and retains the existing saved split, live preview, and save behavior. Stock valuation detail and fixed-amount entry controls remain inside the same card. Saved notes and business records are preserved; backend note APIs remain compatible. App/cache2.30.3; API2.30.1 and photo reader2.29.0 unchanged.

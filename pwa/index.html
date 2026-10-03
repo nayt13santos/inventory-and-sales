@@ -662,7 +662,7 @@ body:has(#panel-gastos:not([hidden]) .expense-actions) #toast{ bottom:calc(166px
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.30.3';
+const APP_VERSION = '2.30.4';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -5364,10 +5364,6 @@ function renderBenta(){
     h += '<p class="hint" style="margin:-6px 4px 14px;">This night was read from a photo of the paper. ' +
       '<a href="' + esc(dayShot) + '" target="_blank" rel="noopener noreferrer">Open the photo</a></p>';
   }
-  // "Read it from the paper" — the camera, the progress, and the reading itself.
-  // Absent entirely when the photo reader is not set up on this phone.
-  try{ h += paperCardHTML(); }catch(err){ console.error(err); }
-
   // Closed-day toggle. The whole row is the label, so tapping the words works
   // too — this switch blanks a whole day.
   h += '<div class="card"><label class="switch-row" for="closedToggle">' +
@@ -5574,6 +5570,10 @@ function renderBenta(){
 
   h += '<div id="nightCheck"></div>';
   h += '<button type="button" class="btn primary block" data-act="save-day" style="margin-bottom:10px;">Save day</button>';
+
+  // The optional paper reader is last, after the receipt and Save day.
+  // Absent entirely when the photo reader is not set up on this phone.
+  try{ h += paperCardHTML(); }catch(err){ console.error(err); }
 
   $('panel-benta').innerHTML = h;
   updateReceipt();
