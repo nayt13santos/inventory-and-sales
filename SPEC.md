@@ -10,11 +10,11 @@ Locale: Philippines. Timezone **Asia/Manila** everywhere. Currency PHP. Dates ar
 
 ## Business rules (verified against owner's real cutoff notes)
 
-### v2.31.0 — Home dashboard (local preview)
+### v2.31.0 — Home dashboard
 
 The app opens on **Home**, with Sales, Expenses, Cutoff, and More still directly available. Quick actions open today's sales or a single expense, retaining unfinished entries. The latest recorded day shows total receipts and cash/GCash; the seven-day chart opens each exact date and distinguishes missing records from closed days. Excluded sales come from the same saved counts as the cutoff. Current-cutoff receipts and recorded daily expenses link to the allocation guide, with a separate previous-cutoff link. Low-stock items and outstanding backlogs lead straight to their sections in More. Paid backlogs are omitted; credits are shown separately from money owed.
 
-Home only reads the existing local mirror; it creates no payments or expenses. Queued entries are labelled waiting to sync. The previous cutoff shows no definitive remainder when its guide is incomplete. App/cache2.31.0; API2.30.1 and photo reader2.29.0 unchanged. Preview uses saved records in an isolated local page; live app remains2.30.4 until publication.
+Home only reads the existing local mirror; it creates no payments or expenses. Queued entries are labelled waiting to sync. The previous cutoff shows no definitive remainder when its guide is incomplete. App/cache2.31.0; API2.30.1 and photo reader2.29.0 unchanged.
 
 ### v2.30.4 — paper reader at the bottom
 
