@@ -33,7 +33,7 @@ that state and would have passed.
 Exit code is non-zero if anything fails; otherwise one `PASS` line per screen
 per viewport.
 
-The 32 screen checks also exercise Home shortcuts (including draft preservation,
+The 34 screen checks also exercise notification opt-in, test and opt-out, and Home shortcuts (including draft preservation,
 expense dates and stock/backlog anchors), the allocation guide, split editing/saving,
 backlog payments, and daily expense flow. The guide has no payment checklist or
 cash-count requirement.

@@ -1,0 +1,8 @@
+{
+  "name": "octogo-push-crypto-build",
+  "private": true,
+  "type": "module",
+  "scripts": {"build": "esbuild index.js --bundle --platform=browser --format=iife --global-name=OctogoPushCrypto --target=es2020 --minify --legal-comments=linked --outfile=../../apps-script/PushCrypto.gs"},
+  "dependencies": {"@noble/curves": "2.4.0"},
+  "devDependencies": {"esbuild": "0.28.2"}
+}

@@ -10,6 +10,14 @@ Locale: Philippines. Timezone **Asia/Manila** everywhere. Currency PHP. Dates ar
 
 ## Business rules (verified against owner's real cutoff notes)
 
+### v2.32.0 — phone notifications for low stock
+
+Each phone opts in under **More → Stock notifications**, also linked from Home's Stock to watch. Android uses a supporting browser; iPhone requires the installed Home Screen app. Permission is requested only from the Turn on button. Test and Turn off controls affect only this device. Blocked permission and unsupported browsers have explicit instructions.
+
+The backend checks the same stock ledger after saved usage, deliveries, stocktakes, stock-item edits, legacy expense changes, and sync. Per-device state alerts once when an item becomes low and again if it runs out. Healthy stock re-arms the alert; partial restocking below the threshold does not spam. Unknown stock is not treated as an empty shelf; negative stock asks for a corrected count. Existing low stock is the baseline when enabling alerts. Notification failures never turn a completed financial save into a failed save. Transient failures retry after five minutes on the next stock update/sync; expired subscriptions are removed. Direct spreadsheet edits are noticed when the app next syncs, not by a scheduled background poll.
+
+The existing bound Apps Script now deliberately adds external requests for Web Push. Owner authorization is checked before release; Drive, email, backup triggers, and Vision stay separate. `Push.gs` only sends to validated Google, Apple, or Mozilla push endpoints with redirects disabled. VAPID uses a pinned noble-curves signing bundle and an OS-generated private key in Script Properties. Payloadless pushes wake the worker, which holds only a per-device notice-read capability, never the API write token. The worker fetches current notice text, displays a generic alert if offline, and opens stock when tapped. Subscription/alert state is stored outside business sheets. No sales, expenses, counts, or balances change when opting in or notifying. App/cache/API2.32.0; photo reader2.29.0 unchanged.
+
 ### v2.31.0 — Home dashboard
 
 The app opens on **Home**, with Sales, Expenses, Cutoff, and More still directly available. Quick actions open today's sales or a single expense, retaining unfinished entries. The latest recorded day shows total receipts and cash/GCash; the seven-day chart opens each exact date and distinguishes missing records from closed days. Excluded sales come from the same saved counts as the cutoff. Current-cutoff receipts and recorded daily expenses link to the allocation guide, with a separate previous-cutoff link. Low-stock items and outstanding backlogs lead straight to their sections in More. Paid backlogs are omitted; credits are shown separately from money owed.

@@ -344,7 +344,14 @@ function frozenDateClass(now) {
 }
 
 function makeContext(activeSpreadsheet, now) {
+  const properties={};
   return {
+    PropertiesService:{getScriptProperties:()=>({
+      getProperty:k=>properties[k] || null,
+      getProperties:()=>({...properties}),
+      setProperty:(k,v)=>{properties[k]=String(v);},
+      deleteProperty:k=>{delete properties[k];}
+    })},
     Date: frozenDateClass(now || FIXED_NOW),
     SpreadsheetApp: { getActive: () => activeSpreadsheet, openById: () => activeSpreadsheet },
     DriveApp: makeFakeDrive(),
@@ -361,9 +368,13 @@ function makeContext(activeSpreadsheet, now) {
       // back real bytes so a test can prove the file holds the image it sent.
       base64Decode: (s) => Array.from(Buffer.from(String(s), 'base64')),
       base64Encode: (b) => Buffer.from(b).toString('base64'),
+      base64DecodeWebSafe:s=>Array.from(Buffer.from(s,'base64url')),
+      base64EncodeWebSafe:b=>Buffer.from(b).toString('base64url'),
+      DigestAlgorithm:{SHA_256:'sha256'},Charset:{UTF_8:'utf8'},
+      computeDigest:(algorithm,s)=>Array.from(crypto.createHash(algorithm).update(s).digest()),
       newBlob: (bytes, mime, name) => ({
         _bytes: bytes,
-        getBytes: () => bytes,
+        getBytes: () => typeof bytes==='string'?Array.from(Buffer.from(bytes,'utf8')):bytes,
         getContentType: () => mime,
         getName: () => name
       })

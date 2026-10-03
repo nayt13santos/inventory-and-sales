@@ -13,7 +13,7 @@ const TZ_MANILA = 'Asia/Manila';
 const path = require('path');
 const ROOT = path.resolve(__dirname, '..');
 const CODE_GS = path.join(ROOT, 'apps-script', 'Code.gs');
-const source = fs.readFileSync(CODE_GS, 'utf8');
+const source = fs.readFileSync(CODE_GS, 'utf8')+'\n'+fs.readFileSync(path.join(ROOT,'apps-script/Push.gs'),'utf8');
 
 let passed = 0, failed = 0;
 const failures = [];
@@ -924,8 +924,8 @@ test('invalid token rejected; doGet ping needs no token', () => {
   // both the ping and the More screen report it, and it is the only way anyone
   // can answer "is the sheet running the new code yet?" — which matters here
   // because the deploy is automatic while setupSheet() is run by hand.
-  assert.strictEqual(g.data.version, '2.30.1', 'VERSION was not bumped for this release');
-  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.30.1');
+  assert.strictEqual(g.data.version, '2.32.0', 'VERSION was not bumped for this release');
+  assert.strictEqual(post(ctx, { token, action: 'ping', payload: {} }).data.version, '2.32.0');
 });
 
 // ---------------------------------------------------------------------------
@@ -6527,7 +6527,7 @@ test('a bad request body is a sentence, not engine debris', () => {
   assert.strictEqual(ctx.UrlFetchApp._requests.length, 0);
 });
 
-test('THE FENCE: the phones\' project still cannot reach the internet, and Vision is the only one that can', () => {
+test('THE FENCE: Web Push is isolated from financial writers, Vision and backups', () => {
   // v2.9.0's load-bearing separation, the same one v2.7.5 drew for Drive:
   // permissions are granted per PROJECT and the bound script is what serves the
   // phones. A UrlFetchApp call in Code.gs would grow the LIVE web app's
@@ -6551,19 +6551,20 @@ test('THE FENCE: the phones\' project still cannot reach the internet, and Visio
   // silently overwrites one handler with the other and every phone request
   // hits the wrong one. The gate caught it before the push; this test is what
   // keeps it caught. The standalone projects therefore live OUTSIDE the pushed
-  // folder, and the pushed folder is allowed exactly two files.
+  // folder. The owner's requested phone notifications add only Push.gs and its
+  // reviewed signing bundle; its new external-request scope is deliberate.
   const pushedDir = path.join(ROOT, 'apps-script');
   const pushed = fs.readdirSync(pushedDir).filter(f => !/^\./.test(f)).sort();
-  assert.deepStrictEqual(pushed, ['Code.gs', 'appsscript.json'],
-    'the folder clasp pushes may hold ONLY the bound script and its manifest — ' +
+  assert.deepStrictEqual(pushed, ['Code.gs','Push.gs','PushCrypto.gs','PushCrypto.gs.LEGAL.txt','appsscript.json'],
+    'the folder clasp pushes may hold ONLY the API, Web Push and manifest — ' +
     'anything else joins the project that serves the phones');
   const pushedGs = pushed.filter(f => /\.gs$/.test(f));
   const handlers = pushedGs.filter(f => /^function doPost\b/m.test(fs.readFileSync(path.join(pushedDir, f), 'utf8')));
   assert.deepStrictEqual(handlers, ['Code.gs'], 'exactly one doPost may be pushed');
   for (const f of pushedGs) {
     const src = fs.readFileSync(path.join(pushedDir, f), 'utf8');
-    assert.ok(!/\b(UrlFetchApp|DriveApp|ScriptApp|MailApp|GmailApp)\b/.test(src),
-      f + ' is pushed to the phones\' project, so it may use no permission-bearing service');
+    assert.ok(!/\b(DriveApp|ScriptApp|MailApp|GmailApp)\b/.test(src),f+' must not add Drive, triggers or email permissions');
+    if(f!=='Push.gs')assert.ok(!/\bUrlFetchApp\b/.test(src),f+' must keep outbound requests in Push.gs');
   }
 
   // The standalone projects, outside that folder, are where those services live.
@@ -6572,7 +6573,7 @@ test('THE FENCE: the phones\' project still cannot reach the internet, and Visio
   assert.deepStrictEqual(solo, ['Backups.gs', 'Vision.gs'], 'the two standalone projects');
   const usesFetch = solo.filter(f => /\bUrlFetchApp\b/.test(fs.readFileSync(path.join(soloDir, f), 'utf8')));
   assert.deepStrictEqual(usesFetch, ['Vision.gs'],
-    'Vision.gs is the ONLY project allowed to make an internet request');
+    'Vision.gs is the only standalone project that uses outbound requests');
 
   const vision = fs.readFileSync(VISION_GS, 'utf8');
   // The other half of the fence, and the reason a leaked vision deployment

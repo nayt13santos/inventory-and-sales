@@ -587,6 +587,59 @@ async function runViewport(browser, baseUrl, vp){
       await page.screenshot({path:path.join(process.env.OCTOGO_SCREENSHOT_DIR,'cutoff-'+size+'.png')});
     }
   });
+  await step('More (notification opt-in, test, off and blocked permission)', 'ibapa', async()=>{
+    await page.evaluate(()=>{
+      const oldConfig={...config},oldApi=api,oldNotification=window.Notification;
+      const oldSW=Object.getOwnPropertyDescriptor(navigator,'serviceWorker'),oldStandalone=Object.getOwnPropertyDescriptor(navigator,'standalone');
+      window.restoreAlertTest=()=>{
+        config=oldConfig;api=oldApi;window.Notification=oldNotification;
+        if(oldSW)Object.defineProperty(navigator,'serviceWorker',oldSW);else delete navigator.serviceWorker;
+        if(oldStandalone)Object.defineProperty(navigator,'standalone',oldStandalone);else delete navigator.standalone;
+        stockAlerts={busy:false,checking:false,checked:true,enabled:false,ready:false,publicKey:'',error:'',message:'',apiUrl:config.apiUrl};
+        store.set('stock_alert_device_v1',{});showTab('ibapa');
+      };
+      window.alertTestCalls=[];let subscription=null,registered=false;
+      const reg={active:{postMessage(message,ports){
+        if(message.data && message.data.token)throw new Error('API token sent to worker');
+        ports[0].postMessage({ok:true});
+      }},pushManager:{getSubscription:async()=>subscription,subscribe:async()=>{
+        subscription={endpoint:'https://fcm.googleapis.com/fcm/send/phone-test',unsubscribe:async()=>{subscription=null;return true;}};return subscription;
+      }}};
+      Object.defineProperty(navigator,'standalone',{configurable:true,value:true});
+      Object.defineProperty(navigator,'serviceWorker',{configurable:true,value:{ready:Promise.resolve(reg),getRegistration:async()=>reg}});
+      window.Notification={permission:'default',requestPermission:()=>{Notification.permission='granted';return Promise.resolve('granted');}};
+      config.apiUrl='https://script.google.com/macros/s/test/exec';
+      api=async(action,payload)=>{
+        window.alertTestCalls.push(action);
+        if(action==='pushConfig')return {ready:true,registered,publicKey:btoa('a'.repeat(65)).replace(/=+$/,'')};
+        if(action==='savePushSubscription'){if(!/^[a-f0-9]{64}$/.test(payload.readToken))throw new Error('Missing device capability');registered=true;return{id:'a'.repeat(43)};}
+        if(action==='removePushSubscription'){registered=false;return{enabled:false};}
+        if(action==='testPush')return {sent:true};
+        throw new Error('Unexpected notification action: '+action);
+      };
+      stockAlerts.checked=false;showTab('ibapa');
+    });
+    try{
+      await page.waitForSelector('[data-act="stock-alert-on"]');
+      if(process.env.OCTOGO_SCREENSHOT_DIR){
+        await page.evaluate(()=>$('stockAlertsHeading').scrollIntoView({block:'start'}));
+        await page.screenshot({path:path.join(process.env.OCTOGO_SCREENSHOT_DIR,'stock-alerts-'+size+'.png')});
+      }
+      await page.click('[data-act="stock-alert-on"]');
+      await page.waitForSelector('[data-act="stock-alert-off"]:not([disabled])');
+      if(process.env.OCTOGO_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.OCTOGO_SCREENSHOT_DIR,'stock-alerts-enabled-'+size+'.png')});
+      await page.click('[data-act="stock-alert-test"]');
+      await page.waitForFunction(()=>stockAlerts.message.includes('Test sent'));
+      await page.click('[data-act="stock-alert-off"]');
+      await page.waitForSelector('[data-act="stock-alert-on"]:not([disabled])');
+      const calls=await page.evaluate(()=>window.alertTestCalls);
+      for(const action of ['savePushSubscription','testPush','removePushSubscription'])if(!calls.includes(action))throw new Error('Missing '+action);
+      await page.evaluate(()=>{Notification.permission='denied';paintStockAlerts();});
+      if(await page.$('[data-act="stock-alert-on"]'))throw new Error('Blocked permission still offers opt-in.');
+      const words=await page.$eval('#stockAlerts',e=>e.textContent);
+      if(!words.includes('Notifications are blocked'))throw new Error('No blocked-permission guidance.');
+    }finally{await page.evaluate(()=>window.restoreAlertTest());}
+  });
   await context.close();
   return allOk;
 }
@@ -635,7 +688,7 @@ async function main(){
     server.close();
   }
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
-  const checks = VIEWPORTS.length * (TABS.reduce((n, t) => n + 1 + (t.prev ? 1 : 0), 0) + 9);
+  const checks = VIEWPORTS.length * (TABS.reduce((n, t) => n + 1 + (t.prev ? 1 : 0), 0) + 10);
   if (ok) console.log('\nPASS — ' + checks + ' screens fit the phone, no errors (' + secs + 's)');
   else console.log('\nFAIL — see the FAIL lines above (' + secs + 's)');
   process.exitCode = ok ? 0 : 1;

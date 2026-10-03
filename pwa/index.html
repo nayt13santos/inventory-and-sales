@@ -622,7 +622,7 @@ details > summary{cursor:pointer;font-weight:700;min-height:44px;}
 .home-backlogs strong{font:700 21px var(--display);display:block;}
 .home-backlogs span{font-size:13px;color:var(--muted);}
 .home-notice{border-left:3px solid var(--accent);padding:8px 12px;margin:0 0 16px;font-size:14px;}
-#stockHeading,#backlogHeading{scroll-margin-top:85px;}
+#stockHeading,#backlogHeading,#stockAlertsHeading{scroll-margin-top:85px;}
 
 /* Expense entry stays within thumb reach even on a long history/form. */
 #panel-gastos{ padding-bottom:84px; }
@@ -725,7 +725,7 @@ body:has(#panel-gastos:not([hidden]) .expense-actions) #toast{ bottom:calc(166px
    localStorage keys: state_v1 (bootstrap mirror), queue_v1
    (mutation queue), config_v1 (API url/token/sheet link).
    ============================================================ */
-const APP_VERSION = '2.31.0';
+const APP_VERSION = '2.32.0';
 
 const store = {
   read(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } },
@@ -4678,7 +4678,7 @@ function renderHome(){
     (item.on_hand<0?'Check the stock count':item.out?'Time to restock':'Getting low')+'</small></div><span class="home-stock-qty">'+esc(String(item.on_hand)+' '+item.unit)+'</span></div>';
   if(!s.low.length) h+='<p class="home-sub">'+(s.stock.length?'No low-stock alerts in the current records.':'Add stock items to keep an eye on supplies.')+'</p>';
   if(s.low.length>3) h+='<p class="home-sub" style="margin-top:12px;">'+(s.low.length-3)+' more items to check in All stock.</p>';
-  h+='</div></section><button type="button" class="home-backlogs" data-act="home-backlogs"><div><strong>Backlogs</strong><span>'+s.debts.length+' outstanding'+(s.credits?' · '+peso(s.credits)+' credit recorded':'')+'</span></div><strong>'+peso(s.debtTotal)+' <span aria-hidden="true">↗</span></strong></button>';
+  h+='</div><button type="button" class="home-link" data-act="goto-alerts" style="margin-top:8px;">Phone alerts →</button></section><button type="button" class="home-backlogs" data-act="home-backlogs"><div><strong>Backlogs</strong><span>'+s.debts.length+' outstanding'+(s.credits?' · '+peso(s.credits)+' credit recorded':'')+'</span></div><strong>'+peso(s.debtTotal)+' <span aria-hidden="true">↗</span></strong></button>';
   $('panel-home').innerHTML=h;
 }
 
@@ -8416,13 +8416,107 @@ function addSuggestedExpense(cat, item, amount){
 /* ============================================================
    MORE (ibapa panel) — backlogs, sync status, API setup, about
    ============================================================ */
+let stockAlerts={busy:false,checking:false,checked:false,enabled:false,ready:false,publicKey:'',message:'',error:'',apiUrl:''};
+function stockAlertDevice(){
+  const d=readStored('stock_alert_device_v1');
+  return isObj(d) && d.apiUrl===config.apiUrl ? d : {};
+}
+function stockAlertSupport(){
+  const ios=/iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1);
+  if(ios && !window.matchMedia('(display-mode: standalone)').matches && !navigator.standalone)
+    return 'On iPhone, add Octogo to your Home Screen, open it from its icon, then turn alerts on here.';
+  if(!window.isSecureContext || !('Notification' in window) || !('PushManager' in window) || !('serviceWorker' in navigator))
+    return 'This browser does not support phone alerts. Use an updated Chrome on Android or the Home Screen app on iPhone.';
+  return '';
+}
+function stockAlertsHTML(){
+  const unsupported=stockAlertSupport(), denied=('Notification' in window) && Notification.permission==='denied';
+  const hint=!config.apiUrl?'Connect this phone to the shop first.':unsupported || (denied?'Notifications are blocked. Allow them in this phone’s notification settings, then reopen Octogo.':'');
+  let h='<h2 class="section-title" id="stockAlertsHeading">Stock notifications</h2><div class="card">'+
+    '<p>Get a phone alert when supplies become low or run out, even while Octogo is closed.</p>'+
+    '<p class="hint" style="margin-top:8px;">Each phone opts in separately. Alerts follow saved stock updates, with no repeated warning for an unchanged count.</p>';
+  if(hint)h+='<p class="hint" style="margin-top:12px;">'+esc(hint)+'</p>';
+  else if(!stockAlerts.checked || stockAlerts.checking)h+='<p class="hint" style="margin-top:12px;">Checking this phone…</p>';
+  else if(!stockAlerts.ready)h+='<p class="hint" style="margin-top:12px;">'+(stockAlerts.error?'Could not check notifications.':'Notifications are being set up. Please try again shortly.')+'</p>';
+  else {
+    h+='<p style="margin-top:12px;font-weight:700;">'+(stockAlerts.enabled?'On for this phone':'Off for this phone')+'</p>'+
+      '<button type="button" class="btn '+(stockAlerts.enabled?'':'primary ')+'block" style="margin-top:12px;" data-act="stock-alert-'+(stockAlerts.enabled?'off':'on')+'"'+(stockAlerts.busy?' disabled':'')+'>'+
+      (stockAlerts.busy?'Please wait…':stockAlerts.enabled?'Turn off notifications':'Turn on notifications')+'</button>';
+    if(stockAlerts.enabled)h+='<button type="button" class="btn block" style="margin-top:8px;" data-act="stock-alert-test"'+(stockAlerts.busy?' disabled':'')+'>Send a test notification</button>';
+  }
+  if(stockAlerts.error)h+='<p class="err" style="margin-top:10px;" role="alert">'+esc(stockAlerts.error)+'</p>';
+  if(stockAlerts.message)h+='<p class="hint" style="margin-top:10px;" role="status">'+esc(stockAlerts.message)+'</p>';
+  if(!hint && !stockAlerts.busy && stockAlerts.checked)h+='<button class="home-link" type="button" data-act="stock-alert-refresh">Check again</button>';
+  return h+'</div>';
+}
+function paintStockAlerts(){const card=$('stockAlerts');if(card)card.innerHTML=stockAlertsHTML();}
+async function refreshStockAlerts(){
+  if(stockAlerts.checking || stockAlerts.busy || !config.apiUrl || stockAlertSupport())return;
+  stockAlerts.checking=true;stockAlerts.error='';stockAlerts.apiUrl=config.apiUrl;paintStockAlerts();
+  try{
+    const d=stockAlertDevice(), c=await api('pushConfig',{id:d.id,readToken:d.readToken});
+    const reg=await navigator.serviceWorker.getRegistration();
+    const sub=reg?await reg.pushManager.getSubscription():null;
+    stockAlerts.ready=!!c.ready;stockAlerts.publicKey=c.publicKey||'';
+    stockAlerts.enabled=!!(sub && c.registered && Notification.permission==='granted');
+  }catch(e){stockAlerts.error=friendlyError(e,'Check your connection and try again.');}
+  finally{stockAlerts.checking=false;stockAlerts.checked=true;paintStockAlerts();}
+}
+function stockAlertWorker(reg, data){
+  return new Promise((resolve,reject)=>{
+    if(!reg.active)return reject(new Error('The app is updating. Reopen it and try again.'));
+    const channel=new MessageChannel(), timer=setTimeout(()=>reject(new Error('Reopen Octogo and try again.')),10000);
+    channel.port1.onmessage=ev=>{clearTimeout(timer);channel.port1.close();ev.data && ev.data.ok?resolve():reject(new Error('Notification settings could not be saved.'));};
+    reg.active.postMessage({type:'stock-alert-settings',data},[channel.port2]);
+  });
+}
+async function enableStockAlerts(){
+  if(stockAlerts.busy || stockAlertSupport() || !stockAlerts.ready)return;
+  stockAlerts.busy=true;stockAlerts.error='';stockAlerts.message='';
+  // Permission must be requested directly from the user's tap (iPhone).
+  try{
+    const permission=Notification.requestPermission();paintStockAlerts();
+    if(await permission!=='granted')throw plainError('Notifications were not allowed. You can enable them later in this phone’s settings.');
+    const reg=await Promise.race([navigator.serviceWorker.ready,new Promise((_,reject)=>setTimeout(()=>reject(plainError('The app is still updating. Reopen it and try again.')),10000))]);
+    const key=Uint8Array.from(atob(stockAlerts.publicKey.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0));
+    const sub=(await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:key});
+    let d=stockAlertDevice();
+    if(!/^[a-f0-9]{64}$/.test(d.readToken||''))d={apiUrl:config.apiUrl,readToken:Array.from(crypto.getRandomValues(new Uint8Array(32)),n=>n.toString(16).padStart(2,'0')).join('')};
+    if(!store.set('stock_alert_device_v1',d))throw plainError('This phone could not save notification settings. Free a little storage and try again.');
+    const saved=await api('savePushSubscription',{endpoint:sub.endpoint,readToken:d.readToken});
+    d.id=saved.id;
+    if(!store.set('stock_alert_device_v1',d))throw plainError('This phone could not save notification settings. Try again.');
+    await stockAlertWorker(reg,d);
+    stockAlerts.enabled=true;stockAlerts.message='Ready. New low-stock and out-of-stock changes will alert this phone. Use the test button to check delivery.';
+  }catch(e){stockAlerts.error=friendlyError(e,'Notifications could not be enabled. Reopen the app and try again.');}
+  finally{stockAlerts.busy=false;paintStockAlerts();}
+}
+async function disableStockAlerts(){
+  if(stockAlerts.busy)return;stockAlerts.busy=true;stockAlerts.error='';stockAlerts.message='';paintStockAlerts();
+  try{
+    const d=stockAlertDevice();await api('removePushSubscription',{id:d.id,readToken:d.readToken});
+    const reg=await navigator.serviceWorker.getRegistration();
+    if(reg){const sub=await reg.pushManager.getSubscription();if(sub)await sub.unsubscribe();await stockAlertWorker(reg,null);}
+    store.set('stock_alert_device_v1',{});stockAlerts.enabled=false;stockAlerts.message='Notifications are off for this phone.';
+  }catch(e){stockAlerts.error=friendlyError(e,'Could not turn alerts off. Check your connection and try again.');}
+  finally{stockAlerts.busy=false;paintStockAlerts();}
+}
+async function testStockAlerts(){
+  if(stockAlerts.busy)return;stockAlerts.busy=true;stockAlerts.error='';stockAlerts.message='';paintStockAlerts();
+  try{const d=stockAlertDevice();await api('testPush',{id:d.id,readToken:d.readToken});stockAlerts.message='Test sent. Look for “Octogo alerts are working” in your notifications.';}
+  catch(e){stockAlerts.error=friendlyError(e,'Could not send the test. Try again.');}
+  finally{stockAlerts.busy=false;paintStockAlerts();}
+}
 function renderIbapa(){
   ensureShape();
+  if(stockAlerts.apiUrl!==config.apiUrl && !stockAlerts.checking){stockAlerts.checked=false;stockAlerts.enabled=false;stockAlerts.ready=false;}
   let h = '';
 
   // Anything the sheet does not have comes first here too.
   const attnCard = attentionCardHTML();
   if (attnCard) h += '<div class="section-title" style="margin-top:4px;">Needs your attention</div>' + attnCard;
+  h+='<div id="stockAlerts">'+stockAlertsHTML()+'</div>';
+  if(!stockAlerts.checked)setTimeout(refreshStockAlerts,0);
 
   // Sync status. Only a REFUSED entry is missing from the sheet; the other
   // kinds are notes about entries the sheet already holds.
@@ -10551,6 +10645,11 @@ document.addEventListener('click', (ev) => {
   const act = el.dataset.act;
 
   if (act === 'goto-ibapa') showTab('ibapa');
+  else if(act==='goto-alerts'){showTab('ibapa');$('stockAlertsHeading').scrollIntoView({block:'start'});}
+  else if(act==='stock-alert-on')enableStockAlerts();
+  else if(act==='stock-alert-off')disableStockAlerts();
+  else if(act==='stock-alert-test')testStockAlerts();
+  else if(act==='stock-alert-refresh')refreshStockAlerts();
   else if (act === 'home-sales'){
     stashBentaDraft();
     loadBentaForm(isDateStr(el.dataset.date)?el.dataset.date:todayStr());
@@ -11170,6 +11269,14 @@ try{ flagLegacyGcashQueue(); }catch(err){ console.error(err); }
 try{ pruneState(); persistState(); persistDrafts(); }catch(err){ console.error(err); }
 updateStatus();
 showTab('home');
+function openNotificationStock(){
+  showTab('ibapa');
+  const heading=$('stockHeading');if(heading)heading.scrollIntoView({block:'start'});
+}
+if(new URLSearchParams(location.search).get('view')==='stock')openNotificationStock();
+if('serviceWorker' in navigator)navigator.serviceWorker.addEventListener('message',event=>{
+  if(event.data && event.data.type==='open-stock')openNotificationStock();
+});
 (async () => {
   // Drain BEFORE bootstrap so the snapshot can't clobber queued edits.
   await drainQueue();

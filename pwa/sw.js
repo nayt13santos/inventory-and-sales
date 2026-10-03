@@ -9,9 +9,10 @@
    ============================================================ */
 'use strict';
 
-const VERSION = 'v2.31.0';
+const VERSION = 'v2.32.0';
 const SHELL_CACHE = 'octogo-shell-' + VERSION;
 const FONT_CACHE = 'octogo-fonts-v1';
+const PUSH_SETTINGS_CACHE = 'octogo-push-settings-v1';
 const SHELL = [
   './',
   './index.html',
@@ -34,7 +35,7 @@ self.addEventListener('activate', (event) => {
     const keys = await caches.keys();
     await Promise.all(
       keys
-        .filter((k) => k !== SHELL_CACHE && k !== FONT_CACHE)
+        .filter((k) => k !== SHELL_CACHE && k !== FONT_CACHE && k !== PUSH_SETTINGS_CACHE)
         .map((k) => caches.delete(k))
     );
     await self.clients.claim();
@@ -127,3 +128,59 @@ async function shellCacheFirst(req) {
     throw err;
   }
 }
+
+// Persistent read-only capability: survives worker suspension and app updates.
+// The shop's API write token is deliberately never stored in this worker.
+function pushSettingsURL(){return new URL('__stock_alert_settings__',self.registration.scope).href;}
+function validPushSettings(d){
+  return d && /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(d.apiUrl || '') &&
+    /^[A-Za-z0-9_-]{43}$/.test(d.id || '') && /^[a-f0-9]{64}$/.test(d.readToken || '');
+}
+self.addEventListener('message',event=>{
+  if(!event.data || event.data.type!=='stock-alert-settings')return;
+  const port=event.ports && event.ports[0];
+  event.waitUntil((async()=>{
+    try{
+      if(!event.source || !event.source.url || !event.source.url.startsWith(self.registration.scope))throw new Error('Unknown app');
+      const d=event.data.data;
+      if(d===null)await caches.delete(PUSH_SETTINGS_CACHE);
+      else{
+        if(!validPushSettings(d))throw new Error('Invalid registration');
+        const cache=await caches.open(PUSH_SETTINGS_CACHE);
+        await cache.put(pushSettingsURL(),new Response(JSON.stringify({apiUrl:d.apiUrl,id:d.id,readToken:d.readToken}),{headers:{'Content-Type':'application/json'}}));
+      }
+      if(port)port.postMessage({ok:true});
+    }catch(_){if(port)port.postMessage({ok:false});}
+  })());
+});
+self.addEventListener('push',event=>{
+  event.waitUntil((async()=>{
+    let notice={title:'Octogo stock alert',body:'Open Octogo to check your latest supply counts.'};
+    let timer;
+    try{
+      const cache=await caches.open(PUSH_SETTINGS_CACHE), saved=await cache.match(pushSettingsURL());
+      const d=saved?await saved.json():null;
+      if(!validPushSettings(d))throw new Error('Registration missing');
+      const controller=new AbortController();timer=setTimeout(()=>controller.abort(),10000);
+      const response=await fetch(d.apiUrl,{method:'POST',redirect:'follow',signal:controller.signal,
+        body:JSON.stringify({action:'pushNotice',payload:{id:d.id,readToken:d.readToken}})});
+      const result=await response.json();
+      if(response.ok && result.ok && result.data && typeof result.data.title==='string' && typeof result.data.body==='string')
+        notice={title:result.data.title.slice(0,100),body:result.data.body.slice(0,400)};
+    }catch(_){/* Show a useful alert even if the follow-up fetch is offline. */}
+    finally{clearTimeout(timer);}
+    await self.registration.showNotification(notice.title,{
+      body:notice.body,icon:new URL('icon-192.png',self.registration.scope).href,
+      tag:'octogo-stock',renotify:true,data:{view:'stock'}
+    });
+  })());
+});
+self.addEventListener('notificationclick',event=>{
+  event.notification.close();
+  event.waitUntil((async()=>{
+    const windows=await self.clients.matchAll({type:'window',includeUncontrolled:true});
+    const existing=windows.find(c=>c.url.startsWith(self.registration.scope));
+    if(existing){await existing.focus();existing.postMessage({type:'open-stock'});}
+    else await self.clients.openWindow(new URL('?view=stock',self.registration.scope).href);
+  })());
+});

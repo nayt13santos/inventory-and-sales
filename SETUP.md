@@ -176,18 +176,26 @@ Nothing to do — the app updates itself. When a new version is published, the n
 
 It deliberately **waits** if Mama is mid-entry: a half-typed day is never interrupted, and the update applies after she saves or the next time the app is opened. Nothing queued is ever lost across an update.
 
-To confirm which version a phone is on: **More → About**. Current release: **app 2.31.0**, **script 2.30.1**. The app opens on the Home dashboard. The separate photo reader remains at 2.29.0.
+To confirm which version a phone is on: **More → About**. Current release: **app 2.32.0**, **script 2.32.0**. The app opens on the Home dashboard. The separate photo reader remains at 2.29.0.
+
+### Low-stock phone notifications
+
+On each phone, open **More → Stock notifications → Turn on notifications**, allow the phone's prompt, then tap **Send a test notification**. On iPhone (iOS16.4+), add Octogo to the Home Screen and open it from that icon first. Android can use an updated Chrome. Turn off on one phone does not disable another phone.
+
+Alerts use saved stock records: one alert when an item becomes low, another if it runs out. Restocking above its reorder point resets the alert. Stock already low when enabling is visible on Home; future changes trigger notifications. Offline stock entries trigger alerts after syncing. Direct edits in the Sheet are checked at the next app sync. Delivery also depends on the phone's notification settings and connectivity.
+
+One-time backend setup: after pushing `Push.gs` and `PushCrypto.gs`, the owner may need to run `authorizeStockNotifications` in the Apps Script editor to authorize external requests. Initialize `configurePush` through the existing authenticated API with an OS-generated P-256 private key (32 bytes, base64url). Never put the private key in the app, sheet, repository, logs, or browser storage. The action is idempotent and returns only the public key. `pushConfig` reports readiness. No new sheet columns or `setupSheet` migration are needed.
 
 ## Updating by hand (if you skip the automation)
 
 The app has **two halves that must be updated separately** — the script in the sheet, and the files on the web host. A change to one usually needs the other, so do both. Takes about 5 minutes.
 
-Current versions: **script 2.29.0**, **app 2.29.0**. You can check what each phone is actually running under **More → About**.
+Current versions: **script 2.32.0**, **app 2.32.0**. You can check what each phone is actually running under **More → About**.
 
 ### 1. Update the script (in the sheet)
 
 1. Open the Sheet → **Extensions → Apps Script**.
-2. Select all the code in `Code.gs` and replace it with the new `apps-script/Code.gs`. Save (⌘S).
+2. Update `Code.gs`, `Push.gs`, `PushCrypto.gs`, and `appsscript.json` from `apps-script/`. Save (⌘S). The manifest explicitly allows the existing Sheets access and external requests for phone notification delivery.
 3. Run **`setupSheet`** once from the toolbar dropdown. It's safe to re-run — it only adds what's missing (new tabs, new seed rows) and never overwrites your data, your prices, or your token.
 4. **Publish the new version — this is the step people miss.** Editing the code does *nothing* to the live URL until you republish:
    **Deploy → Manage deployments** → click the ✏️ pencil on your existing deployment → **Version: New version** → **Deploy**.

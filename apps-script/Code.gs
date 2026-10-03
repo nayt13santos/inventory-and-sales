@@ -282,7 +282,7 @@
  *     need to be for a chosen nightly take and writes NOTHING.
  */
 
-var VERSION = '2.30.1';
+var VERSION = '2.32.0';
 var TZ = 'Asia/Manila';
 
 // ---------------------------------------------------------------------------
@@ -499,6 +499,10 @@ function doPost(e) {
        records it as exactly that. Trimmed hard: it is written into cells. */
     payload.enteredBy = asStr(body.enteredBy).slice(0, 40);
 
+    // A worker holds only a device-specific, read-only notification capability,
+    // never the token that can write the shop's financial records.
+    if (action === 'pushNotice') return jsonOut({ok:true, data:pushNotice_(payload)});
+
     var ss = SpreadsheetApp.getActive();
     var settings = readSettings(ss);
     var expectedToken = asStr(settings.token);
@@ -511,6 +515,21 @@ function doPost(e) {
 
     var data;
     switch (action) {
+      case 'pushConfig':
+        data = pushPublicConfig_(payload);
+        break;
+      case 'configurePush':
+        data = withLock(function () { return pushConfigure_(payload); });
+        break;
+      case 'savePushSubscription':
+        data = withLock(function () { return pushSubscribe_(ss, payload); });
+        break;
+      case 'removePushSubscription':
+        data = withLock(function () { return pushRemove_(payload); });
+        break;
+      case 'testPush':
+        data = withLock(function () { return pushTest_(payload); });
+        break;
       case 'ping':
         data = { version: VERSION };
         break;
@@ -571,6 +590,11 @@ function doPost(e) {
         break;
       default:
         throw new Error('Unknown action: "' + action + '".');
+    }
+    if (['saveDay','saveExpense','deleteExpense','saveStockCount','saveStockDelivery','saveStockItems','bootstrap'].indexOf(action) >= 0) {
+      // Notification failure must NEVER make a completed business save look
+      // refused. Failed sends stay retryable on the next stock update/sync.
+      try { pushCheck_(ss); } catch (pushErr) { Logger.log('Stock notification check failed; business records are saved.'); }
     }
     return jsonOut({ ok: true, data: data });
   } catch (err) {
