@@ -176,7 +176,7 @@ Nothing to do — the app updates itself. When a new version is published, the n
 
 It deliberately **waits** if Mama is mid-entry: a half-typed day is never interrupted, and the update applies after she saves or the next time the app is opened. Nothing queued is ever lost across an update.
 
-To confirm which version a phone is on: **More → About**. Current release: **app 2.29.0**, **script 2.29.0**.
+To confirm which version a phone is on: **More → About**. Current release: **app 2.30.0**, **script 2.29.0**. The cutoff and expense-entry update changes the phone app only.
 
 ## Updating by hand (if you skip the automation)
 
